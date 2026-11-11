@@ -4,7 +4,7 @@ import shutil,zipfile,struct,zlib
 
 ROOT=Path(__file__).resolve().parent.parent
 OUT=ROOT/'dist';OUT.mkdir(exist_ok=True)
-ARCHIVE=OUT/'文矩_3.1.0_Windows_免安装.zip'
+ARCHIVE=OUT/'文矩_3.2.0_Windows_免安装.zip'
 
 class ChineseZipInfo(zipfile.ZipInfo):
     def _encodeFilenameFlags(self):
@@ -17,7 +17,7 @@ def include(p):
     return True
 
 files=[p for name in ('runtime','core') for p in (ROOT/name).rglob('*') if p.is_file() and include(p)]
-files += [ROOT/n for n in ('文矩.exe','app.py','appearance.py','templates.py','preset_store.py','rule_schema.py','worker.py','Main.qml','Advanced.qml','AppearancePage.qml','使用说明.txt','README.md','requirements-windows.txt')]
+files += [ROOT/n for n in ('文矩.exe','app.py','appearance.py','templates.py','preset_store.py','rule_schema.py','worker.py','Main.qml','Advanced.qml','AppearancePage.qml','Opening.qml','TemplateHome.qml','使用说明.txt','README.md','requirements-windows.txt')]
 files += [p for p in (ROOT/'docs').glob('*.png')]
 assert all(p.is_file() for p in files)
 with zipfile.ZipFile(ARCHIVE,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=6) as z:

@@ -17,12 +17,13 @@ class Appearance(QObject):
     changed=Signal()
     def __init__(self,data,app):
         super().__init__();self.path=Path(data)/'appearance.json';self.app=app
-        self.state={'theme':'blue','font':'Microsoft YaHei UI' if __import__('sys').platform=='win32' else 'Noto Sans CJK SC','size':14}
+        self.state={'theme':'blue','font':'Microsoft YaHei UI' if __import__('sys').platform=='win32' else 'Noto Sans CJK SC','size':14,'intro':True}
         try:
             s=json.loads(self.path.read_text('utf-8'))
             if s.get('theme') in [t['id'] for t in THEMES]:self.state['theme']=s['theme']
             if isinstance(s.get('font'),str) and s['font'].strip():self.state['font']=s['font']
             if s.get('size') in (12,14,16,18):self.state['size']=s['size']
+            if isinstance(s.get('intro'),bool):self.state['intro']=s['intro']
         except (OSError,ValueError,TypeError):pass
         self.apply()
     @Property('QVariantList',constant=True)
@@ -35,6 +36,11 @@ class Appearance(QObject):
     def fontSize(self):return self.state['size']
     @Property(float,notify=changed)
     def scale(self):return self.state['size']/14
+    @Property(bool,notify=changed)
+    def showIntro(self):return self.state.get('intro',True)
+    @Slot(bool)
+    def setShowIntro(self,value):
+        self.state['intro']=value;atomic_json(self.path,self.state);self.changed.emit()
     @Property('QVariantMap',notify=changed)
     def colors(self):
         t=next(t for t in THEMES if t['id']==self.themeId)
@@ -66,6 +72,6 @@ class Appearance(QObject):
     @Slot(str,str,int)
     def setPreferences(self,theme,font,size):
         if theme not in [t['id'] for t in THEMES] or size not in (12,14,16,18) or not font.strip():return
-        self.state={'theme':theme,'font':font.strip(),'size':size};atomic_json(self.path,self.state);self.apply();self.changed.emit()
+        self.state.update({'theme':theme,'font':font.strip(),'size':size});atomic_json(self.path,self.state);self.apply();self.changed.emit()
     @Slot()
     def reset(self):self.setPreferences('blue','Microsoft YaHei UI' if __import__('sys').platform=='win32' else 'Noto Sans CJK SC',14)

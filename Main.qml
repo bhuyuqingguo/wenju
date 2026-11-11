@@ -7,7 +7,7 @@ ApplicationWindow {
     width: 1220; height: 820; minimumWidth: 1060; minimumHeight: 740
     visible: true; title: "文矩 · 文档格式整理"
     color: appearance.palette["#f4f6f9"]
-    property int page: 0
+    property int page: 2
     property string ink: appearance.palette["#22344a"]
     property string blue: appearance.palette["#245a83"]
     property string muted: appearance.palette["#7b8899"]
@@ -45,7 +45,7 @@ ApplicationWindow {
         else {bridge.selectTemplate(t.id);page=pendingPage;}
     }
     function preset(i) { let t=templates[i]; selectedPreset=i; prefix=t.prefix;suffix=t.suffix;pageFont=t.font;pageSize=t.size;spacing=t.spacing;alignment="底部居中";pageEnabled=true;pageUniform=true;commitPage(); }
-    Component.onCompleted: syncPage()
+    Component.onCompleted: {syncPage();opening.playing=startupAnimation;}
     onClosing: function(close) { if(bridge.busy) {close.accepted=false; closeNotice.open();} }
     Dialog {id:closeNotice; anchors.centerIn:parent;width:620;title:"文档正在整理";modal:true;standardButtons:Dialog.Ok
         Label {text:"请等待当前文档完成后再关闭。可先点击「停止后续任务」。"}}
@@ -86,6 +86,19 @@ ApplicationWindow {
         onAccepted:bridge.inferTemplate()
     }
 
+    Dialog{id:manageDialog;anchors.centerIn:parent;width:560;title:"管理模板";modal:true;standardButtons:Dialog.Close
+        ColumnLayout{width:520;spacing:16
+            Txt{text:"当前方案："+bridge.selectedName;Layout.fillWidth:true;elide:Text.ElideRight}
+            GridLayout{columns:2;Layout.fillWidth:true
+                Action{text:"导入模板";Layout.fillWidth:true;onClicked:{manageDialog.close();bridge.importTemplates();}}
+                Action{text:"导出当前方案";Layout.fillWidth:true;onClicked:bridge.exportTemplates(false)}
+                Action{text:"导出全部模板";Layout.fillWidth:true;onClicked:bridge.exportTemplates(true)}
+                Action{text:"从文档识别";Layout.fillWidth:true;enabled:!bridge.busy;onClicked:{manageDialog.close();inferConfirm.open();}}
+                Action{text:"另存当前方案";Layout.fillWidth:true;onClicked:{manageDialog.close();saveDialog.open();}}
+                Action{text:"删除当前模板";Layout.fillWidth:true;enabled:bridge.personal;onClicked:{manageDialog.close();deleteDialog.open();}}
+            }
+        }
+    }
     component Txt: Text { color:win.ink; font.family:appearance.fontFamily; font.pixelSize:Math.round(14*appearance.scale); renderType:Text.NativeRendering }
     component Action: Button {
         id: control
@@ -118,16 +131,16 @@ ApplicationWindow {
         Column {
             x:14;y:150;width:190;spacing:10
             Repeater {
-                model:["文档整理", "页码设计", "模板书架", "高级设置", "外观设置"]
+                model:[{title:"选择模板",page:2,icon:"▥"},{title:"文档整理",page:0,icon:"▤"},{title:"设置",page:3,icon:"≡"}]
                 delegate: Rectangle {
-                    required property int index; required property string modelData
-                    objectName:"nav_"+index; width:190;height:48*appearance.scale;radius:8;color:win.page===index?appearance.palette["#2c526f"]:"transparent"
-                    Rectangle {visible:win.page===index;x:0;y:15;width:3;height:18;radius:2;color:appearance.palette["#e6b35f"]}
+                    required property int index; required property var modelData
+                    objectName:"nav_"+modelData.page; width:190;height:48*appearance.scale;radius:8;color:(win.page===modelData.page||(modelData.page===3&&(win.page===1||win.page===4)))?appearance.palette["#2c526f"]:"transparent"
+                    Rectangle {visible:(win.page===modelData.page||(modelData.page===3&&(win.page===1||win.page===4)));x:0;y:15;width:3;height:18;radius:2;color:appearance.palette["#e6b35f"]}
                     Row {x:19;anchors.verticalCenter:parent.verticalCenter;spacing:16
-                        Txt {text:index===0?"▤":index===1?"#":index===2?"▥":index===3?"≡":"◐";color:win.page===index?appearance.colors.navText:appearance.palette["#a6bbcd"];font.pixelSize:Math.round(20*appearance.scale)}
-                        Txt {text:modelData;color:win.page===index?appearance.colors.navText:appearance.palette["#a6bbcd"];font.weight:Font.Medium}
+                        Txt {text:modelData.icon;color:(win.page===modelData.page||(modelData.page===3&&(win.page===1||win.page===4)))?appearance.colors.navText:appearance.palette["#a6bbcd"];font.pixelSize:Math.round(20*appearance.scale)}
+                        Txt {text:modelData.title;color:(win.page===modelData.page||(modelData.page===3&&(win.page===1||win.page===4)))?appearance.colors.navText:appearance.palette["#a6bbcd"];font.weight:Font.Medium}
                     }
-                    MouseArea {anchors.fill:parent;cursorShape:Qt.PointingHandCursor;onClicked:win.page=index}
+                    MouseArea {anchors.fill:parent;cursorShape:Qt.PointingHandCursor;onClicked:win.page=modelData.page}
                 }
             }
             Txt {x:19;topPadding:22;text:"本地工作空间";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
@@ -145,7 +158,7 @@ ApplicationWindow {
         }
         Column {x:30;anchors.bottom:parent.bottom;anchors.bottomMargin:28;spacing:9
             Row {spacing:7;Rectangle{width:6;height:6;radius:3;color:appearance.palette["#8cbaa8"];anchors.verticalCenter:parent.verticalCenter} Txt{text:"离线运行 · 文档不上传";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale)}}
-            Txt {text:"3.1  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
+            Txt {text:"3.2  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
             Txt {text:"使用帮助 ↗";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale);MouseArea{anchors.fill:parent;cursorShape:Qt.PointingHandCursor;onClicked:bridge.help()}}
         }
     }
@@ -156,14 +169,21 @@ ApplicationWindow {
         RowLayout {
             Layout.fillWidth:true
             Column {spacing:7
-                Txt {text:page===0?"文档整理":page===1?"页码设计":page===2?"模板书架":page===3?"高级设置":"外观设置";font.pixelSize:Math.round(28*appearance.scale);font.weight:Font.DemiBold}
+                Txt {text:page===0?"文档整理":page===1?"页码设计":page===2?"选择模板":page===3?"设置 · 格式规则":"设置 · 外观";font.pixelSize:Math.round(28*appearance.scale);font.weight:Font.DemiBold}
                 Txt {text:page===0?"选好格式，剩下的交给文矩。":page===1?"从一个好用的样式开始，让细节恰到好处。":page===2?"为不同的工作，准备恰好的格式。":page===3?"让每一项格式，都符合你的要求。":"文矩的另一面，随你喜欢。";color:muted;font.pixelSize:Math.round(13*appearance.scale)}
             }
             Item {Layout.fillWidth:true}
-            Action {visible:page<4;text:page===0?"体验样例":"另存为模板";onClicked:{win.contentItem.forceActiveFocus();if(page===0)bridge.sample();else saveDialog.open();}}
-            Action {visible:page>0&&page<4;text:"保存修改";primary:true;enabled:bridge.personal&&bridge.dirty;onClicked:{win.contentItem.forceActiveFocus();bridge.saveTemplate();}}
+            Action {visible:page===2;text:"管理模板";onClicked:manageDialog.open()}
+            Action {visible:page!==2&&page<4;text:page===0?"体验样例":"另存为模板";onClicked:{win.contentItem.forceActiveFocus();if(page===0)bridge.sample();else saveDialog.open();}}
+            Action {visible:(page===1||page===3);text:"保存修改";primary:true;enabled:bridge.personal&&bridge.dirty;onClicked:{win.contentItem.forceActiveFocus();bridge.saveTemplate();}}
         }
 
+        RowLayout{visible:page===1||page===3||page===4;Layout.fillWidth:true;spacing:10
+            Action{text:"格式规则";primary:page===3;onClicked:page=3}
+            Action{text:"页码设计";primary:page===1;onClicked:page=1}
+            Action{text:"外观与皮肤";primary:page===4;onClicked:page=4}
+            Item{Layout.fillWidth:true}
+        }
         Item {
             Layout.fillWidth:true;Layout.fillHeight:true
             ColumnLayout {
@@ -281,46 +301,7 @@ ApplicationWindow {
                 }
                 RowLayout {Layout.fillWidth:true;Txt{text:"数字自动随页变化，无需手动输入。";color:muted;font.pixelSize:Math.round(12*appearance.scale)}Item{Layout.fillWidth:true}Action{text:"返回文档整理 →";primary:true;implicitWidth:166;onClicked:page=0}}
             }
-            ColumnLayout {
-                anchors.fill:parent;visible:page===2;spacing:18
-                Rectangle {
-                    Layout.fillWidth:true;Layout.preferredHeight:92;radius:12;color:appearance.palette["#e8eef5"]
-                    Column {x:24;anchors.verticalCenter:parent.verticalCenter;spacing:8
-                        Txt{text:bridge.templates.length+" 套模板，选好即可开始";font.pixelSize:Math.round(20*appearance.scale);font.weight:Font.DemiBold}
-                        Txt{text:"正文 · 标题 · 表格 · 图表题注 · 页码，统一配置。";color:muted;font.pixelSize:Math.round(12*appearance.scale)}
-                    }
-                    Txt{anchors.right:parent.right;anchors.rightMargin:28;anchors.verticalCenter:parent.verticalCenter;text:"Aa";font.family:"Georgia";font.pixelSize:Math.round(50*appearance.scale);color:appearance.palette["#9eafbf"]}
-                }
-                RowLayout{Layout.fillWidth:true;spacing:8
-                    Action{text:"导入模板";implicitWidth:110;onClicked:bridge.importTemplates()}
-                    Action{text:"导出当前";implicitWidth:110;onClicked:bridge.exportTemplates(false)}
-                    Action{text:"导出全部";implicitWidth:110;onClicked:bridge.exportTemplates(true)}
-                    Action{text:"从文档识别";implicitWidth:120;enabled:!bridge.busy;onClicked:inferConfirm.open()}
-                    Item{Layout.fillWidth:true}
-                    Action{text:"删除当前";implicitWidth:110;enabled:bridge.personal;onClicked:deleteDialog.open()}
-                }
-                RowLayout {spacing:8
-                    Repeater {model:["全部","科技研发","科研写作","公文办公","原版预设","我的模板"]
-                        delegate:Action{required property string modelData;text:modelData;primary:win.category===modelData;implicitWidth:100;implicitHeight:34;onClicked:win.category=modelData}
-                    }
-                }
-                ScrollView {Layout.fillWidth:true;Layout.fillHeight:true;clip:true;contentWidth:availableWidth
-                    GridLayout {width:parent.width;columns:3;columnSpacing:14;rowSpacing:14
-                        Repeater {model:bridge.templates
-                            delegate:Rectangle {required property var modelData;Layout.fillWidth:true;Layout.preferredHeight:205*appearance.scale;visible:win.category==="全部"||win.category===modelData.category;radius:10;color:appearance.colors.surface;border.color:win.templateId===modelData.id?win.blue:appearance.palette["#dfe6ee"]
-                                ColumnLayout {anchors.fill:parent;anchors.margins:18;spacing:10
-                                    RowLayout{Layout.fillWidth:true;Txt{text:modelData.category;color:win.muted;font.pixelSize:Math.round(10*appearance.scale)}Item{Layout.fillWidth:true}Txt{text:win.templateId===modelData.id?"使用中":"";color:win.blue;font.pixelSize:Math.round(10*appearance.scale)}}
-                                    Txt{text:modelData.name;font.pixelSize:Math.round(17*appearance.scale);font.weight:Font.DemiBold;Layout.fillWidth:true;elide:Text.ElideRight}
-                                    Txt{text:modelData.desc;wrapMode:Text.WordWrap;Layout.fillWidth:true;Layout.fillHeight:true;color:win.muted;font.pixelSize:Math.round(11*appearance.scale)}
-                                    Txt{text:modelData.font+"  "+modelData.size+" 磅 · 行距 "+modelData.line+" 磅";font.pixelSize:Math.round(10*appearance.scale);color:win.muted}
-                                    RowLayout{Layout.fillWidth:true;Action{text:"使用模板";Layout.fillWidth:true;implicitWidth:80;implicitHeight:34;onClicked:win.chooseTemplate(modelData,0)}Action{text:"编辑";implicitWidth:70;implicitHeight:34;onClicked:win.chooseTemplate(modelData,3)}}
-                                }
-                            }
-                        }
-                    }
-                }
-                Txt{text:"场景模板是可调整的排版起点；正式公文及投稿请复核单位或期刊要求。";font.pixelSize:Math.round(11*appearance.scale);color:muted}
-            }
+            TemplateHome{anchors.fill:parent;visible:page===2;onUseTemplate:function(entry,destination){win.chooseTemplate(entry,destination);}}
             ColumnLayout{anchors.fill:parent;visible:page===3;spacing:14
                 RowLayout{Layout.fillWidth:true
                     Txt{text:bridge.selectedName+(bridge.dirty?" · 已修改":"");font.pixelSize:Math.round(14*appearance.scale);color:win.blue;Layout.fillWidth:true;elide:Text.ElideRight}
@@ -337,4 +318,5 @@ ApplicationWindow {
         Rectangle {Layout.fillWidth:true;height:1;color:appearance.palette["#dfe5ed"]}
         RowLayout{Layout.fillWidth:true;Rectangle{width:6;height:6;radius:3;color:bridge.busy?appearance.palette["#c79a46"]:appearance.palette["#5a9684"]}Txt{text:bridge.status;color:muted;font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}Txt{text:"WENJU";color:appearance.palette["#a3adba"];font.pixelSize:Math.round(10*appearance.scale);font.letterSpacing:2}}
     }
+    Opening{id:opening;anchors.fill:parent;z:1000;onFinished:win.contentItem.forceActiveFocus()}
 }

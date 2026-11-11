@@ -50,7 +50,18 @@ class Bridge(QObject):
     def saved(self): return self.settings
     @Property('QVariantList', notify=libraryChanged)
     def templates(self):
-        return [{**{k:v for k,v in t.items() if k!='rules'},'font':t['rules']['字体']['正文'],'size':t['rules']['正文']['字号'],'line':t['rules']['正文']['行距值']} for t in self.store.items()]
+        rows=[]
+        for t in self.store.items():
+            r=t['rules'];p=r['页码'];body=r['正文'];size=body['字号']
+            heading={'汉字顿号':'一、（一）','多级数字':'1 / 1.1','第X章':'第一章','数字点':'1.'}.get(r['标题']['一级']['格式'],r['标题']['一级']['格式'])
+            page=p['左侧字符']+'1'+p['右侧字符'] if p['启用'] else '无页码'
+            rows.append({**{k:v for k,v in t.items() if k!='rules'},'font':r['字体']['正文'],'size':size,'line':body['行距值'],
+                'bodySummary':r['字体']['正文']+' · '+(str(size)+' 磅' if isinstance(size,(float,int)) else size),
+                'lineSummary':body['行距类型']+' '+str(body['行距值'])+(' 倍' if body['行距类型']=='多倍' else ' 磅' if body['行距类型'] in ('固定值','最小值') else ''),
+                'headingSummary':heading+' · '+str(r['标题']['级数'])+' 级',
+                'pageSummary':page+' · '+p['位置'].replace('底部','') if p['启用'] else page,
+                'marginSummary':'上 '+str(r['页面']['上边距'])+' / 下 '+str(r['页面']['下边距'])+' / 左 '+str(r['页面']['左边距'])+' / 右 '+str(r['页面']['右边距'])+' cm'})
+        return rows
     @Property(str,notify=rulesChanged)
     def selectedId(self):return self.store.selected
     @Property(str,notify=rulesChanged)
@@ -313,11 +324,37 @@ bridge = Bridge()
 engine = QQmlApplicationEngine()
 engine.rootContext().setContextProperty('bridge',bridge)
 engine.rootContext().setContextProperty('appearance',appearance)
+engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro and not any(a in sys.argv for a in ('--smoke','--capture','--capture-themes')))
 engine.load(QUrl.fromLocalFile(str(ROOT/'Main.qml')))
 if not engine.rootObjects(): sys.exit(1)
 window = engine.rootObjects()[0]
 incoming=[arg for arg in sys.argv[1:] if not arg.startswith('--') and Path(arg).is_file()]
 if incoming:bridge.add(incoming)
+if '--test-opening' in sys.argv:
+    from PySide6.QtTest import QTest
+    from PySide6.QtCore import QPoint
+    before=copy.deepcopy(bridge.store.rules)
+    def opening_capture():
+        assert window.property('page')==2
+        o=window.findChild(QObject,'openingAnimation')
+        assert o.property('playing')
+        window.grabWindow().save(str(ROOT/'开场动画预览.png'))
+    def opening_finished():
+        o=window.findChild(QObject,'openingAnimation')
+        if o.property('playing'):
+            QTimer.singleShot(100,opening_finished)
+            return
+        o.setProperty('playing',True)
+        QTimer.singleShot(200,opening_skip)
+    def opening_skip():
+        QTest.mouseClick(window,Qt.LeftButton,Qt.NoModifier,QPoint(window.width()-65,45))
+        assert not window.findChild(QObject,'openingAnimation').property('playing')
+        assert bridge.store.rules==before
+        print('PASS: opening animation completes, skip works, template homepage first, document rules unchanged')
+        app.quit()
+    QTimer.singleShot(1350,opening_capture)
+    QTimer.singleShot(2100,opening_finished)
+    QTimer.singleShot(8000,lambda:app.exit(2))
 if '--capture-themes' in sys.argv:
     theme_queue=list(appearance.themes)
     original_rules=copy.deepcopy(bridge.store.rules)
@@ -387,6 +424,9 @@ if '--smoke' in sys.argv:
         return item
     def begin_test():
         bridge.selectTemplate('unit')
+        assert window.property('page')==2
+        click_item('useTemplate_research')
+        assert bridge.selectedId=='research' and window.property('page')==0
         click_item('nav_3')
         assert window.property('page')==3
         later(edit_field)

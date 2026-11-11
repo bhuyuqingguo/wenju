@@ -50,6 +50,10 @@ ColumnLayout {
         }
     }
     RowLayout{Layout.fillWidth:true
+        Switch{text:"启动时显示开场动画";checked:appearance.showIntro;font.family:appearance.fontFamily;onClicked:appearance.setShowIntro(checked)}
+        Item{Layout.fillWidth:true}
+    }
+    RowLayout{Layout.fillWidth:true
         Text{text:"自动保存 · 即时生效";color:appearance.colors.muted;font.pixelSize:Math.round(12*appearance.scale);font.family:appearance.fontFamily;Layout.fillWidth:true}
         Button{text:"恢复默认外观";implicitHeight:42*appearance.scale;font.family:appearance.fontFamily;font.pixelSize:Math.round(13*appearance.scale);onClicked:appearance.reset()}
     }

@@ -21,4 +21,6 @@ with tempfile.TemporaryDirectory(prefix='wenju-look-') as tmp:
     a.setPreferences('blue','',14);assert a.state==old
     a.setPreferences('blue','Arial',90);assert a.state==old
     a.reset();assert a.themeId=='blue' and a.fontSize==14
+    a.setShowIntro(False);a.setPreferences('jade','Arial',16)
+    assert not Appearance(tmp,app).showIntro
 print('PASS: 5 skins x 4 UI sizes, persistence, validation, reset, no document rule changes')
