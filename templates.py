@@ -1,5 +1,6 @@
 """Editable scenario presets. These are house styles, not certified standards."""
 import copy
+from template_library import extra_catalog, apply_profile
 
 DEFAULT_TEMPLATE = 'wudi-official'
 
@@ -19,6 +20,8 @@ CATALOG = [
     dict(id='brief',name='工作简报',category='公文办公',desc='更紧凑的阅读节奏，适合工作动态、阶段总结和短报告。',font='宋体',size=12,line=21,number='汉字顿号',page='1'),
 ]
 
+CATALOG.extend(extra_catalog())
+
 def apply_template(base, name):
     if name==DEFAULT_TEMPLATE:return apply_official_photo(base)
     r=copy.deepcopy(base)
@@ -37,6 +40,7 @@ def apply_template(base, name):
     # Do not modify technical symbols and percentages in scientific manuscripts.
     if t['category'] in ('科技研发','科研写作'):r['标点']['启用']=False
     if t['id'] in ('minutes','notice','brief','official'):r['题注']['缺失时自动补编号']=False
+    if 'profile' in t:r=apply_profile(r,t)
     return r
 
 

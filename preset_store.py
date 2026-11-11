@@ -25,13 +25,13 @@ def atomic_json(path, value):
 def options_for(path):
     opt=OPTIONS.get(path)
     if opt is not None:return opt
-    if path.endswith('字号'):return list(SIZES)
+    if path.endswith('字号') and path!='红头.发文字号':return list(SIZES)
     return None
 
 def checked(path,value,default):
     key=path.split('.')[-1]
     if isinstance(value,str) and any(ord(c)<32 and c not in '\t\r\n' for c in value):raise ValueError(path+' 包含非法控制字符')
-    if key.endswith('字号'):
+    if (key.endswith('字号') and key!='发文字号'):
         if isinstance(value,str) and value in SIZES:return value
         if isinstance(value,bool):raise ValueError(path+' 必须是字号名或磅数')
         try:v=float(value)
@@ -47,6 +47,7 @@ def checked(path,value,default):
         if not math.isfinite(value):raise ValueError(path+' 必须是有限数值')
         lo=-100 if ('缩进' in key or key=='字间距') else 0
         hi=2000
+        if key=='横线粗细':lo,hi=0.25,6
         if key in ('上边距','下边距','左边距','右边距','页眉距','页脚距'):hi=30
         if not lo<=value<=hi:raise ValueError(f'{path} 范围为 {lo}～{hi}')
         if path=='标题.级数':
@@ -100,8 +101,8 @@ def fields(rules,section):
         if key.startswith('_') or isinstance(value,dict):continue
         path=section+'.'+key;opt=options_for(path)
         kind='bool' if isinstance(value,bool) else 'array' if isinstance(value,list) else 'number' if isinstance(value,(int,float)) else 'text'
-        editable=key.endswith('字号') or key.endswith('字体') or (key=='字体' or section=='字体' and key!='模式' or key=='中文字体')
-        if opt is None and editable and not key.endswith('字号'):opt=FONT_CHOICES
+        editable=(key.endswith('字号') and key!='发文字号') or key.endswith('字体') or (key=='字体' or section=='字体' and key!='模式' or key=='中文字体')
+        if opt is None and editable and not (key.endswith('字号') and key!='发文字号'):opt=FONT_CHOICES
         if opt is not None:kind='choice'
         values=list(opt) if opt is not None else []
         labels=list(opt.values()) if isinstance(opt,dict) else [str(v) for v in values]
@@ -117,7 +118,7 @@ class PresetStore:
         for item in CATALOG:
             rules=apply_template(BASE,item['id'])
             a,b={'1':('',''),'— 1 —':('— ',' —'),'—1—':('—','—'),'第 1 页':('第 ',' 页')}[item['page']]
-            rules['页码'].update({'左侧字符':a,'右侧字符':b,'统一字体':True,'字体':'Times New Roman' if not a else '宋体','中文字体':'宋体','起始位置':'全文' if item['category']=='公文办公' else '目录后'})
+            rules['页码'].update({'左侧字符':a,'右侧字符':b,'统一字体':True,'字体':'Times New Roman' if not a else '宋体','中文字体':'宋体','起始位置':'全文' if item['category'] in ('公文办公','红头文件') else '目录后'})
             self.builtins[item['id']]={**item,'rules':rules,'builtin':True}
         for i,path in enumerate(sorted((ROOT/'core/预设').glob('*.json'))):
             item={'id':'legacy-'+str(i),'name':'原版 · '+path.stem,'category':'原版预设','desc':'完整保留 2.1.0 随包规则，可编辑后另存。','builtin':True,'rules':normalize(json.loads(path.read_text('utf-8-sig')))}

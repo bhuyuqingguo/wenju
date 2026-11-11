@@ -8,6 +8,8 @@ ApplicationWindow {
     visible: true; title: "文矩 · 文档格式整理"
     color: appearance.palette["#f4f6f9"]
     property int page: 2
+    onPageChanged: if(appearance.motion)pageReveal.restart()
+    NumberAnimation {id:pageReveal;target:pageArea;property:"opacity";from:0.35;to:1;duration:180;easing.type:Easing.OutCubic}
     property string ink: appearance.palette["#22344a"]
     property string blue: appearance.palette["#245a83"]
     property string muted: appearance.palette["#7b8899"]
@@ -104,6 +106,8 @@ ApplicationWindow {
         id: control
         property bool primary: false
         implicitHeight:42*appearance.scale; implicitWidth:140
+        scale:down?0.97:1
+        Behavior on scale {NumberAnimation{duration:appearance.motion?100:0}}
         leftPadding:18;rightPadding:18
         contentItem: Txt {text:control.text;color:control.primary?appearance.colors.onAccent:win.blue;horizontalAlignment:Text.AlignHCenter;verticalAlignment:Text.AlignVCenter;font.pixelSize:Math.round(13*appearance.scale);font.weight:Font.DemiBold}
         background: Rectangle {radius:8;color:control.primary?(control.hovered?appearance.palette["#316b97"]:win.blue):(control.hovered?appearance.palette["#e9eff6"]:appearance.colors.surface);border.color:control.primary?win.blue:appearance.palette["#dce3eb"];opacity:control.enabled?1:0.5}
@@ -158,7 +162,7 @@ ApplicationWindow {
         }
         Column {x:30;anchors.bottom:parent.bottom;anchors.bottomMargin:28;spacing:9
             Row {spacing:7;Rectangle{width:6;height:6;radius:3;color:appearance.palette["#8cbaa8"];anchors.verticalCenter:parent.verticalCenter} Txt{text:"离线运行 · 文档不上传";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale)}}
-            Txt {text:"3.2.1  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
+            Txt {text:"3.3.0  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
             Txt {text:"使用帮助 ↗";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale);MouseArea{anchors.fill:parent;cursorShape:Qt.PointingHandCursor;onClicked:bridge.help()}}
         }
     }
@@ -184,7 +188,7 @@ ApplicationWindow {
             Action{text:"外观与皮肤";primary:page===4;onClicked:page=4}
             Item{Layout.fillWidth:true}
         }
-        Item {
+        Item {id:pageArea
             Layout.fillWidth:true;Layout.fillHeight:true
             ColumnLayout {
                 anchors.fill:parent;spacing:18;visible:page===0
@@ -301,7 +305,7 @@ ApplicationWindow {
                 }
                 RowLayout {Layout.fillWidth:true;Txt{text:"数字自动随页变化，无需手动输入。";color:muted;font.pixelSize:Math.round(12*appearance.scale)}Item{Layout.fillWidth:true}Action{text:"返回文档整理 →";primary:true;implicitWidth:166;onClicked:page=0}}
             }
-            TemplateHome{anchors.fill:parent;visible:page===2;onUseTemplate:function(entry,destination){win.chooseTemplate(entry,destination);}}
+            TemplateHome{anchors.fill:parent;visible:page===2;onUseTemplate:function(entry,destination){win.chooseTemplate(entry,destination);if(entry.redhead)bridge.setSection("红头");}}
             ColumnLayout{anchors.fill:parent;visible:page===3;spacing:14
                 RowLayout{Layout.fillWidth:true
                     Txt{text:bridge.selectedName+(bridge.dirty?" · 已修改":"");font.pixelSize:Math.round(14*appearance.scale);color:win.blue;Layout.fillWidth:true;elide:Text.ElideRight}

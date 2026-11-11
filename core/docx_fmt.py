@@ -443,6 +443,9 @@ class Formatter:
         st, pp, rp = ensure("CoverInfo", "封面落款")
         apply_para_fmt(pp, cv["落款"]); apply_run_fmt(rp, cv["落款"], F["封面落款"], west)
         reorder(pp, PPR_ORDER); reorder(rp, RPR_ORDER)
+        if self.R.get("红头", {}).get("启用"):
+            st, pp, rp = ensure("WenJuLetterhead", "文矩红头")
+            ET.SubElement(pp, q("keepNext"))
         official = self.R.get("公文", {})
         if official.get("启用"):
             for sid, name, prefix, align in (("OfficialTitle", "公文题目", "题目", "center"), ("SecurityMark", "密级", "密级", "left")):
@@ -502,6 +505,7 @@ class Formatter:
 
     def classify(self, p, prev_p, next_is_table, prev_has_img):
         sid = style_id(p); txt = para_text(p).strip()
+        if sid == "WenJuLetterhead": return "keep"
         if id(p) in self.toc_ids or self.RE_TOC_TITLE.match(txt) or self.is_toc_para(p): return "keep"
         if not txt and not has_image(p): return "empty"
         if has_image(p): return "figure"
@@ -748,6 +752,35 @@ class Formatter:
             set_attr(pn, "fmt", "decimal")
             reorder(sp, SECT_ORDER)
             self.note("页码：挂接页脚的节数")
+
+    def add_letterhead(self, body):
+        cfg = self.R.get("红头", {})
+        if not cfg.get("启用"): return
+        if not cfg.get("机关名称", "").strip():
+            raise ValueError("请先在设置 → 红头中填写机关名称")
+        # Reprocessing our own output replaces the existing marked block.
+        for p in list(body):
+            if p.tag == q("p") and style_id(p) == "WenJuLetterhead": body.remove(p)
+        def line(text, font, size, red=False, border=False):
+            p = ET.Element(q("p")); pp = ET.SubElement(p,q("pPr"))
+            ET.SubElement(pp,q("pStyle"),{q("val"):"WenJuLetterhead"})
+            ET.SubElement(pp,q("keepNext"))
+            if border:
+                borders=ET.SubElement(pp,q("pBdr"))
+                ET.SubElement(borders,q("bottom"),{q("val"):"single",q("sz"):str(max(2,min(48,round(float(cfg["横线粗细"])*8)))),q("color"):"C00000",q("space"):"8"})
+            ET.SubElement(pp,q("spacing"),{q("before"):"0",q("after"):"240",q("line"):"360",q("lineRule"):"auto"})
+            ET.SubElement(pp,q("jc"),{q("val"):"center"})
+            run=ET.SubElement(p,q("r"));rp=ET.SubElement(run,q("rPr"))
+            set_fonts(rp,font,font);set_size(rp,size)
+            ET.SubElement(rp,q("color"),{q("val"):"C00000" if red else "000000"})
+            reorder(pp,PPR_ORDER);reorder(rp,RPR_ORDER)
+            ET.SubElement(run,q("t"),{"{http://www.w3.org/XML/1998/namespace}space":"preserve"}).text=text
+            return p
+        org=line(cfg["机关名称"].strip(),cfg["机关字体"],cfg["机关字号"],True)
+        meta=cfg.get("发文字号","").strip()
+        if cfg.get("签发人","").strip():meta += "    签发人："+cfg["签发人"].strip()
+        body.insert(0,org);body.insert(1,line(meta,"仿宋",16,border=True))
+        self.note("红头标识生成数")
 
     def _add_footer_part(self, items, N):
         font = N.get("字体", "宋体")
@@ -1140,6 +1173,7 @@ def process_file(src, rules):
     fm.do_styles(sty_root)
     fm.do_sections(body)
     fm.process_body(body)
+    fm.add_letterhead(body)
     fm.do_page_numbers(body, items)
     items["word/document.xml"] = serialize(doc_root, doc_tag)
     sty_bytes = serialize(sty_root, sty_tag)

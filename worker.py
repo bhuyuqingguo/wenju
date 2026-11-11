@@ -17,11 +17,14 @@ def execute(job):
         return {'ok':True,'rules':normalize(rules),'notes':notes}
     if job.get('action')=='environment':
         import fontembed, platform, shutil
+        from platform_support import data_directory
         rules=job['rules']
         dirs=docx_fmt.paths.font_dirs(rules['字体嵌入']['字体目录'])
         index=fontembed.index_fonts(fontembed.font_dirs(dirs))
-        lines=['文矩环境检测',f'系统：{platform.system()} {platform.machine()}',f'Python：{platform.python_version()}',f'已识别字体家族：{len(index)}']
+        lines=['文矩环境检测',f'系统：{platform.system()} {platform.machine()}',f'Python：{platform.python_version()}',f'libc：{platform.libc_ver()}',f'数据目录：{data_directory(ROOT)}',f'已识别字体家族：{len(index)}']
         fonts={v for k,v in rules['字体'].items() if not k.startswith('_') and k!='模式'}|{rules['页码']['字体'],rules['页码']['中文字体']}
+        for group in ('公文','红头'):
+            if rules.get(group,{}).get('启用'):fonts.update(v for k,v in rules[group].items() if k.endswith('字体'))
         for font in sorted(fonts):lines.append(('可用：' if fontembed.find_font(index,font) else '未找到：')+font)
         lines.append('LibreOffice：'+(shutil.which('soffice') or shutil.which('libreoffice') or '未在 PATH 中发现'))
         if sys.platform.startswith('win'):

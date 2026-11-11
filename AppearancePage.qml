@@ -50,6 +50,7 @@ ColumnLayout {
         }
     }
     RowLayout{Layout.fillWidth:true
+        Switch{text:"界面动效";checked:appearance.motion;onClicked:appearance.setMotion(checked)}
         Switch{text:"启动时显示开场动画";checked:appearance.showIntro;font.family:appearance.fontFamily;onClicked:appearance.setShowIntro(checked)}
         Item{Layout.fillWidth:true}
     }

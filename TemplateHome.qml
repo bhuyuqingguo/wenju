@@ -4,10 +4,25 @@ import QtQuick.Layouts
 
 ColumnLayout {
     id: home
+    objectName:"templateHome"
+    component PageButton: Button {
+        id:control
+        implicitHeight:38*appearance.scale;implicitWidth:88*appearance.scale
+        scale:down?0.97:1
+        Behavior on scale {NumberAnimation{duration:appearance.motion?100:0}}
+        contentItem:Text{text:control.text;font.family:appearance.fontFamily;font.pixelSize:12*appearance.scale;color:control.enabled?appearance.colors.accent:appearance.colors.muted;horizontalAlignment:Text.AlignHCenter;verticalAlignment:Text.AlignVCenter}
+        background:Rectangle{radius:8;color:control.hovered?appearance.colors.soft:appearance.colors.surface;border.color:appearance.colors.line;opacity:control.enabled?1:0.5}
+    }
     signal useTemplate(var entry, int destination)
     property string category:"全部"
     property string query:""
     property var filteredTemplates:bridge.templates.filter(t=>(category==="全部"||category===t.category)&&(!query||(t.name+t.desc+t.bodySummary).toLowerCase().includes(query)))
+    property int pageIndex: 0
+    property int pageSize: 9
+    property var categories: ["全部"].concat([...new Set(bridge.templates.map(t=>t.category))])
+    onCategoryChanged: pageIndex=0
+    onQueryChanged: pageIndex=0
+    onFilteredTemplatesChanged: if(pageIndex*pageSize>=filteredTemplates.length)pageIndex=0
     spacing:16
     Rectangle {Layout.fillWidth:true;Layout.preferredHeight:104;radius:12;color:appearance.colors.soft
         Column {x:24;anchors.verticalCenter:parent.verticalCenter;spacing:10
@@ -16,24 +31,34 @@ ColumnLayout {
         }
         Text{anchors.right:parent.right;anchors.rightMargin:26;anchors.verticalCenter:parent.verticalCenter;text:bridge.templates.length+" 套\n可用模板";horizontalAlignment:Text.AlignRight;color:appearance.colors.accent;font.family:appearance.fontFamily;font.pixelSize:Math.round(17*appearance.scale);lineHeight:1.4}
     }
-    RowLayout {Layout.fillWidth:true;spacing:8
-        Repeater{model:["全部","科技研发","科研写作","公文办公","原版预设","我的模板"]
-            delegate:Button {required property string modelData;text:modelData;implicitHeight:36*appearance.scale;implicitWidth:86*appearance.scale;font.family:appearance.fontFamily;font.pixelSize:Math.round(12*appearance.scale)
-                contentItem:Text{text:parent.text;color:home.category===modelData?appearance.colors.onAccent:appearance.colors.ink;font:parent.font;horizontalAlignment:Text.AlignHCenter;verticalAlignment:Text.AlignVCenter}
-                background:Rectangle{radius:7;color:home.category===modelData?appearance.colors.accent:appearance.colors.surface;border.color:appearance.colors.line}
-                onClicked:home.category=modelData
+    RowLayout {Layout.fillWidth:true;spacing:12
+        ComboBox {id:categoryChoice;objectName:"templateCategory";model:home.categories;Layout.preferredWidth:210*appearance.scale;implicitHeight:38*appearance.scale;font.family:appearance.fontFamily;font.pixelSize:14*appearance.scale;onActivated:home.category=currentText
+            background:Rectangle{radius:8;color:appearance.colors.surface;border.color:categoryChoice.activeFocus?appearance.colors.accent:appearance.colors.line}
+            contentItem:Text{text:categoryChoice.displayText;leftPadding:14;rightPadding:32;verticalAlignment:Text.AlignVCenter;color:appearance.colors.ink;font:categoryChoice.font}
+            indicator:Text{text:"⌄";x:categoryChoice.width-28;anchors.verticalCenter:parent.verticalCenter;color:appearance.colors.accent;font.pixelSize:20}
+            delegate:ItemDelegate{required property var modelData;required property int index;width:categoryChoice.width;text:modelData;font:categoryChoice.font;highlighted:categoryChoice.highlightedIndex===index
+                contentItem:Text{text:modelData;color:appearance.colors.ink;font:categoryChoice.font}
+                background:Rectangle{color:parent.highlighted?appearance.colors.selected:appearance.colors.surface}
             }
         }
-        Item{Layout.fillWidth:true}
+        Text {text:home.filteredTemplates.length+" 套 · 按场景精选";color:appearance.colors.muted;font.family:appearance.fontFamily;font.pixelSize:13*appearance.scale}
+        Item {Layout.fillWidth:true}
+        PageButton {text:"上一页";enabled:home.pageIndex>0;onClicked:{home.pageIndex--;cardsScroll.contentItem.contentY=0;}}
+        Text {text:(home.pageIndex+1)+" / "+Math.max(1,Math.ceil(home.filteredTemplates.length/home.pageSize));color:appearance.colors.ink}
+        PageButton {text:"下一页";enabled:(home.pageIndex+1)*home.pageSize<home.filteredTemplates.length;onClicked:{home.pageIndex++;cardsScroll.contentItem.contentY=0;}}
     }
     TextField {Layout.fillWidth:true;implicitHeight:38*appearance.scale;placeholderText:"搜索模板名称、用途或字体…";selectByMouse:true;font.family:appearance.fontFamily;font.pixelSize:Math.round(12*appearance.scale);color:appearance.colors.ink;leftPadding:14
         background:Rectangle{radius:8;color:appearance.colors.surface;border.color:appearance.colors.line}
         onTextEdited:home.query=text.trim().toLowerCase()
     }
-    ScrollView {Layout.fillWidth:true;Layout.fillHeight:true;clip:true;contentWidth:availableWidth
+    ScrollView {id:cardsScroll;Layout.fillWidth:true;Layout.fillHeight:true;clip:true;contentWidth:availableWidth
         GridLayout {width:parent.width;columns:width<880||appearance.scale>1.15?2:3;columnSpacing:14;rowSpacing:14
-            Repeater {model:home.filteredTemplates
-                delegate:Rectangle {required property var modelData;Layout.fillWidth:true;Layout.preferredHeight:292*appearance.scale;radius:12;color:appearance.colors.surface;border.color:bridge.selectedId===modelData.id?appearance.colors.accent:appearance.colors.line
+            Repeater {model:home.filteredTemplates.slice(home.pageIndex*home.pageSize,(home.pageIndex+1)*home.pageSize)
+                delegate:Rectangle {id:card;required property var modelData;Layout.fillWidth:true;Layout.preferredHeight:292*appearance.scale;radius:12;color:appearance.colors.surface;border.color:bridge.selectedId===modelData.id?appearance.colors.accent:appearance.colors.line
+                    HoverHandler {id:hover}
+                    scale:hover.hovered?1.012:1
+                    Behavior on scale {NumberAnimation{duration:appearance.motion?140:0;easing.type:Easing.OutCubic}}
+                    Behavior on border.color {ColorAnimation{duration:appearance.motion?140:0}}
                     ColumnLayout {anchors.fill:parent;anchors.margins:18;spacing:10
                         RowLayout {Layout.fillWidth:true
                             Text{text:modelData.category;color:appearance.colors.muted;font.family:appearance.fontFamily;font.pixelSize:Math.round(10*appearance.scale)}
@@ -50,10 +75,10 @@ ColumnLayout {
                         }
                         Text{text:modelData.desc;Layout.fillWidth:true;Layout.fillHeight:true;wrapMode:Text.WordWrap;maximumLineCount:2;elide:Text.ElideRight;color:appearance.colors.muted;font.family:appearance.fontFamily;font.pixelSize:Math.round(11*appearance.scale)}
                         RowLayout {Layout.fillWidth:true
-                            Button {objectName:"useTemplate_"+modelData.id;text:"用此模板整理  →";Layout.fillWidth:true;implicitHeight:36*appearance.scale;font.family:appearance.fontFamily;font.pixelSize:Math.round(12*appearance.scale)
+                            Button {objectName:"useTemplate_"+modelData.id;text:modelData.redhead?"配置红头  →":"用此模板整理  →";Layout.fillWidth:true;implicitHeight:36*appearance.scale;font.family:appearance.fontFamily;font.pixelSize:Math.round(12*appearance.scale)
                                 contentItem:Text{text:parent.text;font:parent.font;color:appearance.colors.onAccent;horizontalAlignment:Text.AlignHCenter;verticalAlignment:Text.AlignVCenter}
                                 background:Rectangle{radius:7;color:appearance.colors.accent}
-                                onClicked:home.useTemplate(modelData,0)
+                                onClicked:home.useTemplate(modelData,modelData.redhead?3:0)
                             }
                             Button{text:"细节";implicitWidth:58;implicitHeight:36*appearance.scale;flat:true;font.family:appearance.fontFamily;font.pixelSize:Math.round(11*appearance.scale);onClicked:{detail.entry=modelData;detail.open();}}
                         }
@@ -68,7 +93,7 @@ ColumnLayout {
         ColumnLayout {width:500;spacing:16
             Text{text:["正文："+(detail.entry.bodySummary||""),"行距："+(detail.entry.lineSummary||""),"标题："+(detail.entry.headingSummary||""),"页码："+(detail.entry.pageSummary||""),"页边距："+(detail.entry.marginSummary||"")].join("\n\n");color:appearance.colors.ink;font.family:appearance.fontFamily;font.pixelSize:Math.round(13*appearance.scale);wrapMode:Text.WordWrap;Layout.fillWidth:true}
             Text{text:detail.entry.desc||"";color:appearance.colors.muted;font.family:appearance.fontFamily;font.pixelSize:Math.round(12*appearance.scale);wrapMode:Text.WordWrap;Layout.fillWidth:true}
-            RowLayout {Layout.fillWidth:true;Button{text:"编辑规则";onClicked:{detail.close();home.useTemplate(detail.entry,3);}}Item{Layout.fillWidth:true}Button{text:"使用这个模板 →";onClicked:{detail.close();home.useTemplate(detail.entry,0);}}}
+            RowLayout {Layout.fillWidth:true;Button{text:"编辑规则";onClicked:{detail.close();home.useTemplate(detail.entry,3);}}Item{Layout.fillWidth:true}Button{text:"使用这个模板 →";onClicked:{detail.close();home.useTemplate(detail.entry,detail.entry.redhead?3:0);}}}
         }
     }
 }

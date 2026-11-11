@@ -9,8 +9,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("文矩 · 文档格式整理系统")]
 [assembly: AssemblyProduct("文矩")]
 [assembly: AssemblyCompany("WenJu")]
-[assembly: AssemblyVersion("3.2.1.0")]
-[assembly: AssemblyFileVersion("3.2.1.0")]
+[assembly: AssemblyVersion("3.3.0.0")]
+[assembly: AssemblyFileVersion("3.3.0.0")]
 
 internal static class Launcher {
     private static string Quote(string value) {

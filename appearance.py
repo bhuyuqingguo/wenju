@@ -17,7 +17,7 @@ class Appearance(QObject):
     changed=Signal()
     def __init__(self,data,app):
         super().__init__();self.path=Path(data)/'appearance.json';self.app=app
-        self.state={'theme':'blue','font':'Microsoft YaHei UI' if __import__('sys').platform=='win32' else 'Noto Sans CJK SC','size':14,'intro':True}
+        self.state={'theme':'blue','font':'Microsoft YaHei UI' if __import__('sys').platform=='win32' else 'Noto Sans CJK SC','size':14,'intro':True,'motion':True}
         try:
             s=json.loads(self.path.read_text('utf-8'))
             if s.get('theme') in [t['id'] for t in THEMES]:self.state['theme']=s['theme']
@@ -25,6 +25,7 @@ class Appearance(QObject):
             if s.get('size') in (12,14,16,18):self.state['size']=s['size']
             if isinstance(s.get('intro'),bool):self.state['intro']=s['intro']
         except (OSError,ValueError,TypeError):pass
+        self.state['motion']=s.get('motion',True) if 's' in locals() and isinstance(s.get('motion',True),bool) else True
         self.apply()
     @Property('QVariantList',constant=True)
     def themes(self):return THEMES
@@ -36,6 +37,11 @@ class Appearance(QObject):
     def fontSize(self):return self.state['size']
     @Property(float,notify=changed)
     def scale(self):return self.state['size']/14
+    @Property(bool,notify=changed)
+    def motion(self):return self.state.get('motion',True) and __import__('os').environ.get('WENJU_LOW_POWER')!='1'
+    @Slot(bool)
+    def setMotion(self,value):
+        self.state['motion']=value;atomic_json(self.path,self.state);self.changed.emit()
     @Property(bool,notify=changed)
     def showIntro(self):return self.state.get('intro',True)
     @Slot(bool)

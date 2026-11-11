@@ -1,5 +1,7 @@
 import sys, json, shutil, uuid, os, copy, re
 from pathlib import Path
+from platform_support import data_directory, configure_rendering
+configure_rendering()
 from PySide6.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt
 from PySide6.QtGui import QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase
 from PySide6.QtQml import QQmlApplicationEngine
@@ -11,8 +13,7 @@ from preset_store import PresetStore, normalize, checked, sections, fields, SIZE
 from appearance import Appearance
 
 ROOT = Path(__file__).resolve().parent
-DATA = Path(os.environ.get('WENJU_DATA_DIR',str(ROOT / '工作数据')))
-DATA.mkdir(exist_ok=True)
+DATA = data_directory(ROOT)
 def qt_log(kind, context, message):
     with (DATA/'界面日志.txt').open('a',encoding='utf-8') as log: log.write(message+'\n')
 qInstallMessageHandler(qt_log)
@@ -219,6 +220,8 @@ class Bridge(QObject):
         if self.running: return
         if not self.rows:
             self.message = '请先添加文档，或点击「体验样例」'; self.changed.emit(); return
+        if self.store.rules.get('红头',{}).get('启用') and not self.store.rules['红头']['机关名称'].strip():
+            self.error('请先在设置 → 红头中填写机关名称，再开始整理。');return
         self.save(settings)
         self.batch_rules = copy.deepcopy(self.store.rules)
         self.task_kind='process'
@@ -324,7 +327,7 @@ bridge = Bridge()
 engine = QQmlApplicationEngine()
 engine.rootContext().setContextProperty('bridge',bridge)
 engine.rootContext().setContextProperty('appearance',appearance)
-engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro and not any(a in sys.argv for a in ('--smoke','--capture','--capture-themes')))
+engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro and os.environ.get('WENJU_LOW_POWER')!='1' and not any(a in sys.argv for a in ('--smoke','--capture','--capture-themes')))
 engine.load(QUrl.fromLocalFile(str(ROOT/'Main.qml')))
 if not engine.rootObjects(): sys.exit(1)
 window = engine.rootObjects()[0]
@@ -355,6 +358,28 @@ if '--test-opening' in sys.argv:
     QTimer.singleShot(1350,opening_capture)
     QTimer.singleShot(2100,opening_finished)
     QTimer.singleShot(8000,lambda:app.exit(2))
+if '--test-library-ui' in sys.argv:
+    from PySide6.QtTest import QTest
+    import traceback
+    def library_ui_test():
+        try:
+            home=window.findChild(QObject,'templateHome')
+            home.setProperty('pageIndex',1);app.processEvents()
+            assert home.property('pageIndex')==1
+            home.setProperty('category','红头文件');app.processEvents()
+            assert home.property('pageIndex')==0
+            home.setProperty('pageIndex',1);app.processEvents()
+            home.setProperty('query','工作通知');app.processEvents()
+            assert home.property('pageIndex')==0
+            bridge.selectTemplate('scene-01-01');bridge.setSection('红头');window.setProperty('page',3)
+            bridge.editRule('红头.机关名称','示例科技中心文件')
+            bridge.editRule('红头.发文字号','示例〔2026〕1号')
+            assert bridge.store.rules['红头']['发文字号']=='示例〔2026〕1号'
+            print('PASS: template pagination, category/search reset, redhead settings text editing')
+            app.quit()
+        except Exception:traceback.print_exc();app.exit(1)
+    QTimer.singleShot(2600,library_ui_test)
+    QTimer.singleShot(10000,lambda:app.exit(2))
 if '--capture-themes' in sys.argv:
     theme_queue=list(appearance.themes)
     original_rules=copy.deepcopy(bridge.store.rules)
