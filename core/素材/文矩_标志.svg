@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 128" width="640" height="128">
+<g transform="translate(0,0)"><rect x="4" y="4" width="120" height="120" rx="26" fill="#1f4e79"/><path d="M30 26 h14 v58 h58 v14 H30 Z" fill="#ffffff"/><g fill="#1f4e79"><rect x="52" y="26" width="3" height="9"/><rect x="62" y="26" width="3" height="6"/><rect x="72" y="26" width="3" height="9"/><rect x="82" y="26" width="3" height="6"/><rect x="92" y="26" width="3" height="9"/></g><g fill="#1f4e79"><rect x="30" y="52" width="9" height="3"/><rect x="30" y="62" width="6" height="3"/><rect x="30" y="72" width="9" height="3"/></g><rect x="56" y="40" width="46" height="6" rx="3" fill="#ffffff" opacity="0.95"/><rect x="56" y="54" width="36" height="6" rx="3" fill="#ffffff" opacity="0.75"/><rect x="56" y="68" width="26" height="6" rx="3" fill="#ffffff" opacity="0.55"/><circle cx="100" cy="28" r="6.5" fill="#ffb020"/></g>
+<text x="150" y="78" font-family="Noto Sans CJK SC, Source Han Sans SC, Microsoft YaHei, sans-serif" font-size="62" font-weight="700" fill="#1f4e79">文矩</text>
+<text x="300" y="60" font-family="Noto Sans CJK SC, Source Han Sans SC, Microsoft YaHei, sans-serif" font-size="24" fill="#1f4e79">文档格式整理系统</text>
+<text x="300" y="96" font-family="Noto Sans CJK SC, Source Han Sans SC, Microsoft YaHei, sans-serif" font-size="20" fill="#5b7a99">一拖即成 · 文自有矩</text>
+</svg>
