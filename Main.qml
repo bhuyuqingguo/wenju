@@ -158,7 +158,7 @@ ApplicationWindow {
         }
         Column {x:30;anchors.bottom:parent.bottom;anchors.bottomMargin:28;spacing:9
             Row {spacing:7;Rectangle{width:6;height:6;radius:3;color:appearance.palette["#8cbaa8"];anchors.verticalCenter:parent.verticalCenter} Txt{text:"离线运行 · 文档不上传";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale)}}
-            Txt {text:"3.2  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
+            Txt {text:"3.2.1  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
             Txt {text:"使用帮助 ↗";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale);MouseArea{anchors.fill:parent;cursorShape:Qt.PointingHandCursor;onClicked:bridge.help()}}
         }
     }
@@ -272,7 +272,7 @@ ApplicationWindow {
                                 ColumnLayout {Layout.fillWidth:true;Txt{text:"字间距 / 磅";font.pixelSize:Math.round(12*appearance.scale);color:muted}Choice{Layout.fillWidth:true;editable:true;validator:DoubleValidator{bottom:-2;top:20} model:["-0.5","0","0.5","1","1.5","2","3"];editText:String(win.spacing);currentIndex:model.indexOf(String(win.spacing));onActivated:{win.spacing=Number(currentText);selectedPreset=-1;win.commitPage()}onAccepted:{if(Number(editText)>=-2&&Number(editText)<=20){win.spacing=Number(editText);win.commitPage();}}}}
                             }
                             Txt{text:"对齐方式";font.pixelSize:Math.round(12*appearance.scale);color:muted}
-                            Choice {Layout.fillWidth:true;model:["底部左侧","底部居中","底部右侧"];currentIndex:model.indexOf(win.alignment);onActivated:{win.alignment=currentText;win.commitPage();}}
+                            Choice {Layout.fillWidth:true;model:["底部左侧","底部居中","底部右侧","底部两端对齐"];currentIndex:model.indexOf(win.alignment);onActivated:{win.alignment=currentText;win.commitPage();}}
                             Txt{text:"从哪里开始编号";font.pixelSize:Math.round(12*appearance.scale);color:muted}
                             Choice {Layout.fillWidth:true;model:["目录后","封面后","全文"];currentIndex:model.indexOf(win.startMode);onActivated:{win.startMode=currentText;win.commitPage();}}
                             Item{Layout.preferredHeight:4}
@@ -293,7 +293,7 @@ ApplicationWindow {
                             Rectangle {anchors{left:parent.left;right:parent.right;bottom:parent.bottom;leftMargin:24;rightMargin:24;bottomMargin:65}height:1;color:appearance.palette["#edf0f4"]}
                             Text {anchors{left:parent.left;right:parent.right;bottom:parent.bottom;leftMargin:24;rightMargin:24;bottomMargin:30}
                                 text:win.pageEnabled?win.prefix+"1"+win.suffix:"不显示页码";color:"#22344a";font.family:win.pageFont;font.pointSize:win.pageSize;font.letterSpacing:win.spacing*96/72
-                                horizontalAlignment:win.alignment==="底部左侧"?Text.AlignLeft:win.alignment==="底部右侧"?Text.AlignRight:Text.AlignHCenter
+                                horizontalAlignment:(win.alignment==="底部左侧"||win.alignment==="底部两端对齐")?Text.AlignLeft:win.alignment==="底部右侧"?Text.AlignRight:Text.AlignHCenter
                             }
                         }
                         Txt{anchors{bottom:parent.bottom;bottomMargin:22;horizontalCenter:parent.horizontalCenter}text:"示意预览 · 实际分页以 Word / WPS 为准";color:muted;font.pixelSize:Math.round(11*appearance.scale)}

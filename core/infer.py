@@ -252,7 +252,7 @@ def infer(path, base_rules=None):
             has_pn = True
             x = data.decode("utf-8", "ignore")
             jc = re.search(r'<w:jc w:val="(\w+)"', x)
-            R["页码"]["位置"] = {"center": "底部居中", "right": "底部右侧", "left": "底部左侧"}.get(jc.group(1) if jc else "center", "底部居中")
+            R["页码"]["位置"] = {"center": "底部居中", "right": "底部右侧", "left": "底部左侧", "both": "底部两端对齐"}.get(jc.group(1) if jc else "center", "底部居中")
             f = re.search(r'w:ascii="([^"]+)"', x); s = re.search(r'<w:sz w:val="(\d+)"', x)
             if f: R["页码"]["字体"] = f.group(1)
             if s: R["页码"]["字号"] = pt_name(int(s.group(1)) / 2)
@@ -282,7 +282,7 @@ def infer(path, base_rules=None):
             pn['左侧字符']=''.join(t.text or '' for c in children[:start] for t in c.iter(q('t')))
             pn['右侧字符']=''.join(t.text or '' for c in children[end+1:] for t in c.iter(q('t')))
             jc=p.find('w:pPr/w:jc',NS)
-            if jc is not None:pn['位置']={'left':'底部左侧','right':'底部右侧','center':'底部居中'}.get(jc.get(q('val')),'底部居中')
+            if jc is not None:pn['位置']={'left':'底部左侧','right':'底部右侧','center':'底部居中','both':'底部两端对齐'}.get(jc.get(q('val')),'底部居中')
             rp=format_run.find('w:rPr',NS) if format_run is not None else None
             if rp is not None:
                 fonts=rp.find('w:rFonts',NS);size=rp.find('w:sz',NS);spacing=rp.find('w:spacing',NS)

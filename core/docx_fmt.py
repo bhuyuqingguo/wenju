@@ -443,6 +443,15 @@ class Formatter:
         st, pp, rp = ensure("CoverInfo", "封面落款")
         apply_para_fmt(pp, cv["落款"]); apply_run_fmt(rp, cv["落款"], F["封面落款"], west)
         reorder(pp, PPR_ORDER); reorder(rp, RPR_ORDER)
+        official = self.R.get("公文", {})
+        if official.get("启用"):
+            for sid, name, prefix, align in (("OfficialTitle", "公文题目", "题目", "center"), ("SecurityMark", "密级", "密级", "left")):
+                cfg = {"字号": official[prefix+"字号"], "加粗": False, "对齐": align,
+                       "行距类型": "固定值", "行距值": official[prefix+"行距"],
+                       "段前": 0, "段后": 0, "首行缩进字符": 0}
+                st, pp, rp = ensure(sid, name)
+                apply_para_fmt(pp, cfg); apply_run_fmt(rp, cfg, official[prefix+"字体"], west)
+                reorder(pp, PPR_ORDER); reorder(rp, RPR_ORDER)
         self.note("样式重建数", 9)
 
     # ---------- 段落分类
@@ -743,7 +752,7 @@ class Formatter:
     def _add_footer_part(self, items, N):
         font = N.get("字体", "宋体")
         size = size_pt(N.get("字号", 10.5), 10.5)
-        jc = {"底部居中": "center", "底部右侧": "right", "底部左侧": "left"}.get(N.get("位置", "底部居中"), "center")
+        jc = {"底部居中": "center", "底部右侧": "right", "底部左侧": "left", "底部两端对齐": "both"}.get(N.get("位置", "底部居中"), "center")
         legacy = {"1": ("", ""), "- 1 -": ("- ", " -"), "第 1 页": ("第 ", " 页")}
         pre, post = legacy.get(N.get("格式", "1"), ("", ""))
         pre, post = N.get("左侧字符", pre), N.get("右侧字符", post)
@@ -829,9 +838,28 @@ class Formatter:
         F, B, C, T = self.R["字体"], self.R["正文"], self.R["题注"], self.R["表格"]
         kids = list(body)
         self.toc_range = self.find_toc(kids)
+        official = self.R.get("公文", {})
+        special = {}
+        if official.get("启用"):
+            front = True
+            for p in kids:
+                if p.tag != q("p"):
+                    front = False
+                    continue
+                text = para_text(p).strip()
+                if not text: continue
+                sid = style_id(p)
+                if front and official.get("识别密级行", True) and re.fullmatch(r"(?:秘密|机密|绝密)(?:[★☆·\s]*(?:\d+年|\d+个月|长期|永久))?", text):
+                    special[id(p)] = ("SecurityMark", "密级")
+                    continue
+                align = p.find("w:pPr/w:jc", NS)
+                is_title = sid in ("Title", "标题", "OfficialTitle") or sid == self.sid.get("Title", "__missing__")
+                if is_title or (front and official.get("首个居中段作为题目", True) and align is not None and align.get(q("val")) == "center" and len(text) <= 100 and not self.label_level(text)):
+                    special[id(p)] = ("OfficialTitle", "题目")
+                front = False
         # 封面判定：首个 sectPr 段落之前、且其中无标题 → 视为封面
         cover_end = -1
-        if self.R["封面"]["启用"]:
+        if self.R["封面"]["启用"] and not official.get("启用"):
             for i, k in enumerate(kids):
                 if k.tag == q("p") and k.find("w:pPr/w:sectPr", NS) is not None:
                     cover_end = i; break
@@ -875,6 +903,13 @@ class Formatter:
                 self.do_table(k); prev_img = False; last_cls = "tbl"; continue
             if k.tag != q("p"): continue
             p = k
+            if id(p) in special:
+                sid, prefix = special[id(p)]
+                self.para_reset(p, sid, keep_next=True)
+                self.clean_runs(p, official[prefix+"字号"], official[prefix+"字体"], keep_bi=False)
+                self.note("公文"+prefix+"段数")
+                prev_img = False; last_cls = "official"
+                continue
             next_tbl = (i + 1 < len(kids) and kids[i + 1].tag == q("tbl"))
             cls = self.classify(p, None, next_tbl, prev_img)
             txt = para_text(p).strip()

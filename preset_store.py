@@ -5,7 +5,7 @@ import math
 import uuid
 import zipfile
 from pathlib import Path
-from templates import CATALOG, apply_template
+from templates import CATALOG, apply_template, DEFAULT_TEMPLATE
 from rule_schema import OPTIONS, GROUP_TIPS, FONT_CHOICES
 
 ROOT = Path(__file__).resolve().parent
@@ -25,13 +25,13 @@ def atomic_json(path, value):
 def options_for(path):
     opt=OPTIONS.get(path)
     if opt is not None:return opt
-    if path.endswith('.字号'):return list(SIZES)
+    if path.endswith('字号'):return list(SIZES)
     return None
 
 def checked(path,value,default):
     key=path.split('.')[-1]
     if isinstance(value,str) and any(ord(c)<32 and c not in '\t\r\n' for c in value):raise ValueError(path+' 包含非法控制字符')
-    if key=='字号':
+    if key.endswith('字号'):
         if isinstance(value,str) and value in SIZES:return value
         if isinstance(value,bool):raise ValueError(path+' 必须是字号名或磅数')
         try:v=float(value)
@@ -59,7 +59,7 @@ def checked(path,value,default):
     if opt is not None and value not in opt:raise ValueError(path+' 的选项无效')
     if path=='输出.后缀' and (not value.strip() or any(c in value for c in '\\/:*?"<>|') or any(ord(c)<32 for c in value)):
         raise ValueError('输出后缀不能为空，也不能包含路径或文件名非法字符')
-    if isinstance(value,str) and (key in ('字体','中文字体') or path.startswith('字体.') and key!='模式') and not value.strip():raise ValueError(path+' 不能为空')
+    if isinstance(value,str) and (key.endswith('字体') or path.startswith('字体.') and key!='模式') and not value.strip():raise ValueError(path+' 不能为空')
     return value
 
 def normalize(raw):
@@ -100,12 +100,12 @@ def fields(rules,section):
         if key.startswith('_') or isinstance(value,dict):continue
         path=section+'.'+key;opt=options_for(path)
         kind='bool' if isinstance(value,bool) else 'array' if isinstance(value,list) else 'number' if isinstance(value,(int,float)) else 'text'
-        editable=key=='字号' or (key=='字体' or section=='字体' and key!='模式' or key=='中文字体')
-        if opt is None and editable and key!='字号':opt=FONT_CHOICES
+        editable=key.endswith('字号') or key.endswith('字体') or (key=='字体' or section=='字体' and key!='模式' or key=='中文字体')
+        if opt is None and editable and not key.endswith('字号'):opt=FONT_CHOICES
         if opt is not None:kind='choice'
         values=list(opt) if opt is not None else []
         labels=list(opt.values()) if isinstance(opt,dict) else [str(v) for v in values]
-        unit='cm' if key in ('上边距','下边距','左边距','右边距','页眉距','页脚距') else '字符' if '缩进字符' in key else '磅' if key in ('段前','段后','字间距') else ''
+        unit='cm' if key in ('上边距','下边距','左边距','右边距','页眉距','页脚距') else '字符' if '缩进字符' in key else '磅' if key in ('段前','段后','字间距','题目行距','密级行距') else ''
         rows.append({'path':path,'label':key,'value':value,'display':'、'.join(value) if isinstance(value,list) else str(value),
             'kind':kind,'values':values,'labels':labels,'editable':editable,'unit':unit})
     return rows
@@ -116,7 +116,7 @@ class PresetStore:
         self.custom=[];self.builtins={}
         for item in CATALOG:
             rules=apply_template(BASE,item['id'])
-            a,b={'1':('',''),'— 1 —':('— ',' —'),'第 1 页':('第 ',' 页')}[item['page']]
+            a,b={'1':('',''),'— 1 —':('— ',' —'),'—1—':('—','—'),'第 1 页':('第 ',' 页')}[item['page']]
             rules['页码'].update({'左侧字符':a,'右侧字符':b,'统一字体':True,'字体':'Times New Roman' if not a else '宋体','中文字体':'宋体','起始位置':'全文' if item['category']=='公文办公' else '目录后'})
             self.builtins[item['id']]={**item,'rules':rules,'builtin':True}
         for i,path in enumerate(sorted((ROOT/'core/预设').glob('*.json'))):
@@ -126,10 +126,10 @@ class PresetStore:
         if custom_path.exists():
             self.custom=json.loads(custom_path.read_text('utf-8-sig'))
             for item in self.custom:item['rules']=normalize(item['rules'])
-        self.selected='unit';self.rules=copy.deepcopy(self.builtins['unit']['rules']);self.dirty=False
+        self.selected=DEFAULT_TEMPLATE;self.rules=copy.deepcopy(self.builtins[DEFAULT_TEMPLATE]['rules']);self.dirty=False
         current=self.data/'current.json'
         if current.exists():
-            x=json.loads(current.read_text('utf-8-sig'));self.rules=normalize(x['rules']);self.selected=x.get('selected','unit');self.dirty=x.get('dirty',False)
+            x=json.loads(current.read_text('utf-8-sig'));self.rules=normalize(x['rules']);self.selected=x.get('selected',DEFAULT_TEMPLATE);self.dirty=x.get('dirty',False)
     def persist(self):atomic_json(self.data/'current.json',{'selected':self.selected,'rules':self.rules,'dirty':self.dirty})
     def items(self):return list(self.builtins.values())+self.custom
     def find(self,id):
@@ -156,7 +156,7 @@ class PresetStore:
         if not t or t.get('builtin'):raise ValueError('内置模板不能删除')
         updated=[x for x in self.custom if x['id']!=id]
         atomic_json(self.data/'templates.json',updated);self.custom=updated
-        if id==self.selected:self.select('unit')
+        if id==self.selected:self.select(DEFAULT_TEMPLATE)
     def import_files(self,paths):
         incoming=[]
         def parse(raw,name):

@@ -38,7 +38,7 @@ ColumnLayout {
                         RowLayout {Layout.fillWidth:true
                             Text{text:modelData.category;color:appearance.colors.muted;font.family:appearance.fontFamily;font.pixelSize:Math.round(10*appearance.scale)}
                             Item{Layout.fillWidth:true}
-                            Text{text:bridge.selectedId===modelData.id?"当前方案":"";color:appearance.colors.accent;font.family:appearance.fontFamily;font.pixelSize:Math.round(10*appearance.scale)}
+                            Text{text:modelData.id==="wudi-official"?"默认模板":bridge.selectedId===modelData.id?"当前方案":"";color:appearance.colors.accent;font.family:appearance.fontFamily;font.pixelSize:Math.round(10*appearance.scale)}
                         }
                         Text{text:modelData.name;Layout.fillWidth:true;elide:Text.ElideRight;color:appearance.colors.ink;font.family:appearance.fontFamily;font.pixelSize:Math.round(18*appearance.scale);font.weight:Font.DemiBold}
                         Rectangle {Layout.fillWidth:true;Layout.preferredHeight:112*appearance.scale;radius:7;color:appearance.colors.field

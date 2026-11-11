@@ -12,7 +12,7 @@ def expect_error(fn):
 
 with tempfile.TemporaryDirectory(prefix='wenju-presets-') as tmp:
     d=Path(tmp);s=PresetStore(d/'data')
-    assert len(s.items())==14
+    assert len(s.items())==15
     # Every original editable leaf has a form field, including all nine heading levels.
     def leaves(obj,prefix=''):
         for k,v in obj.items():
@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory(prefix='wenju-presets-') as tmp:
     other=PresetStore(d/'other')
     added=other.import_files([d/'single.json']);assert added[0]['rules']==snapshot
     again=other.import_files([d/'single.json']);assert again[0]['name']!=added[0]['name']
-    all_added=other.import_files([d/'bundle.json']);assert len(all_added)==15
+    all_added=other.import_files([d/'bundle.json']);assert len(all_added)==16
     with zipfile.ZipFile(d/'legacy.zip','w') as z:
         z.writestr('../legacy.json',json.dumps(original,ensure_ascii=False))
     assert len(other.import_files([d/'legacy.zip']))==1
@@ -76,5 +76,5 @@ with tempfile.TemporaryDirectory(prefix='wenju-presets-') as tmp:
     assert inferred['ok'] and inferred['notes'] and inferred['rules']['正文']['字号']==19
     assert inferred['rules']['页码']['左侧字符']=='第 <& '
     assert inferred['rules']['页码']['字间距']==1.25
-    s.delete(personal);assert not s.find(personal) and s.selected=='unit'
+    s.delete(personal);assert not s.find(personal) and s.selected=='wudi-official'
     print('PASS: actual DOCX margins/footer/output suffix, sample inference, template deletion')
