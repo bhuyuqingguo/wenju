@@ -8,6 +8,17 @@ faces are not redistributable; this module never ships those files.
 import os, sys, shutil, subprocess
 from pathlib import Path
 
+ALIASES = {
+    '仿宋_GB2312': '仿宋',
+}
+
+
+def resolve(name):
+    if not name:
+        return name
+    return ALIASES.get(str(name), name)
+
+
 # Each list is the order to try. The first entry is the preferred family.
 CHAINS = {
     '仿宋_GB2312': ['仿宋_GB2312', 'FangSong_GB2312', '仿宋', 'FangSong', 'STFangsong', '华文仿宋'],
