@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 ColumnLayout {
     id: root
+    clip: true
     property var files: []
     property int overall: 0
     property string heading: "总进度"
@@ -16,6 +17,7 @@ ColumnLayout {
     property int fontPx: 13
     property string label: ""
     property int percent: -1
+    property bool idleHint: true
 
     function barColor(state) {
         if (state === "失败")
@@ -76,7 +78,7 @@ ColumnLayout {
         }
     }
     Text {
-        visible: root.percent < 0 && root.files.length === 0
+        visible: root.idleHint && root.percent < 0 && root.files.length === 0
         text: "转换开始后，每一份文件都会显示百分比。"
         color: root.muted
         font.pixelSize: root.fontPx

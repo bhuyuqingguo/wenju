@@ -155,6 +155,7 @@ def main():
         result = execute({"source": str(package), "rules": rules})
         assert result["ok"] and result["output"].lower().endswith(".docx"), result
         assert Path(result["output"]).is_file()
+        _test_fidelity(tmp)
     screen = (ROOT / "Main.qml").read_text(encoding="utf-8")
     bridge = (ROOT / "app.py").read_text(encoding="utf-8")
     assert "saveWenju" in screen and "exportDocx" in screen and "文矩" in screen
@@ -360,6 +361,196 @@ def _fixture_rels():
     image.set("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")
     image.set("Target", "media/picture.png")
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _test_fidelity(tmp):
+    png = _sample_png()
+    src = tmp / "fidelity.docx"
+    _build_fidelity(src, png)
+    doc = wf.from_docx(src)
+    _assert_fidelity(doc, png)
+    package = tmp / "fidelity.wenju"
+    wf.save(doc, package)
+    packed = json.loads(zipfile.ZipFile(package).read("document.json"))
+    assert isinstance(packed["blocks"], list) and isinstance(packed["sections"], list)
+    assert packed["sections"][0]["header"] == "页眉甲"
+    assert packed["sections"][0]["footer"] == "页脚甲"
+    loaded = wf.load(package)
+    _assert_fidelity(loaded, png)
+    out = tmp / "fidelity-out.docx"
+    wf.to_docx(loaded, out)
+    with zipfile.ZipFile(out) as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+        header_xml = archive.read("word/header1.xml").decode("utf-8")
+        footer_xml = archive.read("word/footer1.xml").decode("utf-8")
+        media = [name for name in archive.namelist() if name.startswith("word/media/")]
+    assert len(media) == 1
+    assert 'w:eastAsia="仿宋_GB2312"' in document_xml
+    assert 'w:eastAsia="仿宋"' not in document_xml
+    assert "页眉甲" in header_xml
+    assert "页脚甲" in footer_xml and "PAGE" in footer_xml
+    again = wf.from_docx(out)
+    _assert_fidelity(again, png)
+    wrapped = tmp / "wrapped.docx"
+    _build_wrapped_image(wrapped, png)
+    wrapped_doc = wf.from_docx(wrapped)
+    images = [block for block in wrapped_doc.blocks if block["type"] == "image"]
+    assert len(images) == 1, len(images)
+    assert images[0]["w"] == 120 and images[0]["h"] == 90
+    assert wrapped_doc.assets[images[0]["asset"]] == png
+    outside = tmp / "wrapped-outside.docx"
+    _build_wrapped_image(outside, png, outside_run=True)
+    outside_doc = wf.from_docx(outside)
+    outside_images = [block for block in outside_doc.blocks if block["type"] == "image"]
+    assert len(outside_images) == 1 and outside_images[0]["w"] == 120 and outside_images[0]["h"] == 90
+    anchor = tmp / "anchor.docx"
+    _build_anchor_image(anchor, png)
+    anchor_doc = wf.from_docx(anchor)
+    anchor_images = [block for block in anchor_doc.blocks if block["type"] == "image"]
+    assert len(anchor_images) == 1 and anchor_images[0]["w"] == 80 and anchor_images[0]["h"] == 40
+
+
+def _assert_fidelity(doc, png):
+    assert wf.validate(doc) == []
+    headings = [block for block in doc.blocks if block["type"] == "heading"]
+    assert len(headings) == 1 and headings[0]["level"] == 1
+    assert "".join(run["text"] for run in headings[0]["runs"]) == "总标题"
+    body = next(block for block in doc.blocks if block["type"] == "paragraph" and "正文甲" in "".join(run.get("text", "") for run in block.get("runs") or []))
+    assert body["runs"][0]["eastAsia"] == "仿宋_GB2312"
+    assert body["runs"][0]["ascii"] == "仿宋_GB2312"
+    assert body["runs"][0]["hAnsi"] == "仿宋_GB2312"
+    assert body["runs"][0]["size_pt"] == 16
+    images = [block for block in doc.blocks if block["type"] == "image"]
+    assert len(images) == 1
+    assert images[0]["w"] == 120 and images[0]["h"] == 90
+    assert doc.assets[images[0]["asset"]] == png
+    table = next(block for block in doc.blocks if block["type"] == "table")
+    assert {"row": 0, "col": 0, "rowspan": 1, "colspan": 2} in table["merges"]
+    assert {"row": 1, "col": 0, "rowspan": 2, "colspan": 1} in table["merges"]
+    assert table["rows"][0][1]["covered"] is True
+    assert table["rows"][2][0]["covered"] is True
+    assert _cell(table, 0, 0) == "合" and _cell(table, 1, 0) == "左" and _cell(table, 1, 1) == "右" and _cell(table, 2, 1) == "下"
+    assert any(block["type"] == "pagebreak" for block in doc.blocks)
+    assert any("第二页" in "".join(run.get("text", "") for run in block.get("runs") or []) for block in doc.blocks)
+    assert doc.sections and doc.sections[0]["header"] == "页眉甲"
+    assert doc.sections[0]["footer"] == "页脚甲"
+    assert doc.sections[0]["footer_page"] is True
+    assert doc.sections[0]["pgSz"]["w"] == 11906 and doc.sections[0]["pgSz"]["h"] == 16838
+
+
+def _build_fidelity(path, png):
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s" xmlns:r="%s" xmlns:wp="%s" xmlns:a="%s" xmlns:pic="%s">
+  <w:body>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+      <w:r><w:rPr><w:rFonts w:eastAsia="仿宋_GB2312" w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="44"/></w:rPr><w:t>总标题</w:t></w:r></w:p>
+    <w:p><w:r><w:rPr><w:rFonts w:ascii="仿宋_GB2312" w:hAnsi="仿宋_GB2312"/><w:sz w:val="32"/></w:rPr><w:t>正文甲</w:t></w:r></w:p>
+    <w:p><w:r><w:drawing><wp:inline><wp:extent cx="%d" cy="%d"/>
+      <a:graphic><a:graphicData uri="%s"><pic:pic><pic:blipFill><a:blip r:embed="rId9"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+    </wp:inline></w:drawing></w:r></w:p>
+    <w:tbl>
+      <w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>合</w:t></w:r></w:p></w:tc></w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>左</w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>右</w:t></w:r></w:p></w:tc>
+      </w:tr>
+      <w:tr>
+        <w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:r><w:t></w:t></w:r></w:p></w:tc>
+        <w:tc><w:p><w:r><w:t>下</w:t></w:r></w:p></w:tc>
+      </w:tr>
+    </w:tbl>
+    <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+    <w:p><w:r><w:t>第二页</w:t></w:r></w:p>
+    <w:sectPr>
+      <w:headerReference w:type="default" r:id="rId20"/>
+      <w:footerReference w:type="default" r:id="rId21"/>
+      <w:pgSz w:w="11906" w:h="16838"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440" w:header="720" w:footer="720" w:gutter="0"/>
+    </w:sectPr>
+  </w:body>
+</w:document>""" % (W, R, WP, A, PIC, 120 * 12700, 90 * 12700, PIC)
+    styles = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="%s">
+  <w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:eastAsia="宋体"/><w:sz w:val="21"/></w:rPr></w:rPrDefault></w:docDefaults>
+  <w:style w:styleId="Heading1"><w:name w:val="heading 1"/>
+    <w:pPr><w:outlineLvl w:val="0"/></w:pPr>
+    <w:rPr><w:rFonts w:eastAsia="黑体"/><w:sz w:val="32"/></w:rPr>
+  </w:style>
+</w:styles>""" % W
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+  <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/>
+  <Relationship Id="rId20" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+  <Relationship Id="rId21" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>
+</Relationships>"""
+    header = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="%s"><w:p><w:r><w:t>页眉甲</w:t></w:r></w:p></w:hdr>""" % W
+    footer = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:ftr xmlns:w="%s"><w:p><w:r><w:t>页脚甲</w:t></w:r>
+<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
+<w:r><w:fldChar w:fldCharType="separate"/></w:r>
+<w:r><w:t>1</w:t></w:r>
+<w:r><w:fldChar w:fldCharType="end"/></w:r>
+</w:p></w:ftr>""" % W
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document.encode("utf-8"))
+        archive.writestr("word/styles.xml", styles.encode("utf-8"))
+        archive.writestr("word/_rels/document.xml.rels", rels.encode("utf-8"))
+        archive.writestr("word/header1.xml", header.encode("utf-8"))
+        archive.writestr("word/footer1.xml", footer.encode("utf-8"))
+        archive.writestr("word/media/picture.png", png)
+
+
+def _build_wrapped_image(path, png, outside_run=False):
+    run_close = "</w:r>" if outside_run else ""
+    run_tail = "" if outside_run else "</w:r>"
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s" xmlns:r="%s" xmlns:wp="%s" xmlns:a="%s" xmlns:pic="%s" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml">
+  <w:body>
+    <w:p><w:r><w:t>图前</w:t>%s
+      <mc:AlternateContent>
+        <mc:Choice Requires="wps">
+          <w:drawing><wp:inline><wp:extent cx="%d" cy="%d"/>
+            <a:graphic><a:graphicData uri="%s"><pic:pic><pic:blipFill><a:blip r:embed="rId9"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+          </wp:inline></w:drawing>
+        </mc:Choice>
+        <mc:Fallback>
+          <w:pict><v:shape style="width:120pt;height:90pt"><v:imagedata r:id="rId9"/></v:shape></w:pict>
+        </mc:Fallback>
+      </mc:AlternateContent>
+    %s</w:p>
+  </w:body>
+</w:document>""" % (W, R, WP, A, PIC, run_close, 120 * 12700, 90 * 12700, PIC, run_tail)
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/picture.png"/>
+</Relationships>"""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document.encode("utf-8"))
+        archive.writestr("word/_rels/document.xml.rels", rels.encode("utf-8"))
+        archive.writestr("word/media/picture.png", png)
+
+
+def _build_anchor_image(path, png):
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s" xmlns:r="%s" xmlns:wp="%s" xmlns:a="%s" xmlns:pic="%s">
+  <w:body>
+    <w:p><w:r><w:drawing><wp:anchor>
+      <wp:extent cx="%d" cy="%d"/>
+      <a:graphic><a:graphicData uri="%s"><pic:pic><pic:blipFill><a:blip r:embed="rId4"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+    </wp:anchor></w:drawing></w:r></w:p>
+  </w:body>
+</w:document>""" % (W, R, WP, A, PIC, 80 * 12700, 40 * 12700, PIC)
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/anchor.png"/>
+</Relationships>"""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document.encode("utf-8"))
+        archive.writestr("word/_rels/document.xml.rels", rels.encode("utf-8"))
+        archive.writestr("word/media/anchor.png", png)
 
 
 if __name__ == "__main__":

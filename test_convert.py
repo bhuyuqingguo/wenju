@@ -686,6 +686,151 @@ def test_contract(tmp):
     to_docx(shaped, str(tmp / "from-wenju.docx"), str(wenju))
 
 
+def write_titled_docx(path, title, payload, asset="pixel.png"):
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  <w:body>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:rFonts w:eastAsia="仿宋_GB2312"/><w:sz w:val="32"/></w:rPr><w:t>%s</w:t></w:r></w:p>
+    <w:p><w:r><w:rPr><w:rFonts w:eastAsia="楷体" w:ascii="Times New Roman" w:hAnsi="Calibri"/><w:sz w:val="21"/></w:rPr><w:t>正文</w:t></w:r></w:p>
+    <w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="914400"/>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+    </wp:inline></w:drawing></w:r></w:p>
+    <w:sectPr><w:headerReference w:type="default" r:id="rId8"/><w:pgSz w:w="11906" w:h="16838"/></w:sectPr>
+  </w:body>
+</w:document>""" % title
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/%s"/>
+  <Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+</Relationships>""" % asset
+    header = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>%s</w:t></w:r></w:p></w:hdr>""" % title
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document.encode("utf-8"))
+        archive.writestr("word/_rels/document.xml.rels", rels.encode("utf-8"))
+        archive.writestr("word/media/" + asset, payload)
+        archive.writestr("word/header1.xml", header.encode("utf-8"))
+
+
+def write_image_xlsx(path):
+    workbook = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="参数" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"""
+    book_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"""
+    sheet = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>合</t></is></c><c r="B1" t="inlineStr"><is><t></t></is></c></row>
+  </sheetData>
+  <mergeCells count="1"><mergeCell ref="A1:B1"/></mergeCells>
+  <drawing r:id="rId1"/>
+</worksheet>"""
+    sheet_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/>
+</Relationships>"""
+    drawing = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:oneCellAnchor>
+    <xdr:from><xdr:col>0</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>0</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:ext cx="914400" cy="457200"/>
+    <xdr:pic><xdr:blipFill><a:blip r:embed="rId1"/></xdr:blipFill></xdr:pic>
+  </xdr:oneCellAnchor>
+</xdr:wsDr>"""
+    drawing_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/pixel.png"/>
+</Relationships>"""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("xl/workbook.xml", workbook.encode("utf-8"))
+        archive.writestr("xl/_rels/workbook.xml.rels", book_rels.encode("utf-8"))
+        archive.writestr("xl/worksheets/sheet1.xml", sheet.encode("utf-8"))
+        archive.writestr("xl/worksheets/_rels/sheet1.xml.rels", sheet_rels.encode("utf-8"))
+        archive.writestr("xl/drawings/drawing1.xml", drawing.encode("utf-8"))
+        archive.writestr("xl/drawings/_rels/drawing1.xml.rels", drawing_rels.encode("utf-8"))
+        archive.writestr("xl/media/pixel.png", PNG)
+
+
+def test_xlsx_image_and_merge(tmp):
+    path = tmp / "sheet.xlsx"
+    write_image_xlsx(path)
+    doc = convert.convert_path(str(path), "preserve")
+    table = next(block for block in doc.blocks if block["type"] == "table")
+    assert table["merges"] == [{"row": 0, "col": 0, "rowspan": 1, "colspan": 2}]
+    assert table["rows"][0][1]["covered"] is True
+    image = next(block for block in doc.blocks if block["type"] == "image")
+    assert image["w"] == 72 and image["h"] == 36
+    assert doc.assets[image["asset"]] == PNG
+    saved = tmp / "sheet.wenju"
+    save(doc, str(saved))
+    exported = tmp / "sheet.docx"
+    to_docx(load(str(saved)), str(exported))
+    restored = from_docx(str(exported))
+    images = [block for block in restored.blocks if block["type"] == "image"]
+    assert len(images) == 1 and images[0]["w"] == 72 and images[0]["h"] == 36
+    assert restored.assets[images[0]["asset"]] == PNG
+
+
+def test_batch_merge_and_single_export(tmp):
+    first = tmp / "乙.docx"
+    second = tmp / "甲.docx"
+    write_titled_docx(first, "附则", PNG, "one.png")
+    write_titled_docx(second, "总则", PNG + b"B", "two.png")
+    seen = []
+    snap = convert.run_batch(
+        [{"name": "乙.docx", "path": str(first)}, {"name": "甲.docx", "path": str(second)}],
+        tmp / "batch",
+        mode="template",
+        template=TEMPLATE,
+        on_progress=seen.append,
+    )
+    assert snap["finished"] is True and snap["overall"] == 100
+    assert [item["state"] for item in snap["files"]] == ["成功", "成功"]
+    assert any(item["overall"] < 100 and item["finished"] is False for item in seen)
+    assert [item["overall"] for item in seen] == sorted(item["overall"] for item in seen)
+    message = convert.summary(snap, "转换完成")
+    assert message.startswith("转换完成") and "成功 2 个" in message
+    loaded = [load(item["output"]) for item in snap["files"]]
+    assert ["".join(block["runs"][0]["text"] for block in doc.blocks if block["type"] == "heading") for doc in loaded] == ["附则", "总则"]
+    for doc in loaded:
+        image = next(block for block in doc.blocks if block["type"] == "image")
+        assert doc.assets[image["asset"]] in (PNG, PNG + b"B")
+        assert image["w"] == 72 and image["h"] == 72
+        body = next(block for block in doc.blocks if block["type"] == "paragraph")
+        assert body["runs"][0]["eastAsia"] == "仿宋_GB2312"
+        assert body["runs"][0]["size_pt"] == 16
+    import compose
+    progress = []
+    merged = compose.merge_export(
+        [item["output"] for item in snap["files"]],
+        str(tmp / "合稿.wenju"),
+        str(tmp / "合稿.docx"),
+        template={"font": "仿宋_GB2312", "number": "多级数字"},
+        progress=lambda percents, overall: progress.append((list(percents), overall)),
+    )
+    assert progress[-1] == ([100, 100], 100)
+    with zipfile.ZipFile(merged["docx"]) as archive:
+        package = {name: archive.read(name) for name in archive.namelist()}
+    blob = b"\n".join(package.values())
+    assert PNG in package.values() and PNG + b"B" in package.values()
+    assert "仿宋_GB2312".encode("utf-8") in blob
+    assert b"PAGE" in blob and b"TOC" in blob
+    texts = docx_texts(merged["docx"])
+    assert texts.find("1. 附则") < texts.find("2. 总则")
+    single = convert.run_export(
+        [{"name": "乙.docx", "path": snap["files"][0]["output"]}],
+        tmp / "single",
+    )
+    assert single["finished"] is True and single["files"][0]["state"] == "成功"
+    single_doc = from_docx(single["files"][0]["docx"])
+    assert any(block["type"] == "image" and single_doc.assets[block["asset"]] == PNG for block in single_doc.blocks)
+    assert any(run.get("eastAsia") == "仿宋_GB2312" for block in single_doc.blocks if block["type"] == "paragraph" for run in block["runs"])
+
+
 def test_keep_fangsong_name(tmp):
     import fontfallback
     fontfallback.reset_index()
@@ -726,6 +871,8 @@ def main():
         test_edges(tmp)
         test_contract(tmp)
         test_keep_fangsong_name(tmp)
+        test_xlsx_image_and_merge(tmp)
+        test_batch_merge_and_single_export(tmp)
     test_qt_switch()
     print("PASS: docx, xlsx, txt, md, paste, doc, wenju export, template brush, batch progress, qt switch")
 

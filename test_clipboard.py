@@ -537,6 +537,97 @@ class ClipboardTests(unittest.TestCase):
             else:
                 os.environ['WENJU_QT'] = previous
 
+    def test_report_html_and_rtf_roundtrip(self):
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==')
+        html = (
+            '<html><body>'
+            '<p class="MsoHeading1" style="mso-outline-level:1"><span style="font-family:黑体;font-size:22pt;font-weight:bold">报告标题</span></p>'
+            '<p class="MsoNormal" style="mso-style-name:正文"><span style="font-family:仿宋_GB2312;font-size:16pt">正文一段</span></p>'
+            '<img src="data:image/png;base64,%s" width="160" height="80">'
+            '<table><tr><td colspan="2">表头</td></tr>'
+            '<tr><td rowspan="2">左</td><td>右上</td></tr>'
+            '<tr><td>右下</td></tr></table>'
+            '<p style="page-break-before:always">第二页</p>'
+            '</body></html>'
+        ) % base64.b64encode(png).decode('ascii')
+        doc = clip.document_from_parts(html=html.encode('utf-8'))
+        self.assertEqual(fmt.validate(doc), [])
+        self.assertEqual(doc.blocks[0]['type'], 'heading')
+        self.assertEqual(doc.blocks[0]['level'], 1)
+        self.assertEqual(doc.blocks[0]['runs'][0]['text'], '报告标题')
+        self.assertEqual(doc.blocks[1]['style'], '正文')
+        self.assertEqual(doc.blocks[1]['runs'][0]['eastAsia'], '仿宋_GB2312')
+        self.assertEqual(doc.blocks[1]['runs'][0]['size_pt'], 16)
+        image = next(block for block in doc.blocks if block['type'] == 'image')
+        self.assertEqual((image['w'], image['h']), (120, 60))
+        self.assertEqual(doc.assets[image['asset']], png)
+        table = next(block for block in doc.blocks if block['type'] == 'table')
+        self.assertIn({'row': 0, 'col': 0, 'rowspan': 1, 'colspan': 2}, table['merges'])
+        self.assertIn({'row': 1, 'col': 0, 'rowspan': 2, 'colspan': 1}, table['merges'])
+        self.assertTrue(table['rows'][0][1]['covered'])
+        self.assertTrue(table['rows'][2][0]['covered'])
+        self.assertEqual(table['rows'][1][0]['runs'][0]['text'], '左')
+        self.assertEqual(table['rows'][2][1]['runs'][0]['text'], '右下')
+        self.assertIn({'type': 'pagebreak'}, doc.blocks)
+        folder = Path(tempfile.mkdtemp())
+        try:
+            wenju = folder / 'report.wenju'
+            docx = folder / 'report.docx'
+            fmt.save(doc, wenju)
+            loaded = fmt.load(wenju)
+            self.assertEqual(loaded.blocks, doc.blocks)
+            fmt.to_docx(loaded, docx)
+            xml = zipfile.ZipFile(str(docx)).read('word/document.xml').decode('utf-8')
+            self.assertIn('仿宋_GB2312', xml)
+            self.assertNotRegex(xml, r'eastAsia="仿宋"')
+            media = [name for name in zipfile.ZipFile(str(docx)).namelist() if name.startswith('word/media/')]
+            self.assertEqual(len(media), 1)
+            back = fmt.from_docx(docx)
+            images = [block for block in back.blocks if block['type'] == 'image']
+            self.assertEqual(len(images), 1)
+            self.assertEqual((images[0]['w'], images[0]['h']), (120, 60))
+            self.assertEqual(back.assets[images[0]['asset']], png)
+            headings = [block for block in back.blocks if block['type'] == 'heading']
+            self.assertEqual(headings[0]['level'], 1)
+            self.assertEqual(headings[0]['runs'][0]['text'], '报告标题')
+            restored = next(block for block in back.blocks if block['type'] == 'paragraph' and '正文一段' in ''.join(run.get('text', '') for run in block.get('runs') or []))
+            self.assertEqual(restored['runs'][0]['eastAsia'], '仿宋_GB2312')
+            grid = next(block for block in back.blocks if block['type'] == 'table')
+            self.assertIn({'row': 0, 'col': 0, 'rowspan': 1, 'colspan': 2}, grid['merges'])
+            self.assertTrue(grid['rows'][2][0].get('covered'))
+        finally:
+            shutil.rmtree(str(folder))
+
+        def hexrun(text):
+            return ''.join("\\'%02x" % byte for byte in text.encode('gb18030'))
+
+        font = r'\u20223?\u23435?_GB2312'
+        rtf = (
+            r'{\rtf1\ansi\ansicpg936\deff0{\fonttbl{\f0\fnil\fcharset134 ' + font + r';}}'
+            r'{\stylesheet{\s0\outlinelevel0 heading 1;}}'
+            r'\pard\plain\s0\outlinelevel0\b\fs44\f0 ' + hexrun('报告标题') + r'\par'
+            r'\pard\plain\b0\fs32\f0 ' + hexrun('正文一段') + r'\par'
+            r'{\pict\pngblip\picwgoal2400\pichgoal1200 ' + png.hex() + r'}'
+            r'\trowd\clmgf\cellx2000\clmrg\cellx4000\intbl\f0 ' + hexrun('表头') + r'\cell\cell\row'
+            r'\pard ' + hexrun('结尾') + r'\par}'
+        )
+        drawn = clip.document_from_parts(rtf=rtf.encode('ascii'))
+        self.assertEqual(fmt.validate(drawn), [])
+        self.assertEqual(drawn.blocks[0]['type'], 'heading')
+        self.assertEqual(drawn.blocks[0]['level'], 1)
+        self.assertEqual(drawn.blocks[0]['runs'][0]['text'], '报告标题')
+        self.assertEqual(drawn.blocks[0]['runs'][0]['eastAsia'], '仿宋_GB2312')
+        self.assertEqual(drawn.blocks[1]['runs'][0]['text'], '正文一段')
+        self.assertEqual(drawn.blocks[1]['runs'][0]['eastAsia'], '仿宋_GB2312')
+        self.assertEqual(drawn.blocks[1]['runs'][0]['size_pt'], 16)
+        picture = next(block for block in drawn.blocks if block['type'] == 'image')
+        self.assertEqual(drawn.assets[picture['asset']], png)
+        self.assertEqual((picture['w'], picture['h']), (120, 60))
+        grid = next(block for block in drawn.blocks if block['type'] == 'table')
+        self.assertEqual(grid['rows'][0][0]['runs'][0]['text'], '表头')
+        self.assertEqual(grid['merges'][0]['colspan'], 2)
+        self.assertIn('结尾', text_of(drawn))
+
     def test_validate_rejects_a_bad_block(self):
         doc = fmt.WenjuDoc([{'type': 'heading', 'level': 0, 'runs': []}, {'type': 'image', 'asset': 'missing.png', 'w': 1, 'h': 1}], {}, {})
         errors = fmt.validate(doc)

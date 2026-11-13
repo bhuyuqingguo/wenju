@@ -536,25 +536,45 @@ def _instr(paragraph, text):
 def _emit_runs(parent, runs, style=None, outline=None):
     paragraph = _emit_paragraph(parent, None, style=style, outline=outline)
     for run in runs or []:
-        _text_run(paragraph, run.get("text") or "", run.get("eastAsia"), run.get("size_pt") or 12, run.get("ascii"))
+        _text_run(
+            paragraph,
+            run.get("text") or "",
+            run.get("eastAsia"),
+            run.get("size_pt") or 12,
+            run.get("ascii"),
+            run.get("hAnsi"),
+            run.get("bold"),
+            run.get("italic"),
+            run.get("underline"),
+            run.get("color"),
+        )
     if not runs:
         _text_run(paragraph, "", "仿宋", 12, None)
     return paragraph
 
 
-def _text_run(paragraph, text, font, size_pt=12, ascii_font=None):
+def _text_run(paragraph, text, font, size_pt=12, ascii_font=None, h_ansi=None, bold=None, italic=None, underline=None, color=None):
     run = ET.SubElement(paragraph, _w("r"))
     rpr = ET.SubElement(run, _w("rPr"))
     fonts = ET.SubElement(rpr, _w("rFonts"))
     face = font or "仿宋"
     fonts.set(_w("eastAsia"), face)
     western = ascii_font or face
-    for attr in ("ascii", "hAnsi", "cs"):
-        fonts.set(_w(attr), western)
+    fonts.set(_w("ascii"), western)
+    fonts.set(_w("hAnsi"), h_ansi or western)
+    fonts.set(_w("cs"), western)
     if size_pt:
         half = str(int(round(float(size_pt) * 2)))
         ET.SubElement(rpr, _w("sz")).set(_w("val"), half)
         ET.SubElement(rpr, _w("szCs")).set(_w("val"), half)
+    if bold:
+        ET.SubElement(rpr, _w("b"))
+    if italic:
+        ET.SubElement(rpr, _w("i"))
+    if underline:
+        ET.SubElement(rpr, _w("u")).set(_w("val"), "single")
+    if color:
+        ET.SubElement(rpr, _w("color")).set(_w("val"), str(color))
     node = ET.SubElement(run, _w("t"))
     if text.startswith(" ") or text.endswith(" "):
         node.set(XML_SPACE, "preserve")
@@ -700,7 +720,7 @@ def _emit_table(parent, block):
                 _emit_rectangle(tc, block, merge)
                 c_i += _colspan(merge)
             else:
-                _emit_cell_text(tc, _run_text(row[c_i].get("runs")), _run_font(row[c_i].get("runs")))
+                _emit_cell_runs(tc, row[c_i].get("runs"))
                 c_i += 1
     return tbl
 
@@ -731,23 +751,54 @@ def _emit_continue(tr, merge):
 
 
 def _emit_rectangle(parent, block, merge):
-    emitted = False
+    runs = []
     for r in range(merge["row"], merge["row"] + _rowspan(merge)):
         for c in range(merge["col"], merge["col"] + _colspan(merge)):
             cell = block["rows"][r][c]
-            raw = _run_text(cell.get("runs"))
-            if not raw:
+            found = [run for run in (cell.get("runs") or []) if isinstance(run, dict) and run.get("text")]
+            if not found:
                 continue
-            _emit_cell_text(parent, raw, _run_font(cell.get("runs")))
-            emitted = True
-    if not emitted:
+            if runs and _run_text(runs) and not str(runs[-1].get("text") or "").endswith("\n"):
+                runs.append({"text": "\n"})
+            runs.extend(found)
+    if runs:
+        _emit_cell_runs(parent, runs)
+    else:
         _emit_paragraph(parent, "")
 
 
-def _emit_cell_text(parent, text, font):
-    parts = text.split("\n") if text else [""]
-    for part in parts:
-        _emit_paragraph(parent, part, font=font)
+def _emit_cell_runs(parent, runs):
+    paragraphs = [[]]
+    for run in runs or []:
+        if not isinstance(run, dict):
+            continue
+        parts = (run.get("text") or "").split("\n")
+        for index, part in enumerate(parts):
+            if part:
+                copied = dict(run)
+                copied["text"] = part
+                paragraphs[-1].append(copied)
+            if index < len(parts) - 1:
+                paragraphs.append([])
+    paragraphs = [item for item in paragraphs if item] or [[]]
+    for item in paragraphs:
+        if not item:
+            _emit_paragraph(parent, "")
+            continue
+        paragraph = _emit_paragraph(parent, None)
+        for run in item:
+            _text_run(
+                paragraph,
+                run.get("text") or "",
+                run.get("eastAsia"),
+                run.get("size_pt") or 12,
+                run.get("ascii"),
+                run.get("hAnsi"),
+                run.get("bold"),
+                run.get("italic"),
+                run.get("underline"),
+                run.get("color"),
+            )
 
 
 def _header_xml(text):
