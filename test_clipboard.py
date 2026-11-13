@@ -1,0 +1,285 @@
+import ast
+import base64
+import json
+import os
+import shutil
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+import sys
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / 'core'))
+import clipboard_import as clip
+import wenju_format as fmt
+
+SAMPLES = ROOT / 'core' / '样例' / 'clipboard'
+
+
+def text_of(doc):
+    parts = []
+    for block in doc.blocks:
+        kind = block.get('type')
+        if kind in ('heading', 'paragraph'):
+            parts.append(''.join(run.get('text', '') for run in block.get('runs') or []))
+        elif kind == 'table':
+            for row in block.get('rows') or []:
+                for cell in row:
+                    if cell.get('covered'):
+                        continue
+                    parts.append(''.join(run.get('text', '') for run in cell.get('runs') or []))
+    return '\n'.join(parts)
+
+
+def cf_html(payload):
+    data = payload if isinstance(payload, bytes) else payload.encode('utf-8')
+    template = 'Version:1.0\r\nStartHTML:{s:010d}\r\nEndHTML:{e:010d}\r\nStartFragment:{sf:010d}\r\nEndFragment:{ef:010d}\r\n'
+    prefix = template.format(s=0, e=0, sf=0, ef=0).encode('ascii')
+    start = len(prefix)
+    end = start + len(data)
+    prefix = template.format(s=start, e=end, sf=start, ef=end).encode('ascii')
+    return prefix + data
+
+
+class FakeMime(object):
+    def __init__(self, formats, html='', text=''):
+        self._formats = formats
+        self._html = html
+        self._text = text
+
+    def hasFormat(self, name):
+        return name in self._formats
+
+    def data(self, name):
+        return self._formats.get(name, b'')
+
+    def html(self):
+        return self._html
+
+    def text(self):
+        return self._text
+
+
+class ClipboardTests(unittest.TestCase):
+    def test_py38_syntax(self):
+        for name in ('core/wenju_format.py', 'core/clipboard_import.py', 'qt_compat.py'):
+            tree = ast.parse((ROOT / name).read_text(encoding='utf-8'))
+            for node in ast.walk(tree):
+                self.assertFalse(isinstance(node, ast.NamedExpr))
+                self.assertFalse(hasattr(ast, 'Match') and isinstance(node, ast.Match))
+
+    def test_wps_html_keeps_structure(self):
+        raw = (SAMPLES / 'wps.html').read_bytes()
+        doc = clip.document_from_parts(html=cf_html(raw))
+        self.assertEqual(fmt.validate(doc), [])
+        self.assertEqual(doc.blocks[0]['type'], 'heading')
+        self.assertEqual(doc.blocks[0]['level'], 1)
+        self.assertEqual(doc.blocks[0]['runs'][0]['text'], '通知标题')
+        self.assertEqual(doc.blocks[0]['runs'][0]['font'], '黑体')
+        self.assertEqual(doc.blocks[0]['runs'][0]['size'], 22)
+        self.assertTrue(doc.blocks[0]['runs'][0]['bold'])
+        self.assertEqual(doc.blocks[1]['runs'][0]['font'], '仿宋_GB2312')
+        self.assertEqual(doc.blocks[1]['runs'][0]['size'], 16)
+        self.assertEqual(doc.blocks[2]['type'], 'toc')
+        self.assertEqual(doc.blocks[3]['style'], 'toc')
+        self.assertEqual(doc.blocks[3]['runs'][0]['text'], '一、事项')
+        self.assertEqual(doc.blocks[4]['type'], 'heading')
+        self.assertEqual(doc.blocks[4]['level'], 2)
+        self.assertEqual(doc.blocks[4]['runs'][0]['font'], '楷体')
+        table = next(block for block in doc.blocks if block['type'] == 'table')
+        self.assertEqual(table['merges'], [
+            {'row': 0, 'col': 0, 'rowspan': 1, 'colspan': 2},
+            {'row': 1, 'col': 0, 'rowspan': 2, 'colspan': 1},
+        ])
+        self.assertEqual(table['rows'][0][0]['runs'][0]['text'], '表头')
+        self.assertTrue(table['rows'][0][1]['covered'])
+        self.assertEqual(table['rows'][1][0]['runs'][0]['text'], '左')
+        self.assertEqual(table['rows'][1][1]['runs'][0]['text'], '右上')
+        self.assertTrue(table['rows'][2][0]['covered'])
+        self.assertEqual(table['rows'][2][1]['runs'][0]['text'], '右下')
+        image = next(block for block in doc.blocks if block['type'] == 'image')
+        self.assertEqual(image['w'], 10)
+        self.assertEqual(image['h'], 8)
+        self.assertTrue(doc.assets[image['asset']].startswith(b'\x89PNG'))
+        self.assertIn({'type': 'pagebreak'}, doc.blocks)
+        self.assertIn('第二页', text_of(doc))
+
+    def test_yozo_html_gb18030(self):
+        doc = clip.document_from_parts(html=(SAMPLES / 'yozo.html').read_bytes())
+        self.assertEqual(fmt.validate(doc), [])
+        self.assertEqual(doc.blocks[0]['type'], 'heading')
+        self.assertEqual(doc.blocks[0]['level'], 2)
+        self.assertEqual(doc.blocks[0]['runs'][0]['text'], '永中标题')
+        self.assertEqual(doc.blocks[0]['runs'][0]['font'], '黑体')
+        self.assertEqual(doc.blocks[0]['runs'][0]['size'], 18)
+        self.assertEqual(doc.blocks[1]['runs'][0]['font'], '宋体')
+        self.assertEqual(doc.blocks[1]['runs'][0]['size'], 12)
+        table = next(block for block in doc.blocks if block['type'] == 'table')
+        self.assertEqual(table['rows'][0][0]['runs'][0]['text'], '合并列')
+        self.assertEqual(table['merges'][0]['colspan'], 2)
+        self.assertEqual(table['rows'][1][0]['runs'][0]['text'], '甲')
+        self.assertEqual(table['rows'][1][1]['runs'][0]['text'], '乙')
+        self.assertIn({'type': 'pagebreak'}, doc.blocks)
+        self.assertIn('下一页', text_of(doc))
+
+    def test_wps_rtf(self):
+        doc = clip.document_from_parts(rtf=(SAMPLES / 'wps.rtf').read_bytes())
+        self.assertEqual(fmt.validate(doc), [])
+        self.assertEqual(doc.blocks[0]['type'], 'heading')
+        self.assertEqual(doc.blocks[0]['level'], 1)
+        run = doc.blocks[0]['runs'][0]
+        self.assertEqual(run['text'], '通知标题')
+        self.assertEqual(run['font'], '黑体')
+        self.assertEqual(run['size'], 22)
+        self.assertTrue(run['bold'])
+        self.assertEqual(doc.blocks[1]['runs'][0]['text'], '正文第一段')
+        self.assertEqual(doc.blocks[1]['runs'][0]['font'], '宋体')
+        self.assertEqual(doc.blocks[1]['runs'][0]['size'], 16)
+        self.assertNotIn('bold', doc.blocks[1]['runs'][0])
+        table = next(block for block in doc.blocks if block['type'] == 'table')
+        self.assertEqual(table['rows'][0][0]['runs'][0]['text'], '表头')
+        self.assertEqual(table['merges'][0]['colspan'], 2)
+        self.assertEqual(table['rows'][1][0]['runs'][0]['text'], '左')
+        self.assertEqual(table['rows'][1][1]['runs'][0]['text'], '右上')
+        self.assertEqual(table['rows'][2][1]['runs'][0]['text'], '右下')
+        self.assertTrue(any(item['rowspan'] == 2 for item in table['merges']))
+        self.assertIn({'type': 'pagebreak'}, doc.blocks)
+        self.assertEqual(doc.blocks[-1]['runs'][0]['text'], '第二页')
+
+    def test_yozo_rtf_stylesheet_heading(self):
+        doc = clip.document_from_parts(rtf=(SAMPLES / 'yozo.rtf').read_bytes())
+        self.assertEqual(doc.blocks[0]['level'], 1)
+        self.assertEqual(doc.blocks[0]['runs'][0]['text'], '永中标题')
+        self.assertEqual(doc.blocks[0]['runs'][0]['font'], '黑体')
+        self.assertEqual(doc.blocks[0]['runs'][0]['size'], 18)
+        self.assertEqual(doc.blocks[1]['runs'][0]['text'], '永中正文')
+        self.assertEqual(doc.blocks[1]['runs'][0]['font'], '宋体')
+        table = doc.blocks[2]
+        self.assertEqual(table['rows'][0][0]['runs'][0]['text'], '甲')
+        self.assertEqual(table['rows'][0][1]['runs'][0]['text'], '乙')
+        self.assertEqual(sorted((item['row'], item['col'], item['rowspan']) for item in table['merges']), [(0, 0, 2), (0, 1, 2)])
+        self.assertTrue(table['rows'][1][0]['covered'])
+        self.assertTrue(table['rows'][1][1]['covered'])
+
+    def test_rtf_pict(self):
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==')
+        rtf = r'{\rtf1\ansi\pard before\par{\pict\pngblip\picwgoal150\pichgoal300 ' + png.hex() + r'}\par after\par}'
+        doc = clip.document_from_parts(rtf=rtf.encode('ascii'))
+        image = next(block for block in doc.blocks if block['type'] == 'image')
+        self.assertEqual(doc.assets[image['asset']], png)
+        self.assertEqual(image['w'], 10)
+        self.assertEqual(image['h'], 20)
+        self.assertIn('before', text_of(doc))
+        self.assertIn('after', text_of(doc))
+
+    def test_plain_and_empty(self):
+        doc = clip.document_from_parts(plain=(SAMPLES / 'plain.txt').read_text(encoding='utf-8'))
+        self.assertEqual([block['runs'][0]['text'] for block in doc.blocks], ['第一段', '第二段'])
+        with self.assertRaises(clip.ClipboardEmpty):
+            clip.document_from_parts(html=b'<html></html>', plain='  ')
+
+    def test_html_wins_over_rtf_and_plain(self):
+        doc = clip.document_from_parts(
+            html='<p>来自 HTML</p>',
+            rtf=br'{\rtf1\ansi\pard from rtf\par}',
+            plain='来自纯文本',
+        )
+        self.assertIn('来自 HTML', text_of(doc))
+        self.assertNotIn('from rtf', text_of(doc))
+        self.assertNotIn('来自纯文本', text_of(doc))
+
+    def test_empty_html_falls_through_to_rtf(self):
+        doc = clip.document_from_parts(html=b'<html><body></body></html>', rtf=(SAMPLES / 'yozo.rtf').read_bytes(), plain='纯文本')
+        self.assertIn('永中标题', text_of(doc))
+        self.assertNotIn('纯文本', text_of(doc))
+
+    def test_windows_rtf_mime_and_loose_image(self):
+        png = b'\x89PNG\r\n\x1a\nrest'
+        mime = FakeMime({
+            'Rich Text Format': (SAMPLES / 'wps.rtf').read_bytes(),
+            'text/plain': '不要用纯文本'.encode('utf-8'),
+            'image/png': png,
+        })
+        doc = clip.document_from_mime(mime)
+        self.assertIn('通知标题', text_of(doc))
+        self.assertNotIn('不要用纯文本', text_of(doc))
+        image = next(block for block in doc.blocks if block['type'] == 'image')
+        self.assertEqual(doc.assets[image['asset']], png)
+
+    def test_progress_reaches_100(self):
+        seen = []
+        clip.document_from_parts(html=(SAMPLES / 'wps.html').read_bytes(), progress=seen.append)
+        self.assertEqual(seen[0], 5)
+        self.assertEqual(seen[-1], 100)
+        self.assertEqual(seen, sorted(seen))
+        self.assertTrue(all(0 <= value <= 100 for value in seen))
+
+    def test_save_load_and_docx_roundtrip(self):
+        doc = clip.document_from_parts(html=(SAMPLES / 'wps.html').read_bytes())
+        folder = Path(tempfile.mkdtemp())
+        try:
+            wenju = folder / 'clip.wenju'
+            fmt.save(doc, wenju)
+            with zipfile.ZipFile(str(wenju)) as archive:
+                names = set(archive.namelist())
+                self.assertTrue({'document.json', 'manifest.json', 'styles.json'} <= names)
+                self.assertTrue(any(name.startswith('assets/') for name in names))
+                self.assertIsInstance(json.loads(archive.read('document.json').decode('utf-8')), list)
+            loaded = fmt.load(wenju)
+            self.assertEqual(loaded.blocks, doc.blocks)
+            self.assertEqual(loaded.assets, doc.assets)
+            docx = folder / 'clip.docx'
+            fmt.to_docx(loaded, docx)
+            back = fmt.from_docx(docx)
+            self.assertIn('通知标题', text_of(back))
+            self.assertIn('正文第一段', text_of(back))
+            self.assertIn('表头', text_of(back))
+            self.assertIn('右下', text_of(back))
+            self.assertIn('第二页', text_of(back))
+            self.assertTrue(any(block['type'] == 'heading' and block['level'] == 1 for block in back.blocks))
+            self.assertTrue(any(name.startswith('word/media/') for name in zipfile.ZipFile(str(docx)).namelist()))
+            rules = json.loads((ROOT / 'core' / 'rules.json').read_text(encoding='utf-8-sig'))
+            brushed = folder / 'brushed.docx'
+            fmt.to_docx(loaded, brushed, template=rules)
+            painted = fmt.from_docx(brushed)
+            heading = next(block for block in painted.blocks if block['type'] == 'heading')
+            self.assertEqual(heading['runs'][0]['font'], '黑体')
+            self.assertEqual(heading['runs'][0]['size'], 16)
+            self.assertNotIn('bold', heading['runs'][0])
+            body = next(block for block in painted.blocks if block['type'] == 'paragraph' and '正文' in ''.join(run.get('text', '') for run in block['runs']))
+            self.assertEqual(body['runs'][0]['font'], rules['字体']['正文'])
+            self.assertEqual(body['runs'][0]['size'], 16)
+        finally:
+            shutil.rmtree(str(folder))
+
+    def test_qt_binding_flag(self):
+        import qt_compat
+        previous = os.environ.get('WENJU_QT')
+        try:
+            os.environ['WENJU_QT'] = '5'
+            self.assertEqual(qt_compat.binding(), 'PySide2')
+            os.environ['WENJU_QT'] = '6'
+            self.assertEqual(qt_compat.binding(), 'PySide6')
+            os.environ.pop('WENJU_QT', None)
+            try:
+                import PySide6  # noqa: F401
+                expected = 'PySide6'
+            except ImportError:
+                expected = 'PySide2'
+            self.assertEqual(qt_compat.binding(), expected)
+        finally:
+            if previous is None:
+                os.environ.pop('WENJU_QT', None)
+            else:
+                os.environ['WENJU_QT'] = previous
+
+    def test_validate_rejects_a_bad_block(self):
+        doc = fmt.WenjuDoc([{'type': 'heading', 'level': 0, 'runs': []}, {'type': 'image', 'asset': 'assets/missing.png', 'w': 1, 'h': 1}])
+        errors = fmt.validate(doc)
+        self.assertTrue(errors)
+
+
+if __name__ == '__main__':
+    unittest.main()

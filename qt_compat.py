@@ -4,6 +4,8 @@ Win10/11 and Kylin packages ship PySide6. The Windows 7 package ships only
 PySide2 and sets WENJU_QT=5. With PySide6 installed and WENJU_QT unset, this
 module loads PySide6 and keeps the existing style and color-scheme calls.
 """
+import importlib
+import importlib.util
 import os
 
 QT = '6'
@@ -31,6 +33,26 @@ if QT == '5':
     from PySide2.QtWidgets import QApplication, QFileDialog
     from PySide2.QtTest import QTest
     import shiboken2 as _shiboken
+
+
+def binding():
+    flag = os.environ.get('WENJU_QT', '').strip()
+    if flag == '5':
+        return 'PySide2'
+    if flag == '6':
+        return 'PySide6'
+    if importlib.util.find_spec('PySide6') is not None:
+        return 'PySide6'
+    return 'PySide2'
+
+
+def load():
+    name = 'PySide2' if QT == '5' else 'PySide6'
+    return (
+        importlib.import_module(name + '.QtCore'),
+        importlib.import_module(name + '.QtGui'),
+        importlib.import_module(name + '.QtWidgets'),
+    )
 
 
 def exec_app(app):
