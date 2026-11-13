@@ -1,5 +1,6 @@
 import base64
 import re
+import struct
 from html.parser import HTMLParser
 
 import wenju_format
@@ -27,6 +28,48 @@ class ClipboardEmpty(Exception):
 def _progress(callback, value):
     if callback:
         callback(int(value))
+
+
+def pack_grid(cells):
+    if not cells:
+        return [], []
+    max_r = max(pos[0] for pos in cells)
+    max_c = max(pos[1] for pos in cells)
+    rows = []
+    merges = []
+    for r in range(max_r + 1):
+        row = []
+        for c in range(max_c + 1):
+            cell = cells.get((r, c)) or {'covered': True, 'runs': []}
+            row.append(cell)
+            if not cell.get('covered'):
+                span_c = int(cell.get('colspan') or 1)
+                span_r = int(cell.get('rowspan') or 1)
+                if span_c > 1 or span_r > 1:
+                    merges.append({'row': r, 'col': c, 'rowspan': span_r, 'colspan': span_c})
+        rows.append(row)
+    return rows, merges
+
+
+def _asset_name(name):
+    text = str(name or '').replace('\\', '/').split('/')[-1]
+    return text or 'image.bin'
+
+
+def _point_size(width, height, data):
+    width = float(width or 0)
+    height = float(height or 0)
+    if data and data[:8] == b'\x89PNG\r\n\x1a\n' and len(data) >= 24 and (width <= 0 or height <= 0):
+        px_w, px_h = struct.unpack('>II', data[16:24])
+        if width <= 0 and px_w:
+            width = px_w * 0.75
+        if height <= 0 and px_h:
+            height = px_h * 0.75
+    if width <= 0:
+        width = 72
+    if height <= 0:
+        height = 72
+    return width, height
 
 
 def _as_bytes(data):
@@ -184,6 +227,9 @@ class _HtmlDoc(HTMLParser):
         self.images = 0
         self.toc_done = False
         self.later_images = []
+        self.progress = None
+        self.total = 1
+        self.seen = 0
 
     def _style(self):
         merged = {}
@@ -193,11 +239,27 @@ class _HtmlDoc(HTMLParser):
                     merged[key] = item[key]
         return merged
 
+    def _tick(self):
+        self.seen += 1
+        if not self.progress or self.seen % 25:
+            return
+        span = min(1.0, self.seen / float(self.total or 1))
+        _progress(self.progress, min(79, 30 + int(49 * span)))
+
     def _add(self, text):
         if not text:
             return
+        style = self._style()
         run = {'text': text}
-        run.update(self._style())
+        if style.get('font'):
+            run['eastAsia'] = style['font']
+            run['ascii'] = style['font']
+        if style.get('size'):
+            run['size_pt'] = style['size']
+        if style.get('bold'):
+            run['bold'] = True
+        if style.get('italic'):
+            run['italic'] = True
         if self.runs and {k: v for k, v in self.runs[-1].items() if k != 'text'} == {k: v for k, v in run.items() if k != 'text'}:
             self.runs[-1]['text'] += text
             return
@@ -232,6 +294,7 @@ class _HtmlDoc(HTMLParser):
             return
         if self.ignore:
             return
+        self._tick()
         css = _css(attr.get('style'))
         if tag == 'br':
             if css.get('page') and self.cell is None and self.table is None:
@@ -244,8 +307,8 @@ class _HtmlDoc(HTMLParser):
             self._flush()
             image = self._image(attr)
             if image is None and src_present(attr):
-                width = int(attr['width']) if attr.get('width', '').isdigit() else 0
-                height = int(attr['height']) if attr.get('height', '').isdigit() else 0
+                width = int(attr['width']) * 0.75 if attr.get('width', '').isdigit() else 0
+                height = int(attr['height']) * 0.75 if attr.get('height', '').isdigit() else 0
                 image = {'type': 'image', 'asset': '', 'w': width, 'h': height}
             if image and self.table is not None:
                 self.later_images.append(image)
@@ -335,7 +398,7 @@ class _HtmlDoc(HTMLParser):
             return
         if tag == 'table' and self.table is not None:
             self._flush()
-            rows, merges = wenju_format.pack_grid(self.table['grid'])
+            rows, merges = pack_grid(self.table['grid'])
             block = {'type': 'table', 'rows': rows, 'merges': merges} if rows else None
             if self.table_stack:
                 self.table, self.cell = self.table_stack.pop()
@@ -382,8 +445,8 @@ class _HtmlDoc(HTMLParser):
 
     def _image(self, attr):
         src = attr.get('src') or ''
-        width = int(attr['width']) if attr.get('width', '').isdigit() else 0
-        height = int(attr['height']) if attr.get('height', '').isdigit() else 0
+        width = int(attr['width']) * 0.75 if attr.get('width', '').isdigit() else 0
+        height = int(attr['height']) * 0.75 if attr.get('height', '').isdigit() else 0
         match = re.match(r'data:image/(png|jpeg|jpg|bmp);base64,(.+)', src, re.I | re.S)
         if not match:
             return None
@@ -394,14 +457,15 @@ class _HtmlDoc(HTMLParser):
         except Exception:
             return None
         self.images += 1
-        asset = 'assets/image%d.%s' % (self.images, ext)
+        asset = 'image%d.%s' % (self.images, ext)
         self.assets[asset] = data
+        width, height = _point_size(width, height, data)
         return {'type': 'image', 'asset': asset, 'w': width, 'h': height}
 
     def close_doc(self):
         self._flush()
         if self.table is not None:
-            rows, merges = wenju_format.pack_grid(self.table['grid'])
+            rows, merges = pack_grid(self.table['grid'])
             if rows:
                 self.blocks.append({'type': 'table', 'rows': rows, 'merges': merges})
             self.blocks.extend(self.later_images)
@@ -410,7 +474,10 @@ class _HtmlDoc(HTMLParser):
 def parse_html(raw, progress=None):
     _progress(progress, 30)
     parser = _HtmlDoc()
-    parser.feed(html_fragment(raw))
+    fragment = html_fragment(raw)
+    parser.progress = progress
+    parser.total = max(1, fragment.count('<'))
+    parser.feed(fragment)
     parser.close()
     parser.close_doc()
     _progress(progress, 80)
@@ -535,10 +602,16 @@ class _RtfDoc(object):
         self.row_defs = []
         self.cur_def = {}
         self.skip_chars = 0
+        self.progress = None
+        self.rtf_total = 1
+        self.rtf_seen = 0
 
     def parse(self, raw, progress=None):
         _progress(progress, 30)
-        tokens = _tokens(_rtf_string(raw))
+        self.progress = progress
+        text = _rtf_string(raw)
+        self.rtf_total = max(1, len(text) // 12)
+        tokens = _tokens(text)
         self._walk(tokens)
         if self.in_row:
             self._finish_row()
@@ -645,9 +718,9 @@ class _RtfDoc(object):
                 if token[0] == 'word' and token[1] in ('pngblip', 'jpegblip', 'wbitmap', 'dibitmap'):
                     blip = token[1]
                 elif token[0] == 'word' and token[1] == 'picwgoal' and token[2]:
-                    width = int(token[2] / 15)
+                    width = token[2] / 20.0
                 elif token[0] == 'word' and token[1] == 'pichgoal' and token[2]:
-                    height = int(token[2] / 15)
+                    height = token[2] / 20.0
                 elif token[0] == 'text':
                     hex_text.append(token[1])
                 elif token[0] == 'group':
@@ -670,9 +743,10 @@ class _RtfDoc(object):
             ext = 'bmp'
         else:
             ext = 'png'
-        asset = 'assets/rtf%d.%s' % (self.images, ext)
+        asset = 'rtf%d.%s' % (self.images, ext)
         self.assets[asset] = data
-        image = {'type': 'image', 'asset': asset, 'w': width or 0, 'h': height or 0}
+        width, height = _point_size(width, height, data)
+        image = {'type': 'image', 'asset': asset, 'w': width, 'h': height}
         if self.in_row:
             self.pending_images.append(image)
             return
@@ -689,6 +763,10 @@ class _RtfDoc(object):
             pending[:] = b''
 
         for token in tokens:
+            self.rtf_seen += 1
+            if self.progress and self.rtf_seen % 80 == 0:
+                span = min(1.0, self.rtf_seen / float(self.rtf_total or 1))
+                _progress(self.progress, min(79, 30 + int(49 * span)))
             kind = token[0]
             if kind == 'group':
                 flush_bytes()
@@ -741,14 +819,15 @@ class _RtfDoc(object):
         if self.fmt.get('italic'):
             run['italic'] = True
         if self.fmt.get('size'):
-            run['size'] = self.fmt['size']
+            run['size_pt'] = self.fmt['size']
         number = self.fmt.get('font')
         font = self.fonts.get(self.deff if number is None else number)
         if font and font.get('name'):
-            run['font'] = font['name']
+            run['eastAsia'] = font['name']
+            run['ascii'] = font['name']
         if self.runs:
             prev = self.runs[-1]
-            if {k: prev.get(k) for k in ('bold', 'italic', 'size', 'font')} == {k: run.get(k) for k in ('bold', 'italic', 'size', 'font')}:
+            if {k: prev.get(k) for k in ('bold', 'italic', 'size_pt', 'eastAsia', 'ascii')} == {k: run.get(k) for k in ('bold', 'italic', 'size_pt', 'eastAsia', 'ascii')}:
                 prev['text'] += text
                 return
         self.runs.append(run)
@@ -763,7 +842,7 @@ class _RtfDoc(object):
             item['text'] = text
             if cleaned:
                 prev = cleaned[-1]
-                if {k: prev.get(k) for k in ('bold', 'italic', 'size', 'font')} == {k: item.get(k) for k in ('bold', 'italic', 'size', 'font')}:
+                if {k: prev.get(k) for k in ('bold', 'italic', 'size_pt', 'eastAsia', 'ascii')} == {k: item.get(k) for k in ('bold', 'italic', 'size_pt', 'eastAsia', 'ascii')}:
                     prev['text'] += text
                     continue
             cleaned.append(item)
@@ -912,7 +991,7 @@ class _RtfDoc(object):
                     for dc in range(span):
                         open_origin.pop(c + dc, None)
                 c += span
-        rows, merges = wenju_format.pack_grid(grid)
+        rows, merges = pack_grid(grid)
         if rows:
             self.blocks.append({'type': 'table', 'rows': rows, 'merges': merges})
         self.table_rows = []
@@ -965,9 +1044,61 @@ def _merge_rtf_images(blocks, assets, rtf):
     return kept, assets
 
 
+_CN = ('', '一', '二', '三', '四', '五', '六', '七', '八', '九')
+_SIZES = {
+    '初号': 42, '小初': 36, '一号': 26, '小一': 24, '二号': 22, '小二': 18,
+    '三号': 16, '小三': 15, '四号': 14, '小四': 12, '五号': 10.5, '小五': 9,
+    '六号': 7.5, '小六': 6.5, '七号': 5.5, '八号': 5,
+}
+
+
+def _pt_name(value):
+    if isinstance(value, bool) or value is None or value == '':
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if text in _SIZES:
+        return float(_SIZES[text])
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def brush_styles(rules):
+    if not isinstance(rules, dict) or ('字体' not in rules and '正文' not in rules):
+        return rules
+    fonts = rules.get('字体') or {}
+    body = rules.get('正文') or {}
+    heads = rules.get('标题') or {}
+    ascii_font = fonts.get('西文') or 'Times New Roman'
+    body_size = _pt_name(body.get('字号')) or 16
+    styles = {
+        '正文': {
+            'eastAsia': fonts.get('正文') or '仿宋_GB2312',
+            'ascii': ascii_font,
+            'hAnsi': ascii_font,
+            'size_pt': body_size,
+            'bold': bool(body.get('加粗')),
+        },
+    }
+    for level in range(1, 10):
+        spec = heads.get(_CN[level] + '级') or {}
+        font = spec.get('字体') or fonts.get(_CN[level] + '级标题') or fonts.get('正文')
+        styles['标题%d' % level] = {
+            'eastAsia': font,
+            'ascii': ascii_font,
+            'hAnsi': ascii_font,
+            'size_pt': _pt_name(spec.get('字号')) or body_size,
+            'bold': bool(spec.get('加粗')),
+        }
+    return styles
+
+
 def document_from_parts(html=None, rtf=None, plain=None, images=None, progress=None):
     _progress(progress, 5)
-    images = dict(images or {})
+    images = {_asset_name(name): data for name, data in dict(images or {}).items()}
     blocks = []
     assets = {}
     if _has_bytes(html):
@@ -983,12 +1114,13 @@ def document_from_parts(html=None, rtf=None, plain=None, images=None, progress=N
     blocks = [block for block in blocks if not (block.get('type') == 'image' and not block.get('asset'))]
     if images and not any(block.get('type') == 'image' for block in blocks):
         assets.update(images)
-        for name in images:
-            blocks.append({'type': 'image', 'asset': name, 'w': 0, 'h': 0})
+        for name, data in images.items():
+            width, height = _point_size(0, 0, data)
+            blocks.append({'type': 'image', 'asset': name, 'w': width, 'h': height})
     if not _nonempty(blocks, assets):
         raise ClipboardEmpty('剪贴板里没有可导入的文字、表格或图片')
     _progress(progress, 100)
-    return wenju_format.WenjuDoc(blocks, {'source': 'clipboard', 'mode': 'original'}, assets)
+    return wenju_format.WenjuDoc(blocks, {}, assets, source={'kind': 'clipboard', 'name': ''})
 
 
 def document_from_mime(mime, progress=None):
@@ -1012,7 +1144,7 @@ def document_from_mime(mime, progress=None):
     for mime_name, ext in IMAGE_MIMES:
         raw = _first_bytes(mime, (mime_name,))
         if raw:
-            images['assets/clipboard.%s' % ext] = raw
+            images['clipboard.%s' % ext] = raw
             break
     return document_from_parts(html, rtf, plain, images, progress)
 

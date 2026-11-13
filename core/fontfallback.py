@@ -184,6 +184,14 @@ def install_user_font(src):
     return '已安装到 ~/.local/share/fonts/wenju'
 
 
+def resolve(name):
+    if not name:
+        return name
+    if str(name) == '仿宋_GB2312':
+        return '仿宋'
+    return name
+
+
 def application_font_files(root):
     files = []
     for folder in optional_font_dirs(root):

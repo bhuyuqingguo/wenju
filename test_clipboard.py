@@ -78,17 +78,17 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(doc.blocks[0]['type'], 'heading')
         self.assertEqual(doc.blocks[0]['level'], 1)
         self.assertEqual(doc.blocks[0]['runs'][0]['text'], '通知标题')
-        self.assertEqual(doc.blocks[0]['runs'][0]['font'], '黑体')
-        self.assertEqual(doc.blocks[0]['runs'][0]['size'], 22)
+        self.assertEqual(doc.blocks[0]['runs'][0]['eastAsia'], '黑体')
+        self.assertEqual(doc.blocks[0]['runs'][0]['size_pt'], 22)
         self.assertTrue(doc.blocks[0]['runs'][0]['bold'])
-        self.assertEqual(doc.blocks[1]['runs'][0]['font'], '仿宋_GB2312')
-        self.assertEqual(doc.blocks[1]['runs'][0]['size'], 16)
+        self.assertEqual(doc.blocks[1]['runs'][0]['eastAsia'], '仿宋_GB2312')
+        self.assertEqual(doc.blocks[1]['runs'][0]['size_pt'], 16)
         self.assertEqual(doc.blocks[2]['type'], 'toc')
         self.assertEqual(doc.blocks[3]['style'], 'toc')
         self.assertEqual(doc.blocks[3]['runs'][0]['text'], '一、事项')
         self.assertEqual(doc.blocks[4]['type'], 'heading')
         self.assertEqual(doc.blocks[4]['level'], 2)
-        self.assertEqual(doc.blocks[4]['runs'][0]['font'], '楷体')
+        self.assertEqual(doc.blocks[4]['runs'][0]['eastAsia'], '楷体')
         table = next(block for block in doc.blocks if block['type'] == 'table')
         self.assertEqual(table['merges'], [
             {'row': 0, 'col': 0, 'rowspan': 1, 'colspan': 2},
@@ -101,8 +101,8 @@ class ClipboardTests(unittest.TestCase):
         self.assertTrue(table['rows'][2][0]['covered'])
         self.assertEqual(table['rows'][2][1]['runs'][0]['text'], '右下')
         image = next(block for block in doc.blocks if block['type'] == 'image')
-        self.assertEqual(image['w'], 10)
-        self.assertEqual(image['h'], 8)
+        self.assertEqual(image['w'], 7.5)
+        self.assertEqual(image['h'], 6)
         self.assertTrue(doc.assets[image['asset']].startswith(b'\x89PNG'))
         self.assertIn({'type': 'pagebreak'}, doc.blocks)
         self.assertIn('第二页', text_of(doc))
@@ -113,10 +113,10 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(doc.blocks[0]['type'], 'heading')
         self.assertEqual(doc.blocks[0]['level'], 2)
         self.assertEqual(doc.blocks[0]['runs'][0]['text'], '永中标题')
-        self.assertEqual(doc.blocks[0]['runs'][0]['font'], '黑体')
-        self.assertEqual(doc.blocks[0]['runs'][0]['size'], 18)
-        self.assertEqual(doc.blocks[1]['runs'][0]['font'], '宋体')
-        self.assertEqual(doc.blocks[1]['runs'][0]['size'], 12)
+        self.assertEqual(doc.blocks[0]['runs'][0]['eastAsia'], '黑体')
+        self.assertEqual(doc.blocks[0]['runs'][0]['size_pt'], 18)
+        self.assertEqual(doc.blocks[1]['runs'][0]['eastAsia'], '宋体')
+        self.assertEqual(doc.blocks[1]['runs'][0]['size_pt'], 12)
         table = next(block for block in doc.blocks if block['type'] == 'table')
         self.assertEqual(table['rows'][0][0]['runs'][0]['text'], '合并列')
         self.assertEqual(table['merges'][0]['colspan'], 2)
@@ -132,12 +132,12 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(doc.blocks[0]['level'], 1)
         run = doc.blocks[0]['runs'][0]
         self.assertEqual(run['text'], '通知标题')
-        self.assertEqual(run['font'], '黑体')
-        self.assertEqual(run['size'], 22)
+        self.assertEqual(run['eastAsia'], '黑体')
+        self.assertEqual(run['size_pt'], 22)
         self.assertTrue(run['bold'])
         self.assertEqual(doc.blocks[1]['runs'][0]['text'], '正文第一段')
-        self.assertEqual(doc.blocks[1]['runs'][0]['font'], '宋体')
-        self.assertEqual(doc.blocks[1]['runs'][0]['size'], 16)
+        self.assertEqual(doc.blocks[1]['runs'][0]['eastAsia'], '宋体')
+        self.assertEqual(doc.blocks[1]['runs'][0]['size_pt'], 16)
         self.assertNotIn('bold', doc.blocks[1]['runs'][0])
         table = next(block for block in doc.blocks if block['type'] == 'table')
         self.assertEqual(table['rows'][0][0]['runs'][0]['text'], '表头')
@@ -153,10 +153,10 @@ class ClipboardTests(unittest.TestCase):
         doc = clip.document_from_parts(rtf=(SAMPLES / 'yozo.rtf').read_bytes())
         self.assertEqual(doc.blocks[0]['level'], 1)
         self.assertEqual(doc.blocks[0]['runs'][0]['text'], '永中标题')
-        self.assertEqual(doc.blocks[0]['runs'][0]['font'], '黑体')
-        self.assertEqual(doc.blocks[0]['runs'][0]['size'], 18)
+        self.assertEqual(doc.blocks[0]['runs'][0]['eastAsia'], '黑体')
+        self.assertEqual(doc.blocks[0]['runs'][0]['size_pt'], 18)
         self.assertEqual(doc.blocks[1]['runs'][0]['text'], '永中正文')
-        self.assertEqual(doc.blocks[1]['runs'][0]['font'], '宋体')
+        self.assertEqual(doc.blocks[1]['runs'][0]['eastAsia'], '宋体')
         table = doc.blocks[2]
         self.assertEqual(table['rows'][0][0]['runs'][0]['text'], '甲')
         self.assertEqual(table['rows'][0][1]['runs'][0]['text'], '乙')
@@ -170,8 +170,8 @@ class ClipboardTests(unittest.TestCase):
         doc = clip.document_from_parts(rtf=rtf.encode('ascii'))
         image = next(block for block in doc.blocks if block['type'] == 'image')
         self.assertEqual(doc.assets[image['asset']], png)
-        self.assertEqual(image['w'], 10)
-        self.assertEqual(image['h'], 20)
+        self.assertEqual(image['w'], 7.5)
+        self.assertEqual(image['h'], 15)
         self.assertIn('before', text_of(doc))
         self.assertIn('after', text_of(doc))
 
@@ -250,16 +250,16 @@ class ClipboardTests(unittest.TestCase):
         doc = clip.document_from_parts(rtf=raw)
         run = doc.blocks[0]['runs'][0]
         self.assertEqual(run['text'], '通知')
-        self.assertEqual(run['font'], '黑体')
-        self.assertEqual(run['size'], 22)
+        self.assertEqual(run['eastAsia'], '黑体')
+        self.assertEqual(run['size_pt'], 22)
         named = clip.document_from_parts(rtf=(
             r'{\rtf1\ansi\ansicpg936\deff0{\fonttbl{\f0\fnil\fcharset134 \u23435?\u20307?;}}'
             r'\pard\f0\fs32 \u27491?\u25991?\par}'
         ))
         body = named.blocks[0]['runs'][0]
         self.assertEqual(body['text'], '正文')
-        self.assertEqual(body['font'], '宋体')
-        self.assertEqual(body['size'], 16)
+        self.assertEqual(body['eastAsia'], '宋体')
+        self.assertEqual(body['size_pt'], 16)
 
     def test_font_tag_and_cell_style_keep_point_size(self):
         html = (
@@ -269,11 +269,11 @@ class ClipboardTests(unittest.TestCase):
             '<td style="font-family:楷体;font-size:16pt">丁</td></tr></table>'
         )
         doc = clip.document_from_parts(html=html)
-        self.assertEqual(doc.blocks[0]['runs'][0], {'text': '甲', 'font': '宋体', 'size': 16})
-        self.assertEqual(doc.blocks[1]['runs'][0]['size'], 16)
+        self.assertEqual(doc.blocks[0]['runs'][0], {'text': '甲', 'eastAsia': '宋体', 'ascii': '宋体', 'size_pt': 16})
+        self.assertEqual(doc.blocks[1]['runs'][0]['size_pt'], 16)
         table = next(block for block in doc.blocks if block['type'] == 'table')
-        self.assertEqual(table['rows'][0][0]['runs'][0], {'text': '丙', 'font': '黑体', 'size': 14})
-        self.assertEqual(table['rows'][0][1]['runs'][0], {'text': '丁', 'font': '楷体', 'size': 16})
+        self.assertEqual(table['rows'][0][0]['runs'][0], {'text': '丙', 'eastAsia': '黑体', 'ascii': '黑体', 'size_pt': 14})
+        self.assertEqual(table['rows'][0][1]['runs'][0], {'text': '丁', 'eastAsia': '楷体', 'ascii': '楷体', 'size_pt': 16})
 
     def test_file_image_in_html_keeps_the_rtf_pict(self):
         png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==')
@@ -304,7 +304,7 @@ class ClipboardTests(unittest.TestCase):
 
     def test_bmp_docx_keeps_the_bitmap(self):
         payload = b'BMrest-of-bitmap'
-        doc = clip.document_from_parts(plain='图说', images={'assets/clipboard.bmp': payload})
+        doc = clip.document_from_parts(plain='图说', images={'clipboard.bmp': payload})
         folder = Path(tempfile.mkdtemp())
         try:
             docx = folder / 'bmp.docx'
@@ -318,6 +318,17 @@ class ClipboardTests(unittest.TestCase):
                 self.assertTrue(archive.read(media[0]).startswith(b'BM'))
         finally:
             shutil.rmtree(str(folder))
+
+    def test_long_html_progress_moves(self):
+        html = '<html><body>' + ''.join('<p>第%d段</p>' % index for index in range(2000)) + '</body></html>'
+        seen = []
+        doc = clip.document_from_parts(html=html, progress=seen.append)
+        self.assertEqual(seen[0], 5)
+        self.assertEqual(seen[-1], 100)
+        self.assertEqual(seen, sorted(seen))
+        self.assertGreater(len(set(seen)), 4)
+        self.assertLess(seen[1], 100)
+        self.assertEqual(len(doc.blocks), 2000)
 
     def test_progress_reaches_100(self):
         seen = []
@@ -337,7 +348,7 @@ class ClipboardTests(unittest.TestCase):
                 names = set(archive.namelist())
                 self.assertTrue({'document.json', 'manifest.json', 'styles.json'} <= names)
                 self.assertTrue(any(name.startswith('assets/') for name in names))
-                self.assertIsInstance(json.loads(archive.read('document.json').decode('utf-8')), list)
+                self.assertIsInstance(json.loads(archive.read('document.json').decode('utf-8')).get('blocks'), list)
             loaded = fmt.load(wenju)
             self.assertEqual(loaded.blocks, doc.blocks)
             self.assertEqual(loaded.assets, doc.assets)
@@ -353,15 +364,15 @@ class ClipboardTests(unittest.TestCase):
             self.assertTrue(any(name.startswith('word/media/') for name in zipfile.ZipFile(str(docx)).namelist()))
             rules = json.loads((ROOT / 'core' / 'rules.json').read_text(encoding='utf-8-sig'))
             brushed = folder / 'brushed.docx'
-            fmt.to_docx(loaded, brushed, template=rules)
+            fmt.to_docx(loaded, brushed, template=clip.brush_styles(rules))
             painted = fmt.from_docx(brushed)
             heading = next(block for block in painted.blocks if block['type'] == 'heading')
-            self.assertEqual(heading['runs'][0]['font'], '黑体')
-            self.assertEqual(heading['runs'][0]['size'], 16)
+            self.assertEqual(heading['runs'][0]['eastAsia'], '黑体')
+            self.assertEqual(heading['runs'][0]['size_pt'], 16)
             self.assertNotIn('bold', heading['runs'][0])
             body = next(block for block in painted.blocks if block['type'] == 'paragraph' and '正文' in ''.join(run.get('text', '') for run in block['runs']))
-            self.assertEqual(body['runs'][0]['font'], rules['字体']['正文'])
-            self.assertEqual(body['runs'][0]['size'], 16)
+            self.assertEqual(body['runs'][0]['eastAsia'], '仿宋')
+            self.assertEqual(body['runs'][0]['size_pt'], 16)
         finally:
             shutil.rmtree(str(folder))
 
@@ -383,7 +394,7 @@ class ClipboardTests(unittest.TestCase):
                 os.environ['WENJU_QT'] = previous
 
     def test_validate_rejects_a_bad_block(self):
-        doc = fmt.WenjuDoc([{'type': 'heading', 'level': 0, 'runs': []}, {'type': 'image', 'asset': 'assets/missing.png', 'w': 1, 'h': 1}])
+        doc = fmt.WenjuDoc([{'type': 'heading', 'level': 0, 'runs': []}, {'type': 'image', 'asset': 'missing.png', 'w': 1, 'h': 1}], {}, {})
         errors = fmt.validate(doc)
         self.assertTrue(errors)
 

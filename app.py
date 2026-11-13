@@ -240,10 +240,10 @@ class Bridge(QObject):
             app.processEvents()
 
     def _write_clipboard(self, doc, brush, wenju_path, docx_path):
-        _clip, wenju = wenju_modules()
+        clip, wenju = wenju_modules()
         wenju.save(doc, wenju_path)
         self._set_import_progress(90)
-        rules = copy.deepcopy(self.store.rules) if brush else None
+        rules = clip.brush_styles(copy.deepcopy(self.store.rules)) if brush else None
         wenju.to_docx(doc, docx_path, template=rules)
         self._set_import_progress(100)
 
@@ -699,9 +699,9 @@ if '--test-clipboard' in sys.argv:
         _clip, wenju=wenju_modules()
         kept=wenju.load(wenju_path)
         heading=next(block for block in kept.blocks if block['type']=='heading')
-        assert heading['runs'][0]['text']=='通知标题' and heading['runs'][0]['size']==22
+        assert heading['runs'][0]['text']=='通知标题' and heading['runs'][0]['size_pt']==22
         original=wenju.from_docx(docx_path)
-        assert next(block for block in original.blocks if block['type']=='heading')['runs'][0]['size']==22
+        assert next(block for block in original.blocks if block['type']=='heading')['runs'][0]['size_pt']==22
         done=find_item('clipDone')
         assert done is not None and done.property('visible')
         QMetaObject.invokeMethod(done, 'close')
@@ -710,8 +710,8 @@ if '--test-clipboard' in sys.argv:
         app.processEvents()
         assert bridge.clipboard_brush is True
         brushed=wenju.from_docx(docx_path)
-        assert next(block for block in brushed.blocks if block['type']=='heading')['runs'][0]['size']==16
-        assert wenju.load(wenju_path).blocks[0]['runs'][0]['size']==22
+        assert next(block for block in brushed.blocks if block['type']=='heading')['runs'][0]['size_pt']==16
+        assert wenju.load(wenju_path).blocks[0]['runs'][0]['size_pt']==22
         shot=Path('/tmp/clipboard-import.png')
         assert window.grabWindow().save(str(shot)), shot
         first=Path(bridge.files[-1]['wenju'])
