@@ -48,6 +48,7 @@ APP_FILES = (
     'templates.py', 'preset_store.py', 'rule_schema.py', 'worker.py', 'Main.qml', 'Advanced.qml',
     'AppearancePage.qml', 'Opening.qml', 'TemplateHome.qml', '使用说明.txt', 'README.md',
     'requirements-windows.txt', '可选字体/README.txt',
+    'ui/ProgressPanel.qml', 'ui/qmldir',
 )
 # Data exports of ucrtbase. Marking a code export DATA breaks the loader.
 UCRT_DATA = {
