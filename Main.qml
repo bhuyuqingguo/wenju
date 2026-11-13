@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import "ui"
 
 ApplicationWindow {
     id: win
@@ -60,9 +61,13 @@ ApplicationWindow {
         function onReportReady(text){reportText.text=text;reportDialog.open();}
         function onRulesChanged(){win.syncPage();}
         function onErrorRaised(text){errorText.text=text;errorDialog.open();}
+        function onConvertFinished(text){convertResult.text=text;convertDialog.open();}
     }
     Dialog{id:errorDialog;anchors.centerIn:parent;width:560;title:"请检查设置";modal:true;standardButtons:Dialog.Ok
         Text{id:errorText;width:520;wrapMode:Text.Wrap;color:win.ink}}
+    Dialog{id:convertDialog;anchors.centerIn:parent;width:640;height:460;title:"转换结果";modal:true;standardButtons:Dialog.Ok
+        ScrollView{anchors.fill:parent;TextArea{id:convertResult;objectName:"convertResult";readOnly:true;wrapMode:TextEdit.Wrap;font.pixelSize:Math.round(13*appearance.scale);selectByMouse:true}}
+    }
     Dialog{id:saveDialog;anchors.centerIn:parent;width:480;title:"另存为个人模板";modal:true
         ColumnLayout{width:440;spacing:16
             Txt{text:"保存完整规则，下次一键使用。";color:win.muted}
@@ -137,7 +142,7 @@ ApplicationWindow {
         Column {
             x:14;y:150;width:190;spacing:10
             Repeater {
-                model:[{title:"选择模板",page:2,icon:"▥"},{title:"文档整理",page:0,icon:"▤"},{title:"设置",page:3,icon:"≡"}]
+                model:[{title:"选择模板",page:2,icon:"▥"},{title:"文档整理",page:0,icon:"▤"},{title:"格式转换",page:5,icon:"换"},{title:"设置",page:3,icon:"≡"}]
                 delegate: Rectangle {
                     required property int index; required property var modelData
                     objectName:"nav_"+modelData.page; width:190;height:48*appearance.scale;radius:8;color:(win.page===modelData.page||(modelData.page===3&&(win.page===1||win.page===4)))?appearance.palette["#2c526f"]:"transparent"
@@ -243,6 +248,56 @@ ApplicationWindow {
                     Item{Layout.fillWidth:true}
                     Action {visible:bridge.busy;text:"停止后续任务";onClicked:bridge.cancel()}
                     Action {text:bridge.busy?"正在整理…":"开始整理  →";primary:true;implicitWidth:166;enabled:!bridge.busy;onClicked:{win.contentItem.forceActiveFocus();bridge.start(win.settings());}}
+                }
+            }
+
+            ColumnLayout {
+                anchors.fill:parent;spacing:14;visible:page===5
+                Rectangle {
+                    Layout.fillWidth:true;Layout.preferredHeight:132;radius:12;color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
+                    Column {anchors.centerIn:parent;spacing:8
+                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"把文件拖到这里，转成文矩格式";font.pixelSize:Math.round(18*appearance.scale);font.weight:Font.DemiBold}
+                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"DOCX / XLSX / TXT / MD / DOC · 可一次拖入多份 · 原文件保持不变";color:muted;font.pixelSize:Math.round(12*appearance.scale)}
+                        Action {anchors.horizontalCenter:parent.horizontalCenter;text:"选择文件";primary:true;enabled:!bridge.busy;onClicked:bridge.chooseConvert()}
+                    }
+                    DropArea {anchors.fill:parent;onDropped:function(drop){if(drop.hasUrls)bridge.dropConvert(drop.urls);}}
+                }
+                RowLayout {Layout.fillWidth:true;spacing:10
+                    Action {text:"保留原格式";primary:bridge.convertMode==="preserve";enabled:!bridge.busy;onClicked:bridge.setConvertMode("preserve")}
+                    Action {text:"按模板刷";primary:bridge.convertMode==="template";enabled:!bridge.busy;onClicked:bridge.setConvertMode("template")}
+                    Txt {text:bridge.convertMode==="template"?"使用当前模板："+win.templateName:"保留文件里原来的字体和字号";color:muted;font.pixelSize:Math.round(12*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
+                }
+                Rectangle {Layout.fillWidth:true;Layout.preferredHeight:92;radius:10;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
+                    TextArea {
+                        anchors.fill:parent;anchors.margins:10
+                        placeholderText:"也可以把文字粘贴在这里，和文件一起转换"
+                        selectByMouse:true;wrapMode:TextEdit.Wrap;color:win.ink
+                        font.pixelSize:Math.round(13*appearance.scale)
+                        onTextChanged:bridge.setConvertPaste(text)
+                    }
+                }
+                Rectangle {Layout.fillWidth:true;Layout.fillHeight:true;radius:12;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
+                    ProgressPanel {
+                        objectName:"progressPanel"
+                        anchors.fill:parent;anchors.margins:16
+                        files:bridge.convertFiles
+                        overall:bridge.convertOverall
+                        heading:"总进度"
+                        ink:win.ink
+                        muted:win.muted
+                        track:appearance.palette["#e6ebf1"]
+                        fill:win.blue
+                        okColor:appearance.palette["#35806c"]
+                        badColor:"#a33b3b"
+                        fontPx:Math.round(13*appearance.scale)
+                    }
+                }
+                RowLayout {Layout.fillWidth:true
+                    Action {text:"清空列表";enabled:!bridge.busy;onClicked:bridge.clearConvert()}
+                    Item {Layout.fillWidth:true}
+                    Action {visible:bridge.busy;text:"停止后续任务";onClicked:bridge.cancel()}
+                    Action {text:"导出为 DOCX";enabled:!bridge.busy;onClicked:bridge.exportConvert()}
+                    Action {text:bridge.busy?"正在转换…":"开始转换";primary:true;enabled:!bridge.busy;objectName:"startConvert";onClicked:bridge.startConvert()}
                 }
             }
 
