@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+import image_size
+
 APP_VERSION = "3.3.0"
 FORMAT = "wenju"
 
@@ -1178,7 +1180,7 @@ def _images_in(run, rels, files):
 def _extent(run):
     extent = next(run.iter(q(WP, "extent")), None)
     if extent is None:
-        return 100, 100
+        return None, None
     return emu_to_pt(extent.get("cx") or 0), emu_to_pt(extent.get("cy") or 0)
 
 
@@ -1187,8 +1189,8 @@ def _vml_extent(run, data):
         if data not in list(shape.iter()):
             continue
         style = shape.get("style") or ""
-        return _css_pt(style, "width") or 100, _css_pt(style, "height") or 100
-    return 100, 100
+        return _css_pt(style, "width"), _css_pt(style, "height")
+    return None, None
 
 
 def _css_pt(style, key):
@@ -1218,13 +1220,15 @@ def _image_block(target, files, width, height):
     if blob is None:
         return None
     name = key.split("/")[-1] or "image.bin"
-    return {"type": "image", "asset": name, "w": width or 100, "h": height or 100, "_bytes": blob}
+    shown_w, shown_h = image_size.display_size(blob, width, height)
+    return {"type": "image", "asset": name, "w": shown_w, "h": shown_h, "_bytes": blob}
 
 
 def _read_table(table, ctx):
     parsed = []
     befores = []
     loose = []
+    columns = _grid_widths(table)
     for tr in table.findall(q(W, "tr")):
         row = []
         trpr = tr.find(q(W, "trPr"))
@@ -1250,26 +1254,61 @@ def _read_table(table, ctx):
                 if horizontal is not None:
                     hmerge = horizontal.get(q(W, "val")) or "continue"
             runs = []
+            cell_images = []
             for paragraph in tc.findall(q(W, "p")):
                 if runs and _paragraph_text(paragraph):
                     runs.append({"text": "\n"})
                 inherited = _inherited_props("", ctx)
                 for kind, node in _walk_paragraph(paragraph):
                     if kind == "alt":
-                        loose.extend(image for image in _alternate_images(node, ctx) if image)
+                        cell_images.extend(image for image in _alternate_images(node, ctx) if image)
                         continue
                     if kind == "media":
-                        loose.extend(image for image in _images_in(node, ctx["rels"], ctx["files"]) if image)
+                        cell_images.extend(image for image in _images_in(node, ctx["rels"], ctx["files"]) if image)
                         continue
                     for image in _run_images(node, ctx):
-                        loose.append(image)
+                        cell_images.append(image)
                     run = _inherit_run(_read_run(node, theme=ctx.get("theme")), inherited)
                     if run.get("text"):
                         runs.append(run)
+            limit = _cell_width_pt(tcpr, columns, len(row), span)
+            for image in cell_images:
+                image["w"], image["h"] = image_size.fit_points(image["w"], image["h"], limit)
+            loose.extend(cell_images)
             row.append({"span": max(span, 1), "vmerge": vmerge, "hmerge": hmerge, "runs": runs})
         parsed.append(row)
     grid, merges = _expand_table(parsed, befores)
     return {"type": "table", "rows": grid, "merges": merges}, loose
+
+
+def _grid_widths(table):
+    grid = table.find(q(W, "tblGrid"))
+    if grid is None:
+        return []
+    widths = []
+    for col in grid.findall(q(W, "gridCol")):
+        try:
+            widths.append(int(col.get(q(W, "w")) or 0))
+        except ValueError:
+            widths.append(0)
+    return widths
+
+
+def _cell_width_pt(tcpr, columns, col, span):
+    if tcpr is not None:
+        tcw = tcpr.find(q(W, "tcW"))
+        if tcw is not None and (tcw.get(q(W, "type")) in (None, "dxa")):
+            try:
+                stated = int(tcw.get(q(W, "w")) or 0)
+            except ValueError:
+                stated = 0
+            if stated > 0:
+                return stated / 20.0
+    if columns:
+        width = sum(columns[col:col + span]) or columns[min(col, len(columns) - 1)]
+        if width > 0:
+            return width / 20.0
+    return image_size.content_width_pt()
 
 
 def _paragraph_text(paragraph):
@@ -1599,7 +1638,8 @@ def _write_image(body, block, rel_id, picture_id):
     run = ET.SubElement(paragraph, q(W, "r"))
     drawing = ET.SubElement(run, q(W, "drawing"))
     inline = ET.SubElement(drawing, q(WP, "inline"))
-    cx, cy = str(pt_to_emu(block["w"])), str(pt_to_emu(block["h"]))
+    shown_w, shown_h = image_size.fit_points(block["w"], block["h"], image_size.content_width_pt())
+    cx, cy = str(pt_to_emu(shown_w)), str(pt_to_emu(shown_h))
     extent = ET.SubElement(inline, q(WP, "extent"))
     extent.set("cx", cx)
     extent.set("cy", cy)

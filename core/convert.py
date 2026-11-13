@@ -8,6 +8,7 @@ import xml.etree.ElementTree as ET
 from copy import deepcopy
 from pathlib import Path
 
+import image_size
 from wenju_format import WenjuDoc, from_docx, load, save, to_docx
 
 SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -15,6 +16,7 @@ OFFICE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationship
 PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
 A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
 EMU_PER_PT = 12700
 _READERS = {}
 
@@ -541,7 +543,7 @@ def _markdown_image(alt, target, folder):
     if not path.is_file():
         return [{"type": "paragraph", "style": "Normal", "runs": [{"text": alt or target}]}]
     payload = path.read_bytes()
-    width, height = _png_size(payload)
+    width, height = image_size.display_size(payload)
     return [{"type": "image", "asset": path.name, "w": width, "h": height, "_bytes": payload}]
 
 
@@ -602,12 +604,6 @@ def _markdown_table(lines, index):
 
 def _cell(text):
     return {"runs": [{"text": text}]}
-
-
-def _png_size(payload):
-    if payload.startswith(b"\x89PNG\r\n\x1a\n") and len(payload) >= 24:
-        return int.from_bytes(payload[16:20], "big"), int.from_bytes(payload[20:24], "big")
-    return 0, 0
 
 
 def _read_docx(path):
@@ -879,21 +875,22 @@ def _sheet_images(sheet_path, items):
                     drawing_rels[rid] = _resolve_part(drawing_path, media)
         root = ET.fromstring(payload)
         for anchor in list(root):
-            width, height = 100, 100
+            stated_w, stated_h = None, None
             for extent in anchor.iter(_q(XDR, "ext")):
-                width = _points(extent.attrib.get("cx"))
-                height = _points(extent.attrib.get("cy"))
+                stated_w = _points(extent.attrib.get("cx"))
+                stated_h = _points(extent.attrib.get("cy"))
                 break
             for blip in anchor.iter(_q(A_NS, "blip")):
                 rid = blip.attrib.get(_q(OFFICE_REL, "embed"))
                 media = drawing_rels.get(rid or "")
                 if not media or media not in items:
                     continue
+                shown_w, shown_h = image_size.display_size(items[media], stated_w, stated_h)
                 images.append({
                     "type": "image",
                     "asset": media.split("/")[-1] or "image.bin",
-                    "w": width,
-                    "h": height,
+                    "w": shown_w,
+                    "h": shown_h,
                     "_bytes": items[media],
                 })
     return images

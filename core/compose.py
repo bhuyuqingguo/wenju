@@ -4,6 +4,7 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 
+import image_size
 from wenju_format import WenjuDoc, load as load_package, save as save_package, validate
 
 
@@ -450,7 +451,8 @@ def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids):
             last_p = _emit_runs(body, block.get("runs"), style=block.get("style") or "Normal")
         elif kind == "image":
             rel_id, seq, _ext = media_ids[id(block)]
-            last_p = _emit_image(body, rel_id, seq, block.get("w") or 40, block.get("h") or 20)
+            shown_w, shown_h = image_size.fit_points(block.get("w") or 40, block.get("h") or 20, image_size.content_width_pt())
+            last_p = _emit_image(body, rel_id, seq, shown_w, shown_h)
         elif kind == "table":
             _emit_table(body, block)
             last_p = None
