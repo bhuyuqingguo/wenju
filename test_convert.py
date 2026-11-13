@@ -153,7 +153,7 @@ def test_template_brush(tmp):
     exported = tmp / "brushed.docx"
     to_docx(kept, str(exported), TEMPLATE)
     xml = zipfile.ZipFile(exported).read("word/document.xml").decode("utf-8")
-    assert "仿宋" in xml and "仿宋_GB2312" not in xml
+    assert 'w:eastAsia="仿宋_GB2312"' in xml
     try:
         convert.convert_text("正文", "template", None)
     except convert.ConvertError as exc:
@@ -671,7 +671,7 @@ def test_contract(tmp):
     to_docx(shaped, str(out))
     root = ET.fromstring(zipfile.ZipFile(out).read("word/document.xml"))
     fonts = root.find(".//{%s}rFonts" % W)
-    assert fonts.attrib["{%s}eastAsia" % W] == "仿宋"
+    assert fonts.attrib["{%s}eastAsia" % W] == "仿宋_GB2312"
     assert fonts.attrib["{%s}ascii" % W] == "Times New Roman"
     assert fonts.attrib["{%s}hAnsi" % W] == "Calibri"
     assert [node.attrib.get("{%s}val" % W) for node in root.iter("{%s}jc" % W)] == ["center", "both", "distribute"]
@@ -684,6 +684,32 @@ def test_contract(tmp):
     wenju = tmp / "as-template.wenju"
     save(doc, str(wenju))
     to_docx(shaped, str(tmp / "from-wenju.docx"), str(wenju))
+
+
+def test_keep_fangsong_name(tmp):
+    import fontfallback
+    fontfallback.reset_index()
+    saved = fontfallback._INDEX
+    try:
+        assert fontfallback.chain_for("仿宋_GB2312")[:3] == ["仿宋_GB2312", "FangSong_GB2312", "仿宋"]
+        fontfallback._INDEX = {"fangsong_gb2312": "FangSong_GB2312"}
+        chosen, found = fontfallback.choose("仿宋_GB2312")
+        assert found and chosen == "FangSong_GB2312"
+        fontfallback._INDEX = {"仿宋": "仿宋", "fangsong": "仿宋"}
+        chosen, found = fontfallback.choose("仿宋_GB2312")
+        assert found and chosen == "仿宋"
+        doc = WenjuDoc([{
+            "type": "paragraph",
+            "runs": [{"text": "正文", "eastAsia": "仿宋_GB2312", "ascii": "Times New Roman", "size_pt": 16}],
+        }])
+        path = tmp / "fangsong.docx"
+        to_docx(doc, str(path), TEMPLATE)
+        root = ET.fromstring(zipfile.ZipFile(path).read("word/document.xml"))
+        east = [node.attrib.get("{%s}eastAsia" % W) for node in root.iter("{%s}rFonts" % W)]
+        assert east == ["仿宋_GB2312"]
+    finally:
+        fontfallback._INDEX = saved
+        fontfallback.reset_index()
 
 
 def main():
@@ -699,6 +725,7 @@ def main():
         test_kept_content(tmp)
         test_edges(tmp)
         test_contract(tmp)
+        test_keep_fangsong_name(tmp)
     test_qt_switch()
     print("PASS: docx, xlsx, txt, md, paste, doc, wenju export, template brush, batch progress, qt switch")
 
