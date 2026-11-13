@@ -50,6 +50,7 @@ class Bridge(QObject):
         self.convert_total=0
         self.convert_pos=0
         self.convert_stopped=False
+        self._convert_closed=False
         self._convert_succeeded=[]
         self._convert_failed=[]
         self._convert_skipped=[]
@@ -314,6 +315,7 @@ class Bridge(QObject):
         self.task_kind=action
         self.running=True
         self.convert_stopped=False
+        self._convert_closed=False
         self.convert_queue=items
         self.convert_total=len(items)
         self.convert_pos=0
@@ -363,13 +365,17 @@ class Bridge(QObject):
         if not files: return
         file=files[0]
         row=self.convert_rows[self.convert_pos]
-        row['percent']=int(file.get('percent') or 0)
+        percent=int(file.get('percent') or 0)
+        if percent >= int(row.get('percent') or 0):
+            row['percent']=percent
         if file.get('message'): row['message']=file['message']
-        if file.get('state'): row['state']=file['state']
+        if file.get('state') and file.get('state') != '等待':
+            row['state']=file['state']
         self.convert_overall=int((self.convert_pos*100+row['percent'])/max(1,self.convert_total))
         self.changed.emit()
 
     def _apply_convert_result(self):
+        if getattr(self, '_convert_closed', False): return
         if self._poll: self._poll.stop()
         row=self.convert_rows[self.convert_pos] if 0<=self.convert_pos<len(self.convert_rows) else None
         try:
@@ -403,13 +409,16 @@ class Bridge(QObject):
         self._convert_finish()
 
     def _convert_finish(self):
+        if getattr(self, '_convert_closed', False): return
+        self._convert_closed=True
         if self._poll: self._poll.stop()
-        while self.convert_queue:
-            item=self.convert_queue.pop(0)
-            self._convert_skipped.append(item.get('name') or '未命名')
-            if self.convert_pos < len(self.convert_rows):
-                self.convert_rows[self.convert_pos]['state']='未开始'
-                self.convert_pos += 1
+        self.convert_queue=[]
+        while self.convert_pos < len(self.convert_rows):
+            row=self.convert_rows[self.convert_pos]
+            if row.get('state') in ('等待','正在转换','正在导出'):
+                row['state']='未开始'
+                self._convert_skipped.append(row.get('name') or '未命名')
+            self.convert_pos += 1
         self.running=False
         self.convert_overall=100
         title='转换已停止' if self.convert_stopped and self.task_kind=='convert' else ('导出已停止' if self.convert_stopped else self._convert_title)
@@ -490,12 +499,15 @@ class Bridge(QObject):
 
     def process_error(self, error):
         if error == failed_to_start(QProcess):
-            if self._poll: self._poll.stop()
-            if self.task_kind in ('convert','export') and 0<=self.convert_pos<len(self.convert_rows):
-                row=self.convert_rows[self.convert_pos]
-                row['state']='失败'; row['percent']=100; row['message']='后台进程启动失败，请检查运行库'
-                self._convert_failed.append({'name':row['name'],'message':row['message']})
-                self.convert_overall=100
+            if self.task_kind in ('convert','export') and not getattr(self, '_convert_closed', False):
+                if 0<=self.convert_pos<len(self.convert_rows):
+                    row=self.convert_rows[self.convert_pos]
+                    row['state']='失败'; row['percent']=100; row['message']='后台进程启动失败，请检查运行库'
+                    self._convert_failed.append({'name':row['name'],'message':row['message']})
+                    self.convert_pos += 1
+                self.convert_stopped=True
+                self._convert_finish()
+                return
             self.running=False;self.error('后台进程启动失败，请检查运行库')
 
     def finished(self, code, _status):
