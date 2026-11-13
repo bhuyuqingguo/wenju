@@ -2,17 +2,19 @@ import sys, json, shutil, uuid, os, copy, re
 from pathlib import Path
 from platform_support import data_directory, configure_rendering
 configure_rendering()
-from PySide6.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt
-from PySide6.QtGui import QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase
-from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtQuick import QQuickWindow
-from PySide6.QtQuickControls2 import QQuickStyle
-from PySide6.QtWidgets import QApplication, QFileDialog
+from qt_compat import (
+    QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt,
+    QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont,
+    QQmlApplicationEngine, QQuickWindow, QQuickStyle, QApplication, QFileDialog,
+    QTest, QPoint, QPointF, exec_app, delete_qobject, set_color_scheme, quick_style,
+)
 from templates import CATALOG
 from preset_store import PresetStore, normalize, checked, sections, fields, SIZES, BASE
 from appearance import Appearance
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / 'core'))
+import fontfallback
 DATA = data_directory(ROOT)
 def qt_log(kind, context, message):
     with (DATA/'界面日志.txt').open('a',encoding='utf-8') as log: log.write(message+'\n')
@@ -35,6 +37,7 @@ class Bridge(QObject):
         try: self.settings = json.loads((DATA/'page.json').read_text('utf-8'))
         except (OSError, ValueError): pass
         self.store=PresetStore(DATA)
+        self.font_notice=fontfallback.guidance(self.store.rules)
         self.section='页面'
         self.task_kind='process'
         if not (DATA/'current.json').exists() and self.settings:
@@ -56,13 +59,25 @@ class Bridge(QObject):
             r=t['rules'];p=r['页码'];body=r['正文'];size=body['字号']
             heading={'汉字顿号':'一、（一）','多级数字':'1 / 1.1','第X章':'第一章','数字点':'1.'}.get(r['标题']['一级']['格式'],r['标题']['一级']['格式'])
             page=p['左侧字符']+'1'+p['右侧字符'] if p['启用'] else '无页码'
-            rows.append({**{k:v for k,v in t.items() if k!='rules'},'font':r['字体']['正文'],'size':size,'line':body['行距值'],
-                'bodySummary':r['字体']['正文']+' · '+(str(size)+' 磅' if isinstance(size,(float,int)) else size),
+            shown, found = fontfallback.choose(r['字体']['正文'])
+            body_font = shown if found else shown + '（未安装）'
+            rows.append({**{k:v for k,v in t.items() if k!='rules'},'font':body_font,'size':size,'line':body['行距值'],
+                'bodySummary':body_font+' · '+(str(size)+' 磅' if isinstance(size,(float,int)) else size),
                 'lineSummary':body['行距类型']+' '+str(body['行距值'])+(' 倍' if body['行距类型']=='多倍' else ' 磅' if body['行距类型'] in ('固定值','最小值') else ''),
                 'headingSummary':heading+' · '+str(r['标题']['级数'])+' 级',
                 'pageSummary':page+' · '+p['位置'].replace('底部','') if p['启用'] else page,
                 'marginSummary':'上 '+str(r['页面']['上边距'])+' / 下 '+str(r['页面']['下边距'])+' / 左 '+str(r['页面']['左边距'])+' / 右 '+str(r['页面']['右边距'])+' cm'})
         return rows
+    @Property(str, constant=True)
+    def fontNotice(self): return self.font_notice
+    @Slot(str)
+    def installFont(self, path):
+        try:
+            self.message = fontfallback.install_user_font(path)
+            self.font_notice = fontfallback.guidance(self.store.rules)
+        except Exception as exc:
+            self.message = '字体未能安装：' + str(exc)
+        self.changed.emit()
     @Property(str,notify=rulesChanged)
     def selectedId(self):return self.store.selected
     @Property(str,notify=rulesChanged)
@@ -311,17 +326,39 @@ class Bridge(QObject):
     @Slot()
     def help(self):self.reportReady.emit((ROOT/'使用说明.txt').read_text('utf-8-sig'))
 
-QQuickStyle.setStyle('Basic')
+def brand_icon():
+    icon = QIcon()
+    hicolor = ROOT / 'launcher' / 'icons' / 'hicolor'
+    for path in sorted(hicolor.glob('*/apps/wenju.png')):
+        icon.addFile(str(path))
+    if icon.isNull():
+        icon = QIcon(str(ROOT / 'core' / '素材' / '文矩_图标_512.png'))
+    return icon
+
+QQuickStyle.setStyle(quick_style())
+# Desktop file name is read when the platform plugin starts. Setting it later
+# leaves WM_CLASS as "app.py" and the taskbar icon does not match StartupWMClass.
+if hasattr(QGuiApplication, 'setDesktopFileName'):
+    QGuiApplication.setDesktopFileName('wenju')
+# argv[0] becomes the X11 WM_CLASS instance. Keep it the same as StartupWMClass.
+if sys.platform != 'win32':
+    sys.argv[0] = 'wenju'
 app = QApplication(sys.argv)
-app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+set_color_scheme(app, False)
 palette=QPalette()
 for role,color in [(QPalette.Window,'#f4f6f9'),(QPalette.WindowText,'#22344a'),(QPalette.Base,'#f9fafc'),(QPalette.Text,'#22344a'),(QPalette.Button,'#ffffff'),(QPalette.ButtonText,'#22344a'),(QPalette.Highlight,'#245a83'),(QPalette.HighlightedText,'#ffffff')]:
     palette.setColor(role,QColor(color))
 app.setPalette(palette)
-app.setApplicationName('文矩')
+for font_file in fontfallback.application_font_files(ROOT):
+    QFontDatabase.addApplicationFont(str(font_file))
+fontfallback.reset_index()
+app.setApplicationName('wenju')
+if sys.platform == 'win32':
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('WenJu.Desktop.3.3')
 app.setOrganizationName('WenJu')
-app.setWindowIcon(QIcon(str(ROOT/'core/素材/文矩_图标_512.png')))
-app.setFont(__import__('PySide6.QtGui',fromlist=['QFont']).QFont('Microsoft YaHei UI',10))
+app.setWindowIcon(brand_icon())
+app.setFont(QFont('Microsoft YaHei UI',10))
 appearance=Appearance(DATA,app)
 bridge = Bridge()
 engine = QQmlApplicationEngine()
@@ -331,11 +368,12 @@ engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro 
 engine.load(QUrl.fromLocalFile(str(ROOT/'Main.qml')))
 if not engine.rootObjects(): sys.exit(1)
 window = engine.rootObjects()[0]
+if hasattr(window, 'setIcon'):
+    window.setIcon(app.windowIcon())
 incoming=[arg for arg in sys.argv[1:] if not arg.startswith('--') and Path(arg).is_file()]
 if incoming:bridge.add(incoming)
 if '--test-opening' in sys.argv:
-    from PySide6.QtTest import QTest
-    from PySide6.QtCore import QPoint
+    from qt_compat import QTest, QPoint
     before=copy.deepcopy(bridge.store.rules)
     def opening_capture():
         assert window.property('page')==2
@@ -359,7 +397,7 @@ if '--test-opening' in sys.argv:
     QTimer.singleShot(2100,opening_finished)
     QTimer.singleShot(8000,lambda:app.exit(2))
 if '--test-library-ui' in sys.argv:
-    from PySide6.QtTest import QTest
+    from qt_compat import QTest
     import traceback
     def library_ui_test():
         try:
@@ -423,9 +461,7 @@ if '--capture' in sys.argv:
 app.aboutToQuit.connect(lambda: bridge.proc.waitForFinished(30000) if bridge.running and bridge.proc else None)
 if '--smoke' in sys.argv:
     # Integration test runs with an isolated WENJU_DATA_DIR, never user presets.
-    from PySide6.QtTest import QTest
-    from PySide6.QtCore import QPoint, QPointF
-    from PySide6.QtWidgets import QFileDialog
+    from qt_compat import QTest, QPoint, QPointF, QFileDialog
     import traceback
     def guarded(fn):
         def run():
@@ -521,7 +557,6 @@ if '--smoke' in sys.argv:
         app.quit()
     later(begin_test,700)
     QTimer.singleShot(60000,lambda:app.exit(2))
-exit_code=app.exec()
-import shiboken6
-shiboken6.delete(engine)
+exit_code=exec_app(app)
+delete_qobject(engine)
 sys.exit(exit_code)

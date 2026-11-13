@@ -5,7 +5,7 @@ from template_library import extra_catalog, apply_profile
 DEFAULT_TEMPLATE = 'wudi-official'
 
 CATALOG = [
-    dict(id=DEFAULT_TEMPLATE,name='无敌公文体',category='公文办公',desc='专属默认格式：仿宋四号、固定行距 28.95 磅；方正小标宋二号题目，宋体四号页码 —1—。',font='仿宋',size=14,line=28.95,number='汉字顿号',page='—1—'),
+    dict(id=DEFAULT_TEMPLATE,name='无敌公文体',category='公文办公',desc='专属默认格式：仿宋_GB2312 四号（没有则用仿宋）、固定行距 28.95 磅；方正小标宋二号题目，宋体四号页码 —1—。',font='仿宋_GB2312',size=14,line=28.95,number='汉字顿号',page='—1—'),
     dict(id='unit',name='单位通用报告',category='科技办公',desc='延续原版单位格式，适合内部报告与综合材料。',font='仿宋_GB2312',size=16,line=25,number='汉字顿号',page='— 1 —'),
     dict(id='research',name='科技研究报告',category='科技研发',desc='宋体正文、层级数字标题，适合研究成果与技术论证。',font='宋体',size=12,line=22,number='多级数字',page='1'),
     dict(id='technical',name='技术方案',category='科技研发',desc='突出章节层级，适合系统方案、总体设计和实施路线。',font='宋体',size=14,line=24,number='多级数字',page='— 1 —'),
@@ -48,7 +48,7 @@ def apply_official_photo(base):
     """The user's confirmed house style, including typography and pagination."""
     r=copy.deepcopy(base)
     r['页面'].update({'上边距':3.7,'下边距':3.5,'左边距':2.8,'右边距':2.6,'页眉距':1.5,'页脚距':2.5})
-    r['字体'].update({'正文':'仿宋','括号内':'仿宋','一级标题':'黑体',
+    r['字体'].update({'正文':'仿宋_GB2312','括号内':'仿宋_GB2312','一级标题':'黑体',
                     '二级标题':'楷体_GB2312','三级标题':'仿宋_GB2312','封面标题':'方正小标宋简体'})
     r['正文'].update({'字号':'四号','行距类型':'固定值','行距值':28.95,'对齐':'both'})
     for level in ('一级','二级','三级'):
