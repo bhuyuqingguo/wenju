@@ -113,10 +113,24 @@ def decode_markup(raw):
         encoding = match.group(1).decode('ascii', 'ignore').lower()
         if encoding in ('gb2312', 'gbk', 'gb18030'):
             encoding = 'gb18030'
+    if encoding == 'gb18030':
+        utf8 = _utf8_document(raw)
+        if utf8 is not None:
+            return utf8
     try:
         return raw.decode(encoding)
     except UnicodeDecodeError:
         return raw.decode('gb18030', 'replace')
+
+
+def _utf8_document(raw):
+    try:
+        text = raw.decode('utf-8')
+    except UnicodeDecodeError:
+        return None
+    if any(ord(ch) > 127 for ch in text):
+        return text
+    return None
 
 
 def html_fragment(raw):
@@ -141,6 +155,8 @@ def html_fragment(raw):
     start = values.get('startfragment', values.get('starthtml', 0))
     end = values.get('endfragment', values.get('endhtml', len(data)))
     if 0 <= start < end <= len(data):
+        if start > 0 and data[start:start + 1] != b'<' and data[start - 1:start] == b'<':
+            start -= 1
         data = data[start:end]
     return decode_markup(data)
 
@@ -177,8 +193,10 @@ def _css(style):
             found['outline'] = max(1, min(9, int(value)))
         elif key == 'mso-style-name':
             found['style_name'] = value
-        elif key == 'page-break-before' and 'always' in value.lower():
+        elif key in ('page-break-before', 'break-before') and value.lower() in ('always', 'page'):
             found['page'] = True
+        elif key in ('page-break-after', 'break-after') and value.lower() in ('always', 'page'):
+            found['page_after'] = True
     return found
 
 
@@ -230,6 +248,7 @@ class _HtmlDoc(HTMLParser):
         self.progress = None
         self.total = 1
         self.seen = 0
+        self.page_after = False
 
     def _style(self):
         merged = {}
@@ -270,7 +289,11 @@ class _HtmlDoc(HTMLParser):
         self.runs = []
         kind = self.kind
         self.kind = None
+        page_after = self.page_after
+        self.page_after = False
         if not runs:
+            if page_after and self.cell is None and self.table is None:
+                self.blocks.append({'type': 'pagebreak'})
             return
         if self.cell is not None:
             if self.cell['runs']:
@@ -279,12 +302,14 @@ class _HtmlDoc(HTMLParser):
             return
         if kind and kind[0] == 'h':
             self.blocks.append({'type': 'heading', 'level': kind[1], 'runs': runs})
-            return
-        style = kind[1] if kind else 'body'
-        if style == 'toc' and not self.toc_done:
-            self.blocks.append({'type': 'toc'})
-            self.toc_done = True
-        self.blocks.append({'type': 'paragraph', 'style': style, 'runs': runs})
+        else:
+            style = kind[1] if kind else 'body'
+            if style == 'toc' and not self.toc_done:
+                self.blocks.append({'type': 'toc'})
+                self.toc_done = True
+            self.blocks.append({'type': 'paragraph', 'style': style, 'runs': runs})
+        if page_after and self.table is None:
+            self.blocks.append({'type': 'pagebreak'})
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
@@ -356,6 +381,10 @@ class _HtmlDoc(HTMLParser):
 
     def _open_block(self, tag, attr, css):
         if tag == 'div':
+            if css.get('page') and self.cell is None and self.table is None:
+                self._flush()
+                self.blocks.append({'type': 'pagebreak'})
+            self.page_after = bool(css.get('page_after'))
             self.stack.append({key: css[key] for key in ('font', 'size', 'bold', 'italic') if key in css})
             return
         if css.get('page') and self.cell is None and self.table is None:
@@ -363,6 +392,7 @@ class _HtmlDoc(HTMLParser):
             self.blocks.append({'type': 'pagebreak'})
         else:
             self._flush()
+        self.page_after = bool(css.get('page_after'))
         class_name = attr.get('class', '')
         if tag[0] == 'h' and tag[1:].isdigit():
             self.kind = ('h', int(tag[1:]))
@@ -381,7 +411,7 @@ class _HtmlDoc(HTMLParser):
         if self.ignore:
             return
         if tag in ('b', 'strong', 'i', 'em', 'font', 'span', 'a', 'div', 'p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
-            if tag in ('p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+            if tag in ('div', 'p', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
                 self._flush()
             if self.stack:
                 self.stack.pop()
@@ -884,8 +914,6 @@ class _RtfDoc(object):
             self.fmt['font'] = number
         elif name == 'pard':
             self.para = {'outline': None, 'style': None, 'intbl': False}
-            if self.table_rows and not self.in_row:
-                self._finish_table()
         elif name == 'plain':
             self.fmt = {'bold': False, 'italic': False, 'font': None, 'size': None, 'uc': self.fmt.get('uc', 1)}
         elif name == 'outlinelevel' and number is not None:
@@ -911,14 +939,11 @@ class _RtfDoc(object):
             self._flush_para()
             self.blocks.append({'type': 'pagebreak'})
         elif name == 'trowd':
-            if self.in_row and self.row_cells:
-                self.row_defs = []
-                self.cur_def = {}
-            else:
-                self.in_row = True
+            self.in_row = True
+            self.cur_def = {}
+            self.row_defs = []
+            if not self.row_cells:
                 self.row_cells = []
-                self.row_defs = []
-                self.cur_def = {}
         elif name == 'clvmgf':
             self.cur_def['vmerge'] = 'restart'
         elif name == 'clvmrg':
@@ -940,24 +965,20 @@ class _RtfDoc(object):
             self.deff = number
 
     def _capture_cell(self):
-        index = len(self.row_cells)
-        spec = self.row_defs[index] if index < len(self.row_defs) else {}
-        self.row_cells.append({
-            'runs': self._clean(self.runs),
-            'vmerge': spec.get('vmerge'),
-            'hmerge': spec.get('hmerge'),
-        })
+        self.row_cells.append({'runs': self._clean(self.runs)})
         self.runs = []
 
     def _finish_row(self):
         if self.runs:
             self._capture_cell()
         expanded = []
-        for cell in self.row_cells:
-            if cell.get('hmerge') == 'continue' and expanded:
+        for index, cell in enumerate(self.row_cells):
+            spec = self.row_defs[index] if index < len(self.row_defs) else {}
+            if spec.get('hmerge') == 'continue' and expanded:
                 expanded[-1]['colspan'] = int(expanded[-1].get('colspan') or 1) + 1
+                expanded[-1]['runs'] = _keep_runs(expanded[-1].get('runs'), cell.get('runs'))
                 continue
-            item = {'runs': cell.get('runs') or [], 'colspan': 1, 'vmerge': cell.get('vmerge')}
+            item = {'runs': cell.get('runs') or [], 'colspan': 1, 'vmerge': spec.get('vmerge')}
             expanded.append(item)
         self.table_rows.append(expanded)
         self.row_cells = []
@@ -976,6 +997,7 @@ class _RtfDoc(object):
                     origin = open_origin.get(c)
                     if origin is not None and origin in grid:
                         grid[origin]['rowspan'] = int(grid[origin].get('rowspan') or 1) + 1
+                        grid[origin]['runs'] = _keep_runs(grid[origin].get('runs'), cell.get('runs'))
                     for dc in range(span):
                         grid[(r, c + dc)] = {'covered': True, 'runs': []}
                     c += span
@@ -998,6 +1020,18 @@ class _RtfDoc(object):
         if self.pending_images:
             self.blocks.extend(self.pending_images)
             self.pending_images = []
+
+
+def _run_text(runs):
+    return ''.join(run.get('text') or '' for run in runs or [])
+
+
+def _keep_runs(origin, extra):
+    if not _run_text(extra):
+        return origin or []
+    if not _run_text(origin) or _run_text(origin) == _run_text(extra):
+        return list(extra if not _run_text(origin) else origin)
+    return list(origin) + list(extra)
 
 
 def parse_rtf(raw, progress=None):
@@ -1104,7 +1138,9 @@ def document_from_parts(html=None, rtf=None, plain=None, images=None, progress=N
     if _has_bytes(html):
         blocks, assets = parse_html(html, progress)
     if _nonempty(blocks, assets):
-        if _has_bytes(rtf) and not any(block.get('type') == 'image' and block.get('asset') for block in blocks):
+        missing_bytes = any(block.get('type') == 'image' and not block.get('asset') for block in blocks)
+        has_bytes = any(block.get('type') == 'image' and block.get('asset') for block in blocks)
+        if _has_bytes(rtf) and (missing_bytes or not has_bytes):
             blocks, assets = _merge_rtf_images(blocks, assets, rtf)
     elif _has_bytes(rtf):
         blocks, assets = parse_rtf(rtf, progress)

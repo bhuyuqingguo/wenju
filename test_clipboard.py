@@ -261,6 +261,31 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(body['eastAsia'], '宋体')
         self.assertEqual(body['size_pt'], 16)
 
+    def test_browser_divs_keep_paragraphs_and_merged_header(self):
+        html = (
+            '<html><body>'
+            '<div style="font-family: 宋体, sans-serif; font-size: 16px">第一段</div>'
+            '<div><b>第二段</b></div>'
+            '<table><tr><th colspan="2">表头</th></tr>'
+            '<tr><td rowspan="2">左</td><td>右上</td></tr>'
+            '<tr><td>右下</td></tr></table>'
+            '</body></html>'
+        )
+        doc = clip.document_from_parts(html=html.encode('utf-8'))
+        self.assertEqual(fmt.validate(doc), [])
+        self.assertEqual(doc.blocks[0]['runs'][0]['text'], '第一段')
+        self.assertEqual(doc.blocks[0]['runs'][0]['eastAsia'], '宋体')
+        self.assertEqual(doc.blocks[0]['runs'][0]['size_pt'], 12)
+        self.assertEqual(doc.blocks[1]['runs'][0]['text'], '第二段')
+        self.assertTrue(doc.blocks[1]['runs'][0]['bold'])
+        table = next(block for block in doc.blocks if block['type'] == 'table')
+        self.assertEqual(table['rows'][0][0]['runs'][0]['text'], '表头')
+        self.assertTrue(table['rows'][0][1]['covered'])
+        self.assertEqual(table['merges'][0]['colspan'], 2)
+        self.assertEqual(table['rows'][1][0]['runs'][0]['text'], '左')
+        self.assertTrue(table['rows'][2][0]['covered'])
+        self.assertEqual(table['rows'][2][1]['runs'][0]['text'], '右下')
+
     def test_font_tag_and_cell_style_keep_point_size(self):
         html = (
             '<p><font face="宋体" style="font-size:16pt">甲</font></p>'
@@ -319,6 +344,125 @@ class ClipboardTests(unittest.TestCase):
         finally:
             shutil.rmtree(str(folder))
 
+    def test_review_wps_fragment_charset_breaks_and_images(self):
+        body = (
+            '<p class="MsoHeading1"><span style="font-family:黑体;font-size:22.0pt;font-weight:bold">通知标题</span></p>'
+            '<p class="MsoNormal"><span style="font-family:仿宋_GB2312;font-size:16.0pt">正文第一段</span></p>'
+        )
+        context = (
+            '<html><head><meta charset="utf-8"></head><body><!--StartFragment-->'
+            + body + '<!--EndFragment--></body></html>'
+        ).encode('utf-8')
+        header_tmpl = (
+            'Version:0.9\r\nStartHTML:{s:010d}\r\nEndHTML:{e:010d}\r\n'
+            'StartFragment:{sf:010d}\r\nEndFragment:{ef:010d}\r\n'
+        )
+        header_len = len(header_tmpl.format(s=0, e=0, sf=0, ef=0).encode('ascii'))
+        content_at = context.find(b'<!--StartFragment-->') + len(b'<!--StartFragment-->')
+        end_at = context.find(b'<!--EndFragment-->')
+        start = header_len + content_at + 1
+        header = header_tmpl.format(
+            s=header_len, e=header_len + len(context), sf=start, ef=header_len + end_at,
+        ).encode('ascii')
+        shifted = clip.document_from_parts(html=header + context)
+        self.assertEqual(shifted.blocks[0]['type'], 'heading')
+        self.assertEqual(shifted.blocks[0]['level'], 1)
+        self.assertEqual(shifted.blocks[0]['runs'][0]['text'], '通知标题')
+        self.assertEqual(shifted.blocks[0]['runs'][0]['eastAsia'], '黑体')
+        self.assertEqual(shifted.blocks[1]['runs'][0]['text'], '正文第一段')
+        self.assertEqual(shifted.blocks[1]['runs'][0]['eastAsia'], '仿宋_GB2312')
+
+        labeled = '''<html><head><meta http-equiv="Content-Type" content="text/html; charset=gb2312"></head>
+<body>
+<p class="MsoHeading1"><span style="font-family:黑体;font-size:22.0pt;font-weight:bold">通知标题</span></p>
+<p class="MsoNormal"><span style="font-family:仿宋_GB2312;font-size:16.0pt">正文第一段</span></p>
+</body></html>'''
+        decoded = clip.document_from_parts(html=labeled.encode('utf-8'))
+        self.assertEqual(decoded.blocks[0]['runs'][0]['text'], '通知标题')
+        self.assertEqual(decoded.blocks[0]['runs'][0]['eastAsia'], '黑体')
+        self.assertEqual(decoded.blocks[1]['runs'][0]['eastAsia'], '仿宋_GB2312')
+
+        breaks = {
+            'before': '<p>第一页</p><div style="page-break-before:always"></div><p>第二页</p>',
+            'after': '<p style="page-break-after:always">上一页</p><p>下一页</p>',
+            'modern': '<h2 style="break-before:page">第二页标题</h2>',
+        }
+        for html in breaks.values():
+            doc = clip.document_from_parts(html=html)
+            self.assertIn({'type': 'pagebreak'}, doc.blocks)
+        modern = clip.document_from_parts(html=breaks['modern'])
+        self.assertEqual(modern.blocks[0]['type'], 'pagebreak')
+        self.assertEqual(modern.blocks[1]['level'], 2)
+
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==')
+        jpeg = bytes.fromhex('ffd8ffe000104a46494600010100000100010000ffd9')
+        html = (
+            '<p>说明</p><img src="data:image/jpeg;base64,%s">'
+            '<table><tr><td>格内<img src="file:///tmp/cell.png" width="12" height="8">字</td></tr></table>'
+        ) % base64.b64encode(jpeg).decode('ascii')
+        rtf = r'{\rtf1\ansi\pard{\pict\pngblip\picwgoal180\pichgoal120 ' + png.hex() + '}}'
+        mixed = clip.document_from_parts(html=html.encode('utf-8'), rtf=rtf.encode('ascii'))
+        self.assertIn(jpeg, mixed.assets.values())
+        self.assertIn(png, mixed.assets.values())
+        cell = ''.join(
+            run.get('text', '')
+            for block in mixed.blocks if block['type'] == 'table'
+            for row in block['rows'] for item in row if not item.get('covered')
+            for run in item.get('runs') or []
+        )
+        self.assertIn('格内', cell)
+        self.assertIn('字', cell)
+
+    def test_review_rtf_merge_keeps_visible_text(self):
+        def hexrun(text):
+            return ''.join("\\'%02x" % byte for byte in text.encode('gb18030'))
+
+        late = (
+            r'{\rtf1\ansi\ansicpg936{\fonttbl{\f0\fnil\fcharset134 \'cb\'ce\'cc\'e5;}}'
+            r'\pard\intbl\f0 ' + hexrun('表头') + r'\cell\cell'
+            r'\trowd\clmgf\cellx3000\clmrg\cellx6000\row'
+            r'\pard\intbl ' + hexrun('左') + r'\cell ' + hexrun('右下') + r'\cell'
+            r'\trowd\clvmgf\cellx3000\cellx6000\row'
+            r'\pard ' + hexrun('之后') + r'\par}'
+        )
+        doc = clip.document_from_parts(rtf=late.encode('ascii'))
+        tables = [block for block in doc.blocks if block['type'] == 'table']
+        self.assertEqual(len(tables), 1)
+        table = tables[0]
+        visible = text_of(doc)
+        self.assertIn('表头', visible)
+        self.assertIn('左', visible)
+        self.assertIn('右下', visible)
+        self.assertIn('之后', visible)
+        self.assertEqual(table['rows'][0][0]['runs'][0]['text'], '表头')
+        self.assertEqual(table['rows'][1][0]['runs'][0]['text'], '左')
+        self.assertEqual(table['rows'][1][1]['runs'][0]['text'], '右下')
+        self.assertEqual(table['merges'][0]['colspan'], 2)
+
+        only_tail = clip.document_from_parts(rtf=(
+            r'{\rtf1\ansi\ansicpg936{\fonttbl{\f0\fnil\fcharset134 \'cb\'ce\'cc\'e5;}}'
+            r'\trowd\clmgf\cellx3000\clmrg\cellx6000\intbl\f0\cell '
+            + hexrun('表头') + r'\cell\row\pard after\par}'
+        ).encode('ascii'))
+        self.assertIn('表头', text_of(only_tail))
+
+        vertical = clip.document_from_parts(rtf=(
+            r'{\rtf1\ansi\ansicpg936{\fonttbl{\f0\fnil\fcharset134 \'cb\'ce\'cc\'e5;}}'
+            r'\trowd\clvmgf\cellx3000\cellx6000\intbl\f0\cell ' + hexrun('右上') + r'\cell\row'
+            r'\trowd\clvmrg\cellx3000\cellx6000\intbl ' + hexrun('左') + r'\cell ' + hexrun('右下') + r'\cell\row}'
+        ).encode('ascii'))
+        self.assertIn('左', text_of(vertical))
+        self.assertIn('右上', text_of(vertical))
+        self.assertIn('右下', text_of(vertical))
+
+        both = clip.document_from_parts(rtf=(
+            r'{\rtf1\ansi\ansicpg936{\fonttbl{\f0\fnil\fcharset134 \'cb\'ce\'cc\'e5;}}'
+            r'\trowd\clmgf\cellx3000\clmrg\cellx6000\intbl\f0 '
+            + hexrun('表') + r'\cell ' + hexrun('头') + r'\cell\row}'
+        ).encode('ascii'))
+        self.assertIn('表', text_of(both))
+        self.assertIn('头', text_of(both))
+
     def test_long_html_progress_moves(self):
         html = '<html><body>' + ''.join('<p>第%d段</p>' % index for index in range(2000)) + '</body></html>'
         seen = []
@@ -371,7 +515,10 @@ class ClipboardTests(unittest.TestCase):
             self.assertEqual(heading['runs'][0]['size_pt'], 16)
             self.assertNotIn('bold', heading['runs'][0])
             body = next(block for block in painted.blocks if block['type'] == 'paragraph' and '正文' in ''.join(run.get('text', '') for run in block['runs']))
-            self.assertEqual(body['runs'][0]['eastAsia'], '仿宋')
+            self.assertEqual(body['runs'][0]['eastAsia'], '仿宋_GB2312')
+            xml = zipfile.ZipFile(str(brushed)).read('word/document.xml').decode('utf-8')
+            self.assertIn('仿宋_GB2312', xml)
+            self.assertNotRegex(xml, r'eastAsia="仿宋"')
             self.assertEqual(body['runs'][0]['size_pt'], 16)
         finally:
             shutil.rmtree(str(folder))

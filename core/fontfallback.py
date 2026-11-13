@@ -185,11 +185,10 @@ def install_user_font(src):
 
 
 def resolve(name):
+    """Name stored in the docx. A missing face is substituted only when drawing."""
     if not name:
         return name
-    if str(name) == '仿宋_GB2312':
-        return '仿宋'
-    return name
+    return str(name)
 
 
 def application_font_files(root):
