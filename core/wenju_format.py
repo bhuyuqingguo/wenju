@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.4.0"
 FORMAT = "wenju"
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"

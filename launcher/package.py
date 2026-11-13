@@ -4,7 +4,7 @@ import shutil,zipfile,struct,zlib
 
 ROOT=Path(__file__).resolve().parent.parent
 OUT=ROOT/'dist';OUT.mkdir(exist_ok=True)
-ARCHIVE=OUT/'WenJu_3.3.0_Windows_Portable.zip'
+ARCHIVE=OUT/'WenJu_3.4.0_Windows_Portable.zip'
 
 class ChineseZipInfo(zipfile.ZipInfo):
     def _encodeFilenameFlags(self):

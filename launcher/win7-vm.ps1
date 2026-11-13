@@ -42,4 +42,4 @@ if (-not (Test-Path $vdi)) { & VBoxManage createmedium disk --filename $vdi --si
 & VBoxManage storageattach $VmName --storagectl SATA --port 0 --device 0 --type hdd --medium $vdi
 & VBoxManage storageattach $VmName --storagectl SATA --port 1 --device 0 --type dvddrive --medium $Iso
 & VBoxManage startvm $VmName
-Write-Host "VirtualBox VM started. After setup, install KB2670838, then unzip WenJu_3.3.0_Windows7_x64_Portable.zip and run 打开文矩.exe."
+Write-Host "VirtualBox VM started. After setup, install KB2670838, then unzip WenJu_3.4.0_Windows7_x64_Portable.zip and run 打开文矩.exe."
