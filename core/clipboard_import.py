@@ -1034,24 +1034,28 @@ class _RtfDoc(object):
                 self._walk_object(body, False)
 
     def _objdata_image(self, tokens):
-        hex_text = []
+        pieces = []
+        text_parts = []
+
+        def flush_text():
+            if text_parts:
+                pieces.append(_decode_hex_parts(text_parts))
+                del text_parts[:]
 
         def walk(items):
             for token in items:
                 if token[0] == 'text':
-                    hex_text.append(token[1])
+                    text_parts.append(token[1])
+                elif token[0] == 'hexbytes':
+                    flush_text()
+                    pieces.append(token[1])
                 elif token[0] == 'group':
                     walk(token[1])
 
         walk(tokens)
-        digits = re.sub(r'[^0-9A-Fa-f]', '', ''.join(hex_text))
-        if len(digits) < 32 or len(digits) > wenju_format.MAX_ASSET_BYTES * 2:
-            return
-        if len(digits) % 2:
-            digits = digits[:-1]
-        try:
-            data = bytes.fromhex(digits)
-        except ValueError:
+        flush_text()
+        data = b''.join(pieces)
+        if len(data) < 16 or len(data) > wenju_format.MAX_ASSET_BYTES:
             return
         payload, kind = wenju_format.image_bytes(data)
         if not payload or kind not in ('emf', 'wmf', 'png', 'jpg', 'gif', 'bmp'):
@@ -1866,8 +1870,6 @@ def _coerce_meta(raw, ext):
     if raw:
         return ('clipboard.%s' % ext, bytes(raw) if not isinstance(raw, bytes) else raw)
     return None
-
-
 def read_clipboard(progress=None):
     import qt_compat
     _core, gui, widgets = qt_compat.load()

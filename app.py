@@ -1,4 +1,4 @@
-import sys, json, shutil, uuid, os, copy, re, datetime
+import sys, json, shutil, uuid, os, copy, re, datetime, tempfile
 from pathlib import Path
 from platform_support import data_directory, configure_rendering
 configure_rendering()
@@ -513,23 +513,24 @@ class Bridge(QObject):
         self.task_kind = 'merge'
         self.running = True
         self.overall_value = 0
-        jobdir = DATA/'输出'/uuid.uuid4().hex[:10]
-        jobdir.mkdir(parents=True)
+        jobdir = self._scratch_dir()
         sources, indexes = [], []
+        import convert
+        wenju_path, docx_path = convert.merge_targets(picked[0][1]['path'])
         for i, row in picked:
             dest = jobdir/('%02d_%s' % (len(sources), Path(row['path']).name))
             try: shutil.copy2(row['path'], dest)
             except OSError as exc:
                 row['state'] = '失败：无法读取源文件'; row['error'] = str(exc); continue
             sources.append(str(dest)); indexes.append(i)
-            row['percent'] = 0; row['output'] = ''; row['state'] = '等待合稿'
+            row['percent'] = 0; row['output'] = str(docx_path); row['state'] = '等待合稿'
         if not sources:
-            self.running = False; self.error('没有可读的 .wenju 文档'); return
+            self.running = False; self._drop_scratch(); self.error('没有可读的 .wenju 文档'); return
         font = self.store.rules.get('字体', {}).get('正文', '仿宋')
         self.merge_indexes = indexes
         self.message = '正在合稿 %d 份文档' % len(sources)
         self.launch(jobdir, {'action':'merge', 'sources':sources, 'indexes':indexes,
-            'wenju':str(jobdir/'合稿.wenju'), 'docx':str(jobdir/'合稿.docx'),
+            'wenju':str(wenju_path), 'docx':str(docx_path),
             'template':{'font':font, 'number':'多级数字'}})
 
     def addConvert(self, paths):
@@ -542,7 +543,7 @@ class Bridge(QObject):
             if not path.is_file(): continue
             resolved=str(path.resolve())
             if resolved in known: continue
-            self.convert_rows.append({'name':path.name,'path':resolved,'percent':0,'state':'等待','message':'','output':''})
+            self.convert_rows.append({'name':path.name,'path':resolved,'source':resolved,'percent':0,'state':'等待','message':'','output':''})
             known.add(resolved)
             added=resolved
         if added:
@@ -607,17 +608,20 @@ class Bridge(QObject):
         items=[]
         if action=='convert':
             text=(self.convert_paste or '').strip()
-            if text: items.append({'name':'粘贴的内容','text':text})
+            if text: items.append({'name':'粘贴的内容','text':text,'source':'剪贴板'})
             clip_item=self._clipboard_item()
             if clip_item: items.insert(0, clip_item)
             for row in list(self.convert_rows):
-                if row.get('path'): items.append({'name':row['name'],'path':row['path']})
+                if row.get('path'): items.append({'name':row['name'],'path':row['path'],'source':row.get('source') or row['path']})
             self._convert_title=title or '转换完成'
         else:
             for row in list(self.convert_rows):
                 output=row.get('output') or ''
                 if output.lower().endswith('.wenju') and Path(output).is_file():
-                    items.append({'name':row['name'],'path':output})
+                    item={'name':row['name'],'path':output,'source':row.get('source') or ''}
+                    if str(row.get('target') or '').lower().endswith('.docx'):
+                        item['docx']=row['target']
+                    items.append(item)
             self._convert_title=title or '导出完成'
         if not items:
             self.message='请先拖入文件，或粘贴要转换的文字' if action=='convert' else '没有可导出的文矩文件'
@@ -634,10 +638,41 @@ class Bridge(QObject):
         self._convert_failed=[]
         self._convert_skipped=[]
         self.convert_rows=[]
+        self._convert_dir=self._scratch_dir()
+        import convert
+        taken=set()
+        when=datetime.datetime.now()
+        placed=[]
         for item in items:
-            self.convert_rows.append({'name':item['name'],'path':item.get('path') or '','percent':0,'state':'等待','message':'','output':item.get('path') if action=='export' else ''})
-        self._convert_dir=DATA/'输出'/uuid.uuid4().hex[:10]
-        self._convert_dir.mkdir(parents=True, exist_ok=True)
+            if action=='export':
+                if item.get('docx'):
+                    final=Path(item['docx'])
+                else:
+                    source=Path(item['path'])
+                    final=convert.place_output(source.parent, convert._safe_stem(source.stem), '.docx', taken)
+                    item=dict(item, docx=str(final))
+                target=str(final)
+            elif item.get('path'):
+                final_suffix='.docx' if self._chain_docx else '.wenju'
+                final=convert.place_output(Path(item['path']).parent, convert._safe_stem(Path(item['path']).stem), final_suffix, taken)
+                if self._chain_docx:
+                    interim=convert.place_output(self._convert_dir, final.stem, '.wenju')
+                    item=dict(item, output=str(interim))
+                else:
+                    item=dict(item, output=str(final))
+                target=str(final)
+            else:
+                final_suffix='.docx' if self._chain_docx else '.wenju'
+                final=convert.place_output(convert.clipboard_dir(), convert.clipboard_stem(when), final_suffix, taken)
+                if self._chain_docx:
+                    interim=convert.place_output(self._convert_dir, final.stem, '.wenju')
+                    item=dict(item, output=str(interim))
+                else:
+                    item=dict(item, output=str(final))
+                target=str(final)
+            placed.append(item)
+            self.convert_rows.append({'name':item['name'],'source':item.get('source') or '','path':item.get('path') or '','percent':0,'state':'等待','message':'','output':'','target':target})
+        self.convert_queue=placed
         self.message='正在转换' if action=='convert' else '正在导出'
         self.changed.emit()
         self._launch_convert()
@@ -661,7 +696,6 @@ class Bridge(QObject):
             'mode':self.convert_mode,
             'template':template,
             'items':[item],
-            'outdir':str(self._convert_dir),
             'progress':str(progress),
         })
 
@@ -721,8 +755,14 @@ class Bridge(QObject):
                 row['percent']=100
                 row['state']=file.get('state') or '失败'
                 row['message']=file.get('message') or ''
-                if self.task_kind=='convert': row['output']=file.get('output') or ''
-                else: row['docx']=file.get('docx') or ''
+                if file.get('state')=='成功':
+                    if self.task_kind=='convert': row['output']=file.get('output') or ''
+                    else:
+                        row['docx']=file.get('docx') or ''
+                        row['output']=row['docx']
+                planned=str(row.get('target') or '')
+                if file.get('target') and not (self._chain_docx and planned.lower().endswith('.docx')):
+                    row['target']=file['target']
             if file.get('state')=='成功':
                 label=row['name'] if row is not None else '未命名'
                 if self.task_kind=='export' and file.get('docx'):
@@ -765,6 +805,7 @@ class Bridge(QObject):
         self._chain_docx=False
         self._convert_closed=True
         self.running=False
+        self._drop_scratch()
         self.convert_overall=100
         failed=list(self._kept_failed)+list(self._convert_failed)
         skipped=list(self._kept_skipped)+list(self._convert_skipped)
@@ -798,7 +839,7 @@ class Bridge(QObject):
         stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         path = folder / ('剪贴板-%s.wenju' % stamp)
         wenju.save(self.clipboard_doc, path)
-        return {'name':'剪贴板','path':str(path)}
+        return {'name':'剪贴板','path':str(path),'source':'剪贴板'}
 
     def _set_preview_doc(self, doc, charts=0):
         self._preview_doc = doc
@@ -875,10 +916,11 @@ class Bridge(QObject):
         self.running=True
         self.convert_overall=0
         self.convert_stopped=False
-        jobdir=DATA/'输出'/uuid.uuid4().hex[:10]
-        jobdir.mkdir(parents=True)
+        jobdir=self._scratch_dir()
         sources=[]
         rows=[]
+        import convert
+        wenju_path, docx_path = convert.merge_targets(picked[0]['path'])
         for row in picked:
             dest=jobdir/('%02d_%s' % (len(sources), Path(row['path']).name))
             try: shutil.copy2(row['path'], dest)
@@ -886,10 +928,11 @@ class Bridge(QObject):
                 skipped.append((row.get('name') or dest.name)+'：'+str(exc))
                 continue
             sources.append(str(dest))
-            rows.append({'name':row.get('name') or dest.name,'path':str(dest),'percent':0,'state':'等待合稿','message':'','output':''})
+            rows.append({'name':row.get('name') or dest.name,'path':str(dest),'percent':0,'state':'等待合稿','message':'','output':'','target':str(docx_path)})
         self._merge_skipped=skipped
         if not sources:
             self.running=False
+            self._drop_scratch()
             self.error('没有可读的 .wenju 文档')
             return
         self.convert_rows=rows
@@ -898,7 +941,7 @@ class Bridge(QObject):
         self.message='正在合稿 %d 份文档' % len(sources)
         self.changed.emit()
         self.launch(jobdir, {'action':'merge','sources':sources,'indexes':self.merge_indexes,
-            'wenju':str(jobdir/'合稿.wenju'),'docx':str(jobdir/'合稿.docx'),
+            'wenju':str(wenju_path),'docx':str(docx_path),
             'template':{'font':font,'number':'多级数字'}})
 
     @Slot('QVariantMap')
@@ -957,14 +1000,25 @@ class Bridge(QObject):
         row['state'] = '正在整理…'
         self._did_work = True
         self.message = '正在整理 ' + row['name']
-        jobdir = DATA/'输出'/uuid.uuid4().hex[:10]
-        jobdir.mkdir(parents=True)
+        jobdir = self._scratch_dir()
         source = jobdir/row['name']
         try:shutil.copy2(row['path'], source)
         except OSError as exc:
-            row['state']='失败：无法读取源文件';row['error']=str(exc);self.changed.emit();QTimer.singleShot(0,self.next_file);return
+            row['state']='失败：无法读取源文件';row['error']=str(exc);self._drop_scratch();self.changed.emit();QTimer.singleShot(0,self.next_file);return
         self.launch(jobdir,{'source':str(source), 'rules':self.batch_rules})
         self.changed.emit()
+
+    def _scratch_dir(self):
+        path=getattr(self,'_scratch',None)
+        if path is None or not Path(path).is_dir():
+            self._scratch=Path(tempfile.mkdtemp(prefix='wenju-'))
+        return self._scratch
+
+    def _drop_scratch(self):
+        path=getattr(self,'_scratch',None)
+        self._scratch=None
+        if path and Path(path).is_dir():
+            shutil.rmtree(path, ignore_errors=True)
 
     def launch(self,jobdir,payload):
         payload=dict(payload)
@@ -1031,6 +1085,7 @@ class Bridge(QObject):
                 self.batchFinished.emit('合稿完成，已导出一份 Word。\n'+result['output'])
         except Exception as exc:
             self.error(exc)
+        self._drop_scratch()
         self.proc.deleteLater(); self.changed.emit()
 
     def finished(self, code, _status):
@@ -1054,9 +1109,22 @@ class Bridge(QObject):
         try:
             result = json.loads(self.result_file.read_text('utf-8'))
             if not result['ok']: raise RuntimeError(result['error'])
-            row['output'] = result['output']; row['report'] = result.get('report',''); row['percent'] = 100; row['state'] = '已完成 · 点击打开'
+            produced=Path(result['output'])
+            import convert
+            final=convert.place_output(Path(row['path']).parent, produced.stem, produced.suffix)
+            if produced.resolve()!=final.resolve():
+                shutil.move(str(produced), str(final))
+            report=result.get('report') or ''
+            if report and Path(report).is_file():
+                report_path=Path(report)
+                report_final=convert.place_output(final.parent, report_path.stem, report_path.suffix)
+                if report_path.resolve()!=report_final.resolve():
+                    shutil.move(str(report_path), str(report_final))
+                report=str(report_final)
+            row['output'] = str(final); row['report'] = report; row['percent'] = 100; row['state'] = '已完成 · 点击打开'
         except Exception as exc:
             row['state'] = '失败：' + str(exc)[:100];row['error']=str(exc)
+        self._drop_scratch()
         self.proc.deleteLater()
         self.next_file()
 
@@ -1210,8 +1278,10 @@ if '--capture' in sys.argv:
         app.quit()
     QTimer.singleShot(1500,capture)
 if '--test-convert-ui' in sys.argv:
+    os.environ['WENJU_DOCUMENTS']=str(DATA)
     import traceback
     sample = DATA/'convert-sample.txt'
+    held = {}
     def convert_ui():
         try:
             window.setProperty('page', 5)
@@ -1227,6 +1297,11 @@ if '--test-convert-ui' in sys.argv:
             rejected = sample.with_suffix('.xls')
             rejected.write_bytes(b'not-xlsx')
             bridge.addConvert([str(sample), str(rejected)])
+            added = {row['name']: row for row in bridge.convertFiles}
+            assert added['convert-sample.txt']['source'] == str(sample.resolve()), added
+            assert added['convert-sample.txt']['output'] == ''
+            assert added['convert-sample.xls']['source'] == str(rejected.resolve())
+            assert added['convert-sample.xls']['output'] == ''
             bridge.setConvertPaste('粘贴一行')
             bridge.setConvertMode('template')
             assert bridge.convertMode == 'template'
@@ -1234,6 +1309,11 @@ if '--test-convert-ui' in sys.argv:
             assert bridge.convertMode == 'preserve'
             bridge.startConvert()
             assert bridge.busy
+            started = {row['name']: row for row in bridge.convertFiles}
+            assert started['粘贴的内容']['source'] == '剪贴板', started
+            assert started['粘贴的内容']['output'] == ''
+            assert started['convert-sample.txt']['source'] == str(sample.resolve())
+            assert started['convert-sample.txt']['output'] == ''
             assert any(row['percent'] > 0 for row in bridge.convertFiles)
             app.processEvents()
             QTimer.singleShot(100, wait_convert)
@@ -1244,11 +1324,25 @@ if '--test-convert-ui' in sys.argv:
             if bridge.busy:
                 QTimer.singleShot(100, wait_convert); return
             files = {row['name']: row for row in bridge.convertFiles}
-            assert files['convert-sample.txt']['state'] == '成功', files
-            assert files['convert-sample.txt']['percent'] == 100
-            assert files['粘贴的内容']['state'] == '成功'
-            assert files['convert-sample.xls']['state'] == '失败'
-            assert '.xlsx' in files['convert-sample.xls']['message']
+            txt = files['convert-sample.txt']
+            paste = files['粘贴的内容']
+            bad = files['convert-sample.xls']
+            assert txt['state'] == '成功', files
+            assert txt['percent'] == 100
+            assert txt['source'] == str(sample.resolve()), txt
+            assert txt['output'].endswith('.wenju') and Path(txt['output']).is_file(), txt
+            assert txt['message'] == '已写入', txt
+            assert Path(txt['output']).name not in txt['message']
+            assert paste['state'] == '成功'
+            assert paste['source'] == '剪贴板', paste
+            assert paste['output'].endswith('.wenju') and Path(paste['output']).is_file(), paste
+            assert bad['state'] == '失败'
+            assert bad['source'] == str(sample.with_suffix('.xls').resolve()), bad
+            assert bad['output'] == ''
+            assert '.xlsx' in bad['message']
+            held['txt'] = txt['source']
+            held['paste'] = paste['source']
+            held['wenju'] = txt['output']
             assert bridge.convertOverall == 100
             panel = window.findChild(QObject, 'progressPanel')
             assert panel.property('overall') == 100
@@ -1270,6 +1364,17 @@ if '--test-convert-ui' in sys.argv:
             docx_rows = [row for row in bridge.convertFiles if row.get('docx')]
             assert len(docx_rows) == 2, bridge.convertFiles
             assert all(row['percent'] == 100 and row['state'] == '成功' for row in docx_rows)
+            files = {row['name']: row for row in bridge.convertFiles}
+            txt = files['convert-sample.txt']
+            paste = files['粘贴的内容']
+            assert txt['source'] == held['txt'] == str(sample.resolve()), txt
+            assert paste['source'] == held['paste'] == '剪贴板', paste
+            assert not txt['source'].endswith('.wenju') and not txt['source'].endswith('.docx')
+            assert txt['output'].endswith('.docx') and Path(txt['output']).is_file(), txt
+            assert txt['output'] != held['wenju']
+            assert paste['output'].endswith('.docx') and Path(paste['output']).is_file(), paste
+            assert txt['message'] == '已写入' and Path(txt['output']).name not in txt['message']
+            assert paste['message'] == '已写入'
             report = window.findChild(QObject, 'convertResult')
             text = report.property('text') or ''
             assert '导出完成' in text and '成功 2 个' in text, text
@@ -1289,7 +1394,10 @@ if '--test-convert-ui' in sys.argv:
             assert bridge.status == '转换完成', bridge.status
             made = [row for row in bridge.convertFiles if str(row.get('docx') or '').lower().endswith('.docx')]
             assert len(made) == 1 and made[0]['state'] == '成功' and made[0]['percent'] == 100, bridge.convertFiles
-            print('PASS: convert page shows per-file progress, lists successes and failures, exports docx, and chains 转成 Word')
+            assert made[0]['source'] == '剪贴板', made
+            assert made[0]['output'].endswith('.docx') and Path(made[0]['output']).is_file(), made
+            assert made[0]['output'] == made[0]['docx']
+            print('PASS: convert page keeps source, writes wenju then docx to output, exports docx, and chains 转成 Word')
             app.quit()
         except Exception:
             traceback.print_exc(); app.exit(1)
