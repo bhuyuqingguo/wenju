@@ -2,9 +2,11 @@ import base64
 import datetime
 import json
 import os
+import struct
 import sys
 import tempfile
 import zipfile
+import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -858,6 +860,111 @@ def test_keep_fangsong_name(tmp):
         fontfallback.reset_index()
 
 
+def _png_pixels(width, height):
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    raw = b"".join(b"\x00" + b"\x00\x00\x00" * width for _ in range(height))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+
+
+def _extent_docx(path, payload, name, cx, cy, cell_twip=None):
+    if cell_twip:
+        document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  <w:body>
+    <w:tbl>
+      <w:tblGrid><w:gridCol w:w="%d"/></w:tblGrid>
+      <w:tr><w:tc><w:tcPr><w:tcW w:w="%d" w:type="dxa"/></w:tcPr>
+        <w:p><w:r><w:drawing><wp:inline><wp:extent cx="%d" cy="%d"/>
+          <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+            <pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic>
+          </a:graphicData></a:graphic>
+        </wp:inline></w:drawing></w:r></w:p>
+      </w:tc></w:tr>
+    </w:tbl>
+  </w:body>
+</w:document>""" % (cell_twip, cell_twip, cx, cy)
+    elif cx:
+        document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  <w:body>
+    <w:p><w:r><w:drawing><wp:inline><wp:extent cx="%d" cy="%d"/>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic>
+      </a:graphicData></a:graphic>
+    </wp:inline></w:drawing></w:r></w:p>
+  </w:body>
+</w:document>""" % (cx, cy)
+    else:
+        document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+  <w:body>
+    <w:p><w:r><w:drawing><wp:inline>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+        <pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic>
+      </a:graphicData></a:graphic>
+    </wp:inline></w:drawing></w:r></w:p>
+  </w:body>
+</w:document>"""
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/%s"/>
+</Relationships>""" % name
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document.encode("utf-8"))
+        archive.writestr("word/_rels/document.xml.rels", rels.encode("utf-8"))
+        archive.writestr("word/media/" + name, payload)
+
+
+def _docx_extent(path):
+    xml = zipfile.ZipFile(path).read("word/document.xml")
+    root = ET.fromstring(xml)
+    extent = root.find(".//{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}extent")
+    return int(extent.get("cx")), int(extent.get("cy"))
+
+
+def test_image_keeps_native_size(tmp):
+    import image_size
+    payload = _png_pixels(32, 16)
+    source = tmp / "small.docx"
+    _extent_docx(source, payload, "small.png", 24 * 12700, 12 * 12700)
+    doc = from_docx(str(source))
+    image = next(block for block in doc.blocks if block["type"] == "image")
+    assert (image["w"], image["h"]) == (24, 12)
+    saved = tmp / "small.wenju"
+    save(doc, str(saved))
+    loaded = load(str(saved))
+    kept = next(block for block in loaded.blocks if block["type"] == "image")
+    assert (kept["w"], kept["h"]) == (24, 12)
+    exported = tmp / "small-out.docx"
+    to_docx(loaded, str(exported))
+    assert _docx_extent(exported) == (24 * 12700, 12 * 12700)
+    again = from_docx(str(exported))
+    back = next(block for block in again.blocks if block["type"] == "image")
+    assert (back["w"], back["h"]) == (24, 12)
+    wide = _png_pixels(800, 200)
+    wide_path = tmp / "wide.docx"
+    _extent_docx(wide_path, wide, "wide.png", 800 * 12700, 200 * 12700)
+    fitted = from_docx(str(wide_path))
+    fitted_image = next(block for block in fitted.blocks if block["type"] == "image")
+    limit = image_size.content_width_pt()
+    assert fitted_image["w"] == image_size.num(limit)
+    assert fitted_image["h"] == image_size.num(200 * limit / 800)
+    bare = tmp / "pixels.docx"
+    _extent_docx(bare, payload, "pixels.png", 0, 0)
+    pixels = from_docx(str(bare))
+    pixel_image = next(block for block in pixels.blocks if block["type"] == "image")
+    assert (pixel_image["w"], pixel_image["h"]) == (24, 12)
+    cell = tmp / "cell.docx"
+    _extent_docx(cell, wide, "cell.png", 800 * 12700, 200 * 12700, cell_twip=2400)
+    cell_doc = from_docx(str(cell))
+    cell_table = next(block for block in cell_doc.blocks if block["type"] == "table")
+    cell_image = cell_table["rows"][0][0]["images"][0]
+    assert cell_image["w"] == 120
+    assert cell_image["h"] == 30
+
+
 def test_output_locations(tmp):
     folder = tmp / "inbox"
     folder.mkdir()
@@ -914,6 +1021,7 @@ def main():
         test_keep_fangsong_name(tmp)
         test_xlsx_image_and_merge(tmp)
         test_batch_merge_and_single_export(tmp)
+        test_image_keeps_native_size(tmp)
         test_output_locations(tmp)
     test_qt_switch()
     print("PASS: docx, xlsx, txt, md, paste, doc, wenju export, template brush, batch progress, qt switch")

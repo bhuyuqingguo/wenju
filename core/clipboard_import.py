@@ -7,6 +7,7 @@ import tempfile
 from html.parser import HTMLParser
 from urllib.parse import unquote, urlparse
 
+import image_size
 import wenju_format
 
 HTML_MIMES = ('text/html', 'application/x-qt-windows-mime;value="HTML Format"')
@@ -80,20 +81,8 @@ def _asset_name(name):
     return text or 'image.bin'
 
 
-def _point_size(width, height, data):
-    width = float(width or 0)
-    height = float(height or 0)
-    if data and data[:8] == b'\x89PNG\r\n\x1a\n' and len(data) >= 24 and (width <= 0 or height <= 0):
-        px_w, px_h = struct.unpack('>II', data[16:24])
-        if width <= 0 and px_w:
-            width = px_w * 0.75
-        if height <= 0 and px_h:
-            height = px_h * 0.75
-    if width <= 0:
-        width = 72
-    if height <= 0:
-        height = 72
-    return width, height
+def _point_size(width, height, data, scale_x=None, scale_y=None):
+    return image_size.display_size(data, width, height, scale_x, scale_y)
 
 
 def _as_bytes(data):
@@ -413,8 +402,7 @@ class _HtmlDoc(HTMLParser):
             self._flush()
             image = self._image(attr)
             if image is None and src_present(attr):
-                width = int(attr['width']) * 0.75 if attr.get('width', '').isdigit() else 0
-                height = int(attr['height']) * 0.75 if attr.get('height', '').isdigit() else 0
+                width, height = image_size.html_box(attr.get('width'), attr.get('height'), attr.get('style'))
                 image = {'type': 'image', 'asset': '', 'w': width, 'h': height}
             if tag == 'img' and self._same_image is not None:
                 if image:
@@ -586,8 +574,7 @@ class _HtmlDoc(HTMLParser):
 
     def _image(self, attr):
         src = attr.get('src') or ''
-        width = int(attr['width']) * 0.75 if attr.get('width', '').isdigit() else 0
-        height = int(attr['height']) * 0.75 if attr.get('height', '').isdigit() else 0
+        width, height = image_size.html_box(attr.get('width'), attr.get('height'), attr.get('style'))
         data = b''
         ext = ''
         match = re.match(r'data:image/([a-z0-9.+-]+);base64,(.+)', src, re.I | re.S)
@@ -938,6 +925,7 @@ class _RtfDoc(object):
     def _pict(self, tokens):
         blip = None
         width = height = None
+        scale_x = scale_y = None
         pieces = []
         text_parts = []
 
@@ -956,6 +944,10 @@ class _RtfDoc(object):
                 width = token[2] / 20.0
             elif kind == 'word' and token[1] == 'pichgoal' and token[2]:
                 height = token[2] / 20.0
+            elif kind == 'word' and token[1] == 'picscalex' and token[2]:
+                scale_x = token[2]
+            elif kind == 'word' and token[1] == 'picscaley' and token[2]:
+                scale_y = token[2]
             elif kind == 'bin':
                 flush_text()
                 pieces.append(token[1].encode('latin1'))
@@ -987,7 +979,7 @@ class _RtfDoc(object):
         self.images += 1
         asset = 'rtf%d.%s' % (self.images, ext)
         self.assets[asset] = data
-        width, height = _point_size(width, height, data)
+        width, height = _point_size(width, height, data, scale_x, scale_y)
         image = {'type': 'image', 'asset': asset, 'w': width, 'h': height}
         self._place_image(image)
 

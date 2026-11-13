@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
+import image_size
+
 APP_VERSION = "3.3.0"
 FORMAT = "wenju"
 
@@ -1329,7 +1331,7 @@ def _images_in(node, rels, files):
 def _extent(run):
     extent = next(run.iter(q(WP, "extent")), None)
     if extent is None:
-        return 100, 100
+        return None, None
     return emu_to_pt(extent.get("cx") or 0), emu_to_pt(extent.get("cy") or 0)
 
 
@@ -1376,13 +1378,14 @@ def _image_block(target, files, width, height):
     if blob is None:
         return None
     name = key.split("/")[-1] or "image.bin"
-    return {"type": "image", "asset": name, "w": width or 100, "h": height or 100, "_bytes": blob}
+    shown_w, shown_h = image_size.display_size(blob, width, height)
+    return {"type": "image", "asset": name, "w": shown_w, "h": shown_h, "_bytes": blob}
 
 
 def _blip_size(node):
     extent = next(node.iter(q(WP, "extent")), None)
     if extent is not None and (extent.get("cx") or extent.get("cy")):
-        return emu_to_pt(extent.get("cx") or 0) or 100, emu_to_pt(extent.get("cy") or 0) or 100
+        return emu_to_pt(extent.get("cx") or 0), emu_to_pt(extent.get("cy") or 0)
     return _media_size(node)
 
 
@@ -1400,7 +1403,7 @@ def _media_size(node):
         dya = obj.get(q(W, "dyaOrig"))
         if dxa and dya and str(dxa).isdigit() and str(dya).isdigit():
             return num(int(dxa) / 20.0), num(int(dya) / 20.0)
-    return 100, 100
+    return None, None
 
 
 def _dedupe_media(items):
@@ -1467,12 +1470,13 @@ def _chart_from(chart, ctx, size, uri):
     asset = _claim_asset(ctx, "chart%d.xml" % seq)
     files = {asset: bytes(blob)}
     rels = _read_rel_tree(path, ctx, files, set(), seq)
-    width, height = size
+    width, height = size or (None, None)
+    shown_w, shown_h = image_size.display_size(b"", width, height)
     return {
         "type": "chart",
         "asset": asset,
-        "w": width or 100,
-        "h": height or 100,
+        "w": shown_w,
+        "h": shown_h,
         "uri": uri or C,
         "rels": rels,
         "_files": files,
@@ -1608,11 +1612,12 @@ def _ole_images(node, rels, files):
         payload, kind = image_bytes(blob)
         if not payload or not kind:
             continue
+        shown_w, shown_h = image_size.display_size(payload, width, height)
         found.append({
             "type": "image",
             "asset": "ole%d.%s" % (len(found) + 1, kind),
-            "w": width or 100,
-            "h": height or 100,
+            "w": shown_w,
+            "h": shown_h,
             "_bytes": payload,
         })
     return found
@@ -1986,7 +1991,8 @@ def write_chart_paragraph(body, block, rel_ids, picture_id):
 def _chart_drawing(parent, block, rel_id, picture_id):
     drawing = ET.SubElement(parent, q(W, "drawing"))
     inline = ET.SubElement(drawing, q(WP, "inline"))
-    cx, cy = str(pt_to_emu(block["w"])), str(pt_to_emu(block["h"]))
+    shown_w, shown_h = image_size.fit_points(block.get("w") or 0, block.get("h") or 0, image_size.content_width_pt())
+    cx, cy = str(pt_to_emu(shown_w)), str(pt_to_emu(shown_h))
     extent = ET.SubElement(inline, q(WP, "extent"))
     extent.set("cx", cx)
     extent.set("cy", cy)
@@ -2004,7 +2010,8 @@ def _chart_drawing(parent, block, rel_id, picture_id):
 def _vml_picture(parent, block, rel_id):
     pict = ET.SubElement(parent, q(W, "pict"))
     shape = ET.SubElement(pict, q(VML, "shape"))
-    shape.set("style", "width:%spt;height:%spt" % (block.get("w"), block.get("h")))
+    shown_w, shown_h = image_size.fit_points(block.get("w") or 0, block.get("h") or 0, image_size.content_width_pt())
+    shape.set("style", "width:%spt;height:%spt" % (shown_w, shown_h))
     imagedata = ET.SubElement(shape, q(VML, "imagedata"))
     imagedata.set(q(R, "id"), rel_id)
 
@@ -2013,6 +2020,7 @@ def _read_table(table, ctx):
     parsed = []
     befores = []
     loose = []
+    columns = _grid_widths(table)
     for tr in table.findall(q(W, "tr")):
         row = []
         trpr = tr.find(q(W, "trPr"))
@@ -2064,6 +2072,9 @@ def _read_table(table, ctx):
                     run = _inherit_run(_read_run(node, theme=ctx.get("theme")), inherited)
                     if run.get("text"):
                         runs.append(run)
+            limit = _cell_width_pt(tcpr, columns, len(row), span)
+            for image in cell_images:
+                image["w"], image["h"] = image_size.fit_points(image["w"], image["h"], limit)
             item = {"span": max(span, 1), "vmerge": vmerge, "hmerge": hmerge, "runs": runs}
             if cell_images:
                 item["images"] = cell_images
@@ -2071,6 +2082,36 @@ def _read_table(table, ctx):
         parsed.append(row)
     grid, merges = _expand_table(parsed, befores)
     return {"type": "table", "rows": grid, "merges": merges}, loose
+
+
+def _grid_widths(table):
+    grid = table.find(q(W, "tblGrid"))
+    if grid is None:
+        return []
+    widths = []
+    for col in grid.findall(q(W, "gridCol")):
+        try:
+            widths.append(int(col.get(q(W, "w")) or 0))
+        except ValueError:
+            widths.append(0)
+    return widths
+
+
+def _cell_width_pt(tcpr, columns, col, span):
+    if tcpr is not None:
+        tcw = tcpr.find(q(W, "tcW"))
+        if tcw is not None and (tcw.get(q(W, "type")) in (None, "dxa")):
+            try:
+                stated = int(tcw.get(q(W, "w")) or 0)
+            except ValueError:
+                stated = 0
+            if stated > 0:
+                return stated / 20.0
+    if columns:
+        width = sum(columns[col:col + span]) or columns[min(col, len(columns) - 1)]
+        if width > 0:
+            return width / 20.0
+    return image_size.content_width_pt()
 
 
 def _paragraph_text(paragraph):
@@ -2471,7 +2512,8 @@ def _write_drawing(paragraph, block, rel_id, picture_id):
     run = ET.SubElement(paragraph, q(W, "r"))
     drawing = ET.SubElement(run, q(W, "drawing"))
     inline = ET.SubElement(drawing, q(WP, "inline"))
-    cx, cy = str(pt_to_emu(block["w"])), str(pt_to_emu(block["h"]))
+    shown_w, shown_h = image_size.fit_points(block["w"], block["h"], image_size.content_width_pt())
+    cx, cy = str(pt_to_emu(shown_w)), str(pt_to_emu(shown_h))
     extent = ET.SubElement(inline, q(WP, "extent"))
     extent.set("cx", cx)
     extent.set("cy", cy)
