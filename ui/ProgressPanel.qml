@@ -129,6 +129,14 @@ ColumnLayout {
                 }
                 Text {
                     width: parent.width
+                    visible: (modelData.target || modelData.docx || modelData.output || "") !== ""
+                    text: "目标文件 " + (modelData.target || modelData.docx || modelData.output || "")
+                    color: root.ink
+                    font.pixelSize: Math.max(11, root.fontPx - 1)
+                    elide: Text.ElideMiddle
+                }
+                Text {
+                    width: parent.width
                     visible: (modelData.message || "") !== ""
                     text: modelData.message || ""
                     color: modelData.state === "失败" ? root.badColor : root.muted

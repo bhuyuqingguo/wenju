@@ -377,8 +377,8 @@ ApplicationWindow {
                 ProgressPanel {
                     objectName:"progressPanel"
                     Layout.fillWidth:true
-                    Layout.preferredHeight:bridge.convertFiles.length===0?40:Math.min(140, 36+bridge.convertFiles.length*36)
-                    Layout.maximumHeight:bridge.convertFiles.length===0?40:140
+                    Layout.preferredHeight:bridge.convertFiles.length===0?40:Math.min(220, 36+bridge.convertFiles.length*56)
+                    Layout.maximumHeight:bridge.convertFiles.length===0?40:220
                     idleHint:false
                     files:bridge.convertFiles
                     overall:bridge.convertOverall

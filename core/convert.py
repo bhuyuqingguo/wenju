@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
+import sys
 import zipfile
 import xml.etree.ElementTree as ET
 from copy import deepcopy
@@ -50,9 +52,11 @@ def convert_text(text, mode="preserve", template=None, report=None):
     return _finish(doc, mode, template, report)
 
 
-def run_batch(items, dest_dir, mode="preserve", template=None, on_progress=None):
-    dest = Path(dest_dir)
-    dest.mkdir(parents=True, exist_ok=True)
+def run_batch(items, dest_dir, mode="preserve", template=None, on_progress=None, when=None, home=None):
+    dest = Path(dest_dir) if dest_dir else None
+    if dest is not None:
+        dest.mkdir(parents=True, exist_ok=True)
+    taken = set()
     files = []
     for item in items:
         files.append({
@@ -84,10 +88,11 @@ def run_batch(items, dest_dir, mode="preserve", template=None, on_progress=None)
             else:
                 doc = convert_path(item.get("path"), mode, template, report)
                 stem = Path(item.get("path") or item.get("name") or "未命名").stem
-            target = _unique(dest, _safe_stem(stem), ".wenju")
+            target = destination(item, ".wenju", dest, stem, when, home, taken)
             report(80, "正在写入")
             save(doc, str(target))
             files[index]["output"] = str(target)
+            files[index]["target"] = str(target)
             files[index]["percent"] = 100
             files[index]["state"] = "成功"
             files[index]["message"] = target.name
@@ -109,9 +114,11 @@ def run_batch(items, dest_dir, mode="preserve", template=None, on_progress=None)
     return final
 
 
-def run_export(items, dest_dir, template=None, on_progress=None):
-    dest = Path(dest_dir)
-    dest.mkdir(parents=True, exist_ok=True)
+def run_export(items, dest_dir, template=None, on_progress=None, when=None, home=None):
+    dest = Path(dest_dir) if dest_dir else None
+    if dest is not None:
+        dest.mkdir(parents=True, exist_ok=True)
+    taken = set()
     files = []
     for item in items:
         files.append({
@@ -137,10 +144,11 @@ def run_export(items, dest_dir, template=None, on_progress=None):
             report(8, "正在读取")
             doc = load(item["path"])
             report(55, "正在生成 docx")
-            target = _unique(dest, _safe_stem(Path(item["path"]).stem), ".docx")
+            target = Path(item["docx"]) if item.get("docx") else destination(item, ".docx", dest, Path(item["path"]).stem, when, home, taken)
             to_docx(doc, str(target), template)
             report(90, "正在写入")
             files[index]["docx"] = str(target)
+            files[index]["target"] = str(target)
             files[index]["percent"] = 100
             files[index]["state"] = "成功"
             files[index]["message"] = target.name
@@ -184,9 +192,9 @@ def execute(job):
             handle.write(payload)
         os.replace(temporary, progress)
     if action == "export":
-        snap = run_export(job.get("items") or [], job["outdir"], job.get("template"), on_progress)
+        snap = run_export(job.get("items") or [], job.get("outdir") or None, job.get("template"), on_progress)
     else:
-        snap = run_batch(job.get("items") or [], job["outdir"], job.get("mode") or "preserve", job.get("template"), on_progress)
+        snap = run_batch(job.get("items") or [], job.get("outdir") or None, job.get("mode") or "preserve", job.get("template"), on_progress)
     return {"ok": True, "snapshot": snap}
 
 
@@ -217,13 +225,84 @@ def _safe_stem(name):
     return cleaned or "未命名"
 
 
-def _unique(directory, stem, suffix):
-    path = directory / (stem + suffix)
-    number = 2
-    while path.exists():
-        path = directory / ("%s-%d%s" % (stem, number, suffix))
-        number += 1
+def documents_dir(home=None):
+    if home is None and os.environ.get("WENJU_DOCUMENTS"):
+        return Path(os.environ["WENJU_DOCUMENTS"])
+    home = Path(home) if home is not None else Path.home()
+    if sys.platform == "win32" and home == Path.home():
+        profile = os.environ.get("USERPROFILE")
+        if profile:
+            return Path(profile) / "Documents"
+    chinese = home / "文档"
+    english = home / "Documents"
+    if chinese.is_dir():
+        return chinese
+    if english.is_dir():
+        return english
+    return english if sys.platform == "win32" else chinese
+
+
+def clipboard_dir(home=None):
+    path = documents_dir(home) / "文矩输出"
+    path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def clipboard_stem(when=None):
+    when = when or datetime.datetime.now()
+    return "剪贴板-" + when.strftime("%Y%m%d-%H%M")
+
+
+def place_output(directory, stem, suffix, taken=None):
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    stem = stem or "未命名"
+    number = 0
+    while True:
+        name = stem + suffix if number == 0 else "%s (%d)%s" % (stem, number, suffix)
+        path = directory / name
+        key = str(path)
+        if (taken is None or key not in taken) and not path.exists():
+            if taken is not None:
+                taken.add(key)
+            return path
+        number += 1
+
+
+def merge_targets(source, taken=None):
+    folder = Path(source).resolve().parent
+    return place_output(folder, "合稿", ".wenju", taken), place_output(folder, "合稿", ".docx", taken)
+
+
+def _reserved(path, taken):
+    path = Path(path)
+    if path.exists() or (taken is not None and str(path) in taken):
+        return place_output(path.parent, path.stem, path.suffix, taken)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if taken is not None:
+        taken.add(str(path))
+    return path
+
+
+def destination(item, suffix, dest, stem, when, home, taken):
+    if item.get("output") and suffix == ".wenju":
+        return _reserved(item["output"], taken)
+    if item.get("docx") and suffix == ".docx":
+        return _reserved(item["docx"], taken)
+    if item.get("outdir"):
+        folder = Path(item["outdir"])
+    elif dest is not None:
+        folder = Path(dest)
+    elif item.get("path"):
+        folder = Path(item["path"]).resolve().parent
+    else:
+        folder = clipboard_dir(home)
+        stem = clipboard_stem(when)
+    return place_output(folder, _safe_stem(stem), suffix, taken)
+
+
+def _unique(directory, stem, suffix):
+    return place_output(directory, stem, suffix)
 
 
 def _unsupported(suffix):
