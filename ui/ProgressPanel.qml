@@ -4,6 +4,7 @@ import QtQuick.Layouts
 
 ColumnLayout {
     id: root
+    clip: true
     property var files: []
     property int overall: 0
     property string heading: "总进度"
@@ -87,7 +88,7 @@ ColumnLayout {
     Item {
         Layout.fillWidth: true
         Layout.fillHeight: true
-        Layout.minimumHeight: 48
+        Layout.minimumHeight: Math.round(108 * Math.max(1, root.fontPx / 13))
         visible: root.percent < 0 && root.files.length > 0
         ListView {
             id: list
@@ -98,7 +99,7 @@ ColumnLayout {
             delegate: Column {
                 required property var modelData
                 width: list.width
-                spacing: 4
+                spacing: 3
                 RowLayout {
                     width: parent.width
                     Text {
@@ -127,13 +128,122 @@ ColumnLayout {
                         color: root.barColor(modelData.state)
                     }
                 }
-                Text {
+                RowLayout {
+                    visible: root.fontPx >= 17
                     width: parent.width
-                    visible: (modelData.message || "") !== ""
+                    spacing: 8
+                    Text { text: "原文件"; color: root.muted; font.pixelSize: Math.max(11, root.fontPx - 1) }
+                    Text {
+                        id: sourceWide
+                        text: modelData.source || ""
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 0
+                        color: root.ink
+                        font.pixelSize: Math.max(11, root.fontPx - 1)
+                        elide: Text.ElideMiddle
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            ToolTip.visible: containsMouse && parent.text !== ""
+                            ToolTip.text: parent.text
+                            ToolTip.delay: 300
+                        }
+                    }
+                    Text { text: "目标文件"; color: root.muted; font.pixelSize: Math.max(11, root.fontPx - 1) }
+                    Text {
+                        id: outputWide
+                        text: modelData.output ? modelData.output : "尚未生成"
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 0
+                        color: modelData.output ? root.ink : root.muted
+                        font.pixelSize: Math.max(11, root.fontPx - 1)
+                        elide: Text.ElideMiddle
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            ToolTip.visible: containsMouse && parent.text !== ""
+                            ToolTip.text: parent.text
+                            ToolTip.delay: 300
+                        }
+                    }
+                }
+                RowLayout {
+                    visible: root.fontPx < 17
+                    width: parent.width
+                    spacing: 8
+                    Text {
+                        text: "原文件"
+                        color: root.muted
+                        font.pixelSize: Math.max(11, root.fontPx - 1)
+                        Layout.preferredWidth: Math.max(11, root.fontPx - 1) * 4 + 12
+                        Layout.minimumWidth: Math.max(11, root.fontPx - 1) * 4 + 12
+                    }
+                    Item {
+                        Layout.fillWidth: true
+                        implicitHeight: sourceText.implicitHeight
+                        Text {
+                            id: sourceText
+                            width: parent.width
+                            text: modelData.source || ""
+                            color: root.ink
+                            font.pixelSize: Math.max(11, root.fontPx - 1)
+                            elide: Text.ElideMiddle
+                            MouseArea {
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                ToolTip.visible: containsMouse && parent.text !== ""
+                                ToolTip.text: parent.text
+                                ToolTip.delay: 300
+                            }
+                        }
+                    }
+                }
+                RowLayout {
+                    visible: root.fontPx < 17
+                    width: parent.width
+                    spacing: 8
+                    Text {
+                        text: "目标文件"
+                        color: root.muted
+                        font.pixelSize: Math.max(11, root.fontPx - 1)
+                        Layout.preferredWidth: Math.max(11, root.fontPx - 1) * 4 + 12
+                        Layout.minimumWidth: Math.max(11, root.fontPx - 1) * 4 + 12
+                    }
+                    Item {
+                        Layout.fillWidth: true
+                        implicitHeight: outputText.implicitHeight
+                        Text {
+                            id: outputText
+                            width: parent.width
+                            text: modelData.output ? modelData.output : "尚未生成"
+                            color: modelData.output ? root.ink : root.muted
+                            font.pixelSize: Math.max(11, root.fontPx - 1)
+                            elide: Text.ElideMiddle
+                            MouseArea {
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                ToolTip.visible: containsMouse && parent.text !== ""
+                                ToolTip.text: parent.text
+                                ToolTip.delay: 300
+                            }
+                        }
+                    }
+                }
+                Text {
+                    id: statusText
+                    width: parent.width
+                    visible: (modelData.message || "") !== "" && modelData.state !== "成功"
                     text: modelData.message || ""
                     color: modelData.state === "失败" ? root.badColor : root.muted
                     font.pixelSize: Math.max(11, root.fontPx - 1)
                     elide: Text.ElideRight
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        ToolTip.visible: containsMouse && parent.text !== ""
+                        ToolTip.text: parent.text
+                        ToolTip.delay: 300
+                    }
                 }
             }
         }

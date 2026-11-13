@@ -326,7 +326,7 @@ ApplicationWindow {
             }
 
             ColumnLayout {
-                anchors.fill:parent;spacing:10;visible:page===5
+                anchors.fill:parent;spacing:6;visible:page===5
                 Rectangle {
                     Layout.fillWidth:true;Layout.preferredHeight:108;radius:10;color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
                     RowLayout {anchors.fill:parent;anchors.margins:12;spacing:12
@@ -367,7 +367,7 @@ ApplicationWindow {
                     }
                 }
                 Txt {text:bridge.convertHint;color:muted;font.pixelSize:Math.round(12*appearance.scale);Layout.fillWidth:true;wrapMode:Text.WordWrap}
-                Rectangle {Layout.fillWidth:true;Layout.fillHeight:true;Layout.minimumHeight:150;radius:12;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
+                Rectangle {Layout.fillWidth:true;Layout.fillHeight:true;Layout.minimumHeight:110;radius:12;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
                     ColumnLayout {anchors.fill:parent;anchors.margins:12;spacing:6
                         Txt {text:"内容预览";font.weight:Font.DemiBold}
                         Txt {text:bridge.previewNote;color:muted;font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;wrapMode:Text.WordWrap}
@@ -377,8 +377,8 @@ ApplicationWindow {
                 ProgressPanel {
                     objectName:"progressPanel"
                     Layout.fillWidth:true
-                    Layout.preferredHeight:bridge.convertFiles.length===0?40:Math.min(140, 36+bridge.convertFiles.length*36)
-                    Layout.maximumHeight:bridge.convertFiles.length===0?40:140
+                    Layout.preferredHeight:bridge.convertFiles.length===0?40:Math.min(320, 56+bridge.convertFiles.length*88)
+                    Layout.maximumHeight:bridge.convertFiles.length===0?40:320
                     idleHint:false
                     files:bridge.convertFiles
                     overall:bridge.convertOverall
