@@ -24,6 +24,18 @@ def wenju_modules():
     import clipboard_import
     import wenju_format
     return clipboard_import, wenju_format
+
+def wenju_api():
+    return wenju_modules()[1]
+
+def source_document(path):
+    wenju_api()
+    path = str(path)
+    if path.lower().endswith(('.docx', '.wenju')): return path
+    import docx_fmt
+    converted = docx_fmt.convert_to_docx(path)
+    if not converted: raise ValueError('无法读取 %s，请先另存为 .docx' % Path(path).name)
+    return converted
 def qt_log(kind, context, message):
     with (DATA/'界面日志.txt').open('a',encoding='utf-8') as log: log.write(message+'\n')
 qInstallMessageHandler(qt_log)
@@ -222,14 +234,14 @@ class Bridge(QObject):
         known = {r['path'] for r in self.rows}
         for p in paths:
             p = str(Path(p).resolve())
-            if p not in known and Path(p).suffix.lower() in ('.docx','.doc','.wps','.rtf') and Path(p).is_file():
+            if p not in known and Path(p).suffix.lower() in ('.docx','.doc','.wps','.rtf','.wenju') and Path(p).is_file():
                 self.rows.append(dict(path=p, name=Path(p).name, state='等待整理', output='',report=''))
                 known.add(p)
         self.changed.emit()
 
     @Slot()
     def choose(self):
-        paths, _ = QFileDialog.getOpenFileNames(None, '选择文档', '', '文档 (*.docx *.doc *.wps *.rtf)')
+        paths, _ = QFileDialog.getOpenFileNames(None, '选择文档', '', '文档 (*.docx *.doc *.wps *.rtf *.wenju)')
         self.add(paths)
 
     def _set_import_progress(self, value):
@@ -309,6 +321,35 @@ class Bridge(QObject):
 
     @Slot()
     def sample(self): self.add([ROOT/'core/样例/样例_整理前.docx'])
+
+    def _write_row(self, index, dest):
+        if not 0 <= index < len(self.rows): raise IndexError('没有这份文档')
+        wenju_api().convert_file(source_document(self.rows[index]['path']), dest)
+        self.rows[index]['output'] = dest
+        self.rows[index]['state'] = '已保存 · 点击打开'
+        self.message = '已保存 ' + Path(dest).name
+        self.changed.emit()
+
+    def _ask_save(self, index, suffix, title, label):
+        try:
+            if self.running or not 0 <= index < len(self.rows): return
+            stem = Path(self.rows[index]['name']).stem
+            folder = DATA/'输出'
+            folder.mkdir(parents=True, exist_ok=True)
+            path, _ = QFileDialog.getSaveFileName(None, title, str(folder/(stem+suffix)), label)
+            if not path: return
+            if not path.lower().endswith(suffix): path += suffix
+            self._write_row(index, path)
+        except Exception as exc:
+            self.error(exc)
+
+    @Slot(int)
+    def saveWenju(self, index):
+        self._ask_save(index, '.wenju', '保存为文矩', '文矩文档 (*.wenju)')
+
+    @Slot(int)
+    def exportDocx(self, index):
+        self._ask_save(index, '.docx', '导出 DOCX', 'Word 文档 (*.docx)')
 
     @Slot()
     def clear(self):

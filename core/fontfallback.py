@@ -8,6 +8,13 @@ faces are not redistributable; this module never ships those files.
 import os, sys, shutil, subprocess
 from pathlib import Path
 
+def resolve(name):
+    """Name stored in the docx. A missing face is substituted only when drawing."""
+    if not name:
+        return name
+    return str(name)
+
+
 # Each list is the order to try. The first entry is the preferred family.
 CHAINS = {
     '仿宋_GB2312': ['仿宋_GB2312', 'FangSong_GB2312', '仿宋', 'FangSong', 'STFangsong', '华文仿宋'],
@@ -182,13 +189,6 @@ def install_user_font(src):
         subprocess.run(['fc-cache', '-f', str(dest_dir)], check=False)
     reset_index()
     return '已安装到 ~/.local/share/fonts/wenju'
-
-
-def resolve(name):
-    """Name stored in the docx. A missing face is substituted only when drawing."""
-    if not name:
-        return name
-    return str(name)
 
 
 def application_font_files(root):
