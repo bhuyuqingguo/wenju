@@ -326,7 +326,23 @@ class Bridge(QObject):
     @Slot()
     def help(self):self.reportReady.emit((ROOT/'使用说明.txt').read_text('utf-8-sig'))
 
+def brand_icon():
+    icon = QIcon()
+    hicolor = ROOT / 'launcher' / 'icons' / 'hicolor'
+    for path in sorted(hicolor.glob('*/apps/wenju.png')):
+        icon.addFile(str(path))
+    if icon.isNull():
+        icon = QIcon(str(ROOT / 'core' / '素材' / '文矩_图标_512.png'))
+    return icon
+
 QQuickStyle.setStyle(quick_style())
+# Desktop file name is read when the platform plugin starts. Setting it later
+# leaves WM_CLASS as "app.py" and the taskbar icon does not match StartupWMClass.
+if hasattr(QGuiApplication, 'setDesktopFileName'):
+    QGuiApplication.setDesktopFileName('wenju')
+# argv[0] becomes the X11 WM_CLASS instance. Keep it the same as StartupWMClass.
+if sys.platform != 'win32':
+    sys.argv[0] = 'wenju'
 app = QApplication(sys.argv)
 set_color_scheme(app, False)
 palette=QPalette()
@@ -336,11 +352,12 @@ app.setPalette(palette)
 for font_file in fontfallback.application_font_files(ROOT):
     QFontDatabase.addApplicationFont(str(font_file))
 fontfallback.reset_index()
-if hasattr(app, 'setDesktopFileName'):
-    app.setDesktopFileName('wenju')
-app.setApplicationName('文矩')
+app.setApplicationName('wenju')
+if sys.platform == 'win32':
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('WenJu.Desktop.3.3')
 app.setOrganizationName('WenJu')
-app.setWindowIcon(QIcon(str(ROOT/'core/素材/文矩_图标_512.png')))
+app.setWindowIcon(brand_icon())
 app.setFont(QFont('Microsoft YaHei UI',10))
 appearance=Appearance(DATA,app)
 bridge = Bridge()
@@ -351,6 +368,8 @@ engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro 
 engine.load(QUrl.fromLocalFile(str(ROOT/'Main.qml')))
 if not engine.rootObjects(): sys.exit(1)
 window = engine.rootObjects()[0]
+if hasattr(window, 'setIcon'):
+    window.setIcon(app.windowIcon())
 incoming=[arg for arg in sys.argv[1:] if not arg.startswith('--') and Path(arg).is_file()]
 if incoming:bridge.add(incoming)
 if '--test-opening' in sys.argv:

@@ -263,6 +263,11 @@ def copy_runtime(stage):
     return runtime
 
 
+def prepare_icons():
+    subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'make_icon.py')])
+    subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'ico', str(ROOT / 'launcher' / 'WenJu.ico')])
+
+
 def build_launcher(stage):
     gcc = 'x86_64-w64-mingw32-gcc'
     windres = 'x86_64-w64-mingw32-windres'
@@ -276,6 +281,7 @@ def build_launcher(stage):
     ])
     rc.unlink()
     res.unlink()
+    subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'exe', str(stage / '文矩.exe')])
 
 
 def write_note(stage):
@@ -285,7 +291,7 @@ def write_note(stage):
         适用系统：Windows 7 SP1 x64，并安装平台更新 KB2670838（提供 d3d11.dll；Qt 5.15 会直接加载它）。
         本包自带 Python 3.8.10、PySide2 5.15.2.1（Qt 5.15.2）、vcruntime140、msvcp140、
         以及 Windows 7 可用的 ucrtbase 和 api-ms-win-* 转发库。不需要单独安装 Python 或 VC++ 运行库。
-        不需要 .NET。双击「文矩.exe」。也可以双击「启动文矩.bat」。
+        不需要 .NET。解压后双击外层的「打开文矩.exe」。它会建立桌面和开始菜单快捷方式。文件夹里的「文矩.exe」是同一个程序。也可以双击「启动文矩.bat」。
 
         这是 Win7 专用变体。Win10/11 便携包和麒麟包仍使用 PySide6，不能把两边的 runtime 混用。
         界面用 Qt Quick Controls 2 / Fusion。显卡驱动过旧时，用「文矩.exe --safe-render」改软件渲染。
@@ -297,6 +303,7 @@ def write_note(stage):
 
 
 def assemble():
+    prepare_icons()
     if STAGE.exists():
         shutil.rmtree(STAGE)
     STAGE.mkdir(parents=True)
@@ -306,7 +313,9 @@ def assemble():
         text = src.read_text(encoding='utf-8')
         if name.endswith('.qml'):
             text = rewrite_qml(name, text)
-        (STAGE / name).write_text(text, encoding='utf-8')
+        dest = STAGE / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(text, encoding='utf-8')
     core_src = ROOT / 'core'
     for path in core_src.rglob('*'):
         if not path.is_file():
@@ -323,7 +332,11 @@ def assemble():
     for path in (ROOT / 'docs').glob('*.png'):
         shutil.copy2(path, docs / path.name)
     write_note(STAGE)
+    icon_src = ROOT / 'launcher' / 'icons'
+    if icon_src.exists():
+        shutil.copytree(icon_src, STAGE / 'launcher' / 'icons')
     build_launcher(STAGE)
+    shutil.copy2(STAGE / '文矩.exe', STAGE.parent / '打开文矩.exe')
     checked, problems = pe_imports.scan(STAGE)
     print(f'PE files: {checked}')
     if problems:
@@ -337,7 +350,14 @@ def assemble():
     if ARCHIVE.exists():
         ARCHIVE.unlink()
     files = [p for p in STAGE.rglob('*') if p.is_file()]
+    entry = STAGE.parent / '打开文矩.exe'
     with zipfile.ZipFile(ARCHIVE, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+        info = ChineseZipInfo('打开文矩.exe')
+        info.compress_type = zipfile.ZIP_DEFLATED
+        raw = '打开文矩.exe'.encode('gbk')
+        extra = struct.pack('<BI', 1, zlib.crc32(raw)) + '打开文矩.exe'.encode('utf-8')
+        info.extra = struct.pack('<HH', 0x7075, len(extra)) + extra
+        z.writestr(info, entry.read_bytes())
         for path in files:
             name = '文矩/' + path.relative_to(STAGE).as_posix()
             info = ChineseZipInfo(name)

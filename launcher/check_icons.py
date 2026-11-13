@@ -109,6 +109,8 @@ def check_ico(path):
 def check_linux_tree(root):
     """Check a staged Linux tree. AppImage and deb are optional layouts."""
     root = Path(root)
+    if not list(root.rglob('.DirIcon')):
+        raise SystemExit(f'{root} is missing .DirIcon')
     desktop_files = list(root.rglob('*.desktop'))
     if not desktop_files:
         raise SystemExit(f'{root} has no .desktop entry, so a file manager cannot show the product icon')

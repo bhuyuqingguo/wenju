@@ -48,12 +48,12 @@ No Windows 7 import violations.
 
 同一脚本扫过 v3.3.0 的 Windows 包，会列出上面的 `api-ms-win-core-path-l1-1-0.dll`。Win7 包的 `python38.dll`、`Qt5Core.dll`、`qwindows.dll`、`libssl-1_1.dll` 没有该 DLL，也没有 `CopyFile2`、`GetSystemTimePreciseAsFileTime`、`SetThreadDescription`。`ucrtbase.dll` 引用的是随包附带的 downlevel API 集，实际转到的是 Windows 7 就有的函数（例如 `Sleep`、`MoveFileExW`、`GetTempPathW`）。
 
-没有 Windows 7 虚拟机，也没有可用的系统安装镜像，所以没有在真机上启动界面。Wine 不能当作 Windows 7。
+这台打包机打不开 `/dev/kvm`（设备在，当前用户不在 kvm 组），也没有安装 `qemu-system-x86_64`，更没有可合法使用的 Windows 7 安装镜像。因此没有在虚拟机里启动界面。在自己的 Windows 上用已有 ISO 启动的步骤见 `launcher/win7-vm.ps1`。
 
 ## 包
 
 `dist/WenJu_3.3.0_Windows7_x64_Portable.zip`
 
-SHA256：`a60f42e6efbd564c21babc1a4622295c78a667b82e3620037a6ebd541dc0da33`
+SHA256：`ddd1fca325cc09884d1484ff3036c423380dd6a8abced5d5b32ae2dee29be421`
 
-整包一个 zip，约 63 MiB，2063 个文件。解压后双击 `文矩.exe`。
+整包一个 zip，66557622 字节，2074 个条目。解压后最外层是 `打开文矩.exe` 和 `文矩/`。
