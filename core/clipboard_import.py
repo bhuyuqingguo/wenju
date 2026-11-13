@@ -400,7 +400,8 @@ class _HtmlDoc(HTMLParser):
             self.kind = ('p', 'toc')
         else:
             level = css.get('outline') or _level_from_class(class_name) or _level_from_name(css.get('style_name'))
-            self.kind = ('h', level) if level else ('p', 'body')
+            style_name = css.get('style_name') or 'body'
+            self.kind = ('h', level) if level else ('p', style_name)
         self.stack.append({key: css[key] for key in ('font', 'size', 'bold', 'italic') if key in css})
 
     def handle_endtag(self, tag):

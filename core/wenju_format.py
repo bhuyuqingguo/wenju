@@ -80,12 +80,15 @@ class WenjuDoc:
     app_version: str = APP_VERSION
     created: str = ""
     version: int = 1
+    sections: list = field(default_factory=list)
 
     def __post_init__(self):
         if not self.created:
             self.created = utcnow()
         if not self.source:
             self.source = {"kind": "new", "name": ""}
+        if self.sections is None:
+            self.sections = []
 
 
 def manifest_of(doc):
@@ -111,6 +114,7 @@ def validate(doc):
     if not isinstance(doc.blocks, list):
         errors.append("document.blocks 必须是有序列表")
         return errors
+    _check_sections(getattr(doc, "sections", None), errors)
     if not isinstance(doc.styles, dict):
         errors.append("styles 必须是命名样式表")
     else:
@@ -166,6 +170,7 @@ def load(path):
     if not isinstance(styles, dict):
         raise ValueError("styles.json 必须是命名样式表")
     source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    sections = document.get("sections") if isinstance(document.get("sections"), list) else []
     doc = WenjuDoc(
         blocks=document["blocks"],
         styles=styles,
@@ -175,6 +180,7 @@ def load(path):
         app_version=manifest.get("app_version") or APP_VERSION,
         created=manifest.get("created") or utcnow(),
         version=manifest.get("version") or 0,
+        sections=sections,
     )
     errors = validate(doc)
     if errors:
@@ -192,7 +198,7 @@ def save(doc, path):
         os.makedirs(parent, exist_ok=True)
     files = [
         ("manifest.json", _dump(manifest_of(doc))),
-        ("document.json", _dump({"blocks": doc.blocks})),
+        ("document.json", _dump({"blocks": doc.blocks, "sections": list(getattr(doc, "sections", None) or [])})),
         ("styles.json", _dump(doc.styles)),
     ]
     for name, data in doc.assets.items():
@@ -215,7 +221,10 @@ def from_docx(path):
     root = ET.fromstring(files["word/document.xml"])
     body = root.find(q(W, "body"))
     ctx = {"rels": rels, "files": files, "names": style_names, "styles": styles, "outlines": outlines, "defaults": defaults, "theme": theme}
-    blocks = _read_container(body, ctx) if body is not None else []
+    if body is not None:
+        blocks, sections = _read_body(body, ctx)
+    else:
+        blocks, sections = [], []
     assets = _store_images(blocks)
     title = _title_from(blocks) or Path(path).stem
     return WenjuDoc(
@@ -224,6 +233,7 @@ def from_docx(path):
         assets=assets,
         title=title,
         source={"kind": "docx", "name": os.path.basename(path)},
+        sections=sections,
     )
 
 
@@ -237,35 +247,81 @@ def to_docx(doc, path, template=None):
         for name, override in brush.items():
             styles[name] = _merge_style(styles.get(name), override)
     style_ids = _style_ids(styles)
+    sections = [dict(item) for item in (getattr(doc, "sections", None) or []) if isinstance(item, dict)]
+    active = _sections_active(sections)
+    header_ids = []
+    footer_ids = []
+    next_rid = 2
+    if active:
+        for _section in sections:
+            header_ids.append("rId%d" % next_rid)
+            next_rid += 1
+            footer_ids.append("rId%d" % next_rid)
+            next_rid += 1
+    image_start = next_rid
     image_rels = []
     body = ET.Element(q(W, "body"))
     picture_id = 1
-    for block in doc.blocks:
+    last_p = None
+    open_section = None
+    for index, block in enumerate(doc.blocks):
+        section = _section_at(index, sections) if active else None
+        if active and open_section is not None and section is not open_section:
+            if last_p is None:
+                last_p = ET.SubElement(body, q(W, "p"))
+            _attach_sect(last_p, open_section, sections, header_ids, footer_ids, section.get("break") or "nextPage")
+            last_p = None
+        if active:
+            open_section = section
         kind = block["type"]
         if kind in ("heading", "paragraph"):
             _write_paragraph(body, block, styles, style_ids, brush)
+            last_p = body[-1]
         elif kind == "table":
             _write_table(body, block, styles, style_ids, brush)
+            last_p = None
         elif kind == "image":
-            rel_id = "rId%d" % (len(image_rels) + 2)
+            rel_id = "rId%d" % (image_start + len(image_rels))
             image_rels.append((rel_id, block["asset"]))
             _write_image(body, block, rel_id, picture_id)
             picture_id += 1
+            last_p = body[-1]
         elif kind == "pagebreak":
-            _write_page_break(body)
+            if active:
+                following = _section_at(index + 1, sections) if index + 1 < len(doc.blocks) else section
+                if following is section:
+                    _write_page_break(body)
+                    last_p = body[-1]
+                elif last_p is None:
+                    last_p = ET.SubElement(body, q(W, "p"))
+            else:
+                _write_page_break(body)
+                last_p = body[-1]
         elif kind == "toc":
-            _write_toc(body)
-    sect = ET.SubElement(body, q(W, "sectPr"))
-    ET.SubElement(sect, q(W, "pgSz")).set(q(W, "w"), "11906")
-    sect.find(q(W, "pgSz")).set(q(W, "h"), "16838")
+            _write_toc(body, doc.blocks, sections)
+            last_p = body[-1]
+    if active:
+        if open_section is None and sections:
+            open_section = sections[0]
+        body.append(_sect_element(open_section or {}, sections, header_ids, footer_ids, True, ""))
+    else:
+        sect = ET.SubElement(body, q(W, "sectPr"))
+        ET.SubElement(sect, q(W, "pgSz")).set(q(W, "w"), "11906")
+        sect.find(q(W, "pgSz")).set(q(W, "h"), "16838")
+    part_files = {}
+    if active:
+        for index, section in enumerate(sections):
+            part_files["word/header%d.xml" % (index + 1)] = _header_xml(section.get("header") or "")
+            part_files["word/footer%d.xml" % (index + 1)] = _footer_xml(section.get("footer") or "", _footer_has_page(section, sections))
     files = {
-        "[Content_Types].xml": _content_types(doc.assets),
+        "[Content_Types].xml": _content_types(doc.assets, len(sections) if active else 0),
         "_rels/.rels": _package_rels(),
         "docProps/core.xml": _core_xml(doc.title),
         "word/document.xml": _xml(ET.ElementTree(_document_root(body))),
         "word/styles.xml": _styles_xml(styles, style_ids),
-        "word/_rels/document.xml.rels": _document_rels(image_rels),
+        "word/_rels/document.xml.rels": _document_rels(image_rels, header_ids if active else None, footer_ids if active else None),
     }
+    files.update(part_files)
     for _rel_id, asset in image_rels:
         files["word/media/" + asset] = bytes(doc.assets[asset])
     path = str(path)
@@ -291,6 +347,29 @@ def convert_file(src, dest, template=None):
     else:
         raise ValueError("只能保存为 .wenju 或 .docx")
     return dest
+
+
+def _check_sections(sections, errors):
+    if sections is None:
+        return
+    if not isinstance(sections, list):
+        errors.append("document.sections 必须是列表")
+        return
+    allowed = ("nextPage", "continuous", "evenPage", "oddPage", "nextColumn")
+    for index, section in enumerate(sections):
+        where = "第 %d 节" % (index + 1)
+        if not isinstance(section, dict):
+            errors.append("%s 无法识别" % where)
+            continue
+        at = section.get("at", 0)
+        if isinstance(at, bool) or not isinstance(at, int) or at < 0:
+            errors.append("%s 的起始位置无法识别" % where)
+        brk = section.get("break", "nextPage")
+        if brk is not None and brk not in allowed:
+            errors.append("%s 的分节方式无法识别" % where)
+        for key in ("header", "footer"):
+            if key in section and section[key] is not None and not isinstance(section[key], str):
+                errors.append("%s 的页眉页脚必须是文字" % where)
 
 
 def _check_block(block, index, assets, errors):
@@ -576,12 +655,37 @@ def _public_style(props):
     return style
 
 
+def _read_body(body, ctx):
+    return _read_blocks(body, ctx, True)
+
+
 def _read_container(node, ctx):
+    blocks, _sections = _read_blocks(node, ctx, False)
+    return blocks
+
+
+def _read_blocks(node, ctx, track_sections):
     blocks = []
+    sections = []
+    current = _blank_section(0, "nextPage")
+    saw = False
     for child in list(node):
         kind = local(child.tag)
+        if kind == "sectPr" and track_sections:
+            _apply_sect(current, child, ctx)
+            sections.append(_public_section(current))
+            saw = True
+            continue
         if kind == "p":
             blocks.extend(_read_paragraph(child, ctx))
+            if track_sections:
+                ppr = child.find(q(W, "pPr"))
+                sect = ppr.find(q(W, "sectPr")) if ppr is not None else None
+                if sect is not None:
+                    _apply_sect(current, sect, ctx)
+                    sections.append(_public_section(current))
+                    saw = True
+                    current = _blank_section(len(blocks), "nextPage")
         elif kind == "tbl":
             table, images = _read_table(child, ctx)
             blocks.append(table)
@@ -593,7 +697,141 @@ def _read_container(node, ctx):
                 content = child.find(q(W, "sdtContent"))
                 if content is not None:
                     blocks.extend(_read_container(content, ctx))
-    return blocks
+    if track_sections and saw:
+        return blocks, sections
+    return blocks, []
+
+
+def _blank_section(at, brk):
+    return {
+        "at": at,
+        "header": "",
+        "footer": "",
+        "break": brk or "nextPage",
+        "footer_page": False,
+    }
+
+
+def _apply_sect(section, sect, ctx):
+    section["break"] = _sect_break(sect)
+    header_id = _part_ref(sect, "headerReference")
+    footer_id = _part_ref(sect, "footerReference")
+    header, _page = _part_story(ctx, header_id)
+    footer, page = _part_story(ctx, footer_id)
+    section["header"] = header
+    section["footer"] = footer
+    section["footer_page"] = page
+    page_box = _page_box(sect)
+    section.update(page_box)
+
+
+def _public_section(section):
+    public = {
+        "at": int(section.get("at") or 0),
+        "header": section.get("header") or "",
+        "footer": section.get("footer") or "",
+        "break": section.get("break") or "nextPage",
+        "footer_page": bool(section.get("footer_page")),
+    }
+    if section.get("pgSz"):
+        public["pgSz"] = section["pgSz"]
+    if section.get("pgMar"):
+        public["pgMar"] = section["pgMar"]
+    return public
+
+
+def _sect_break(sect):
+    kind = sect.find(q(W, "type"))
+    value = kind.get(q(W, "val")) if kind is not None and kind.get(q(W, "val")) else "nextPage"
+    if value not in ("nextPage", "continuous", "evenPage", "oddPage", "nextColumn"):
+        return "nextPage"
+    return value
+
+
+def _part_ref(sect, tag):
+    chosen = None
+    for node in sect.findall(q(W, tag)):
+        rel_id = node.get(q(R, "id"))
+        if node.get(q(W, "type")) in (None, "default"):
+            return rel_id
+        chosen = rel_id
+    return chosen
+
+
+def _part_story(ctx, rel_id):
+    if not rel_id:
+        return "", False
+    target = (ctx.get("rels") or {}).get(rel_id)
+    blob = (ctx.get("files") or {}).get(_word_part(target)) if target else None
+    if not blob:
+        return "", False
+    try:
+        root = ET.fromstring(blob)
+    except ET.ParseError:
+        return "", False
+    parts = []
+    page = False
+    in_result = False
+    instr = ""
+    for node in root.iter():
+        name = local(node.tag)
+        if name == "fldChar":
+            kind = node.get(q(W, "fldCharType"))
+            if kind == "begin":
+                in_result = False
+                instr = ""
+            elif kind == "separate":
+                in_result = "PAGE" in instr.upper()
+            elif kind == "end":
+                in_result = False
+                instr = ""
+        elif name == "instrText":
+            instr += node.text or ""
+            if "PAGE" in (node.text or "").upper():
+                page = True
+        elif name == "t" and not in_result:
+            parts.append(node.text or "")
+    return "".join(parts), page
+
+
+def _word_part(target):
+    target = (target or "").replace("\\", "/").strip()
+    while target.startswith("./"):
+        target = target[2:]
+    while target.startswith("../"):
+        target = target[3:]
+    target = target.lstrip("/")
+    if not target:
+        return ""
+    if target.startswith("word/"):
+        return target
+    return "word/" + target
+
+
+def _page_box(sect):
+    found = {}
+    pg = sect.find(q(W, "pgSz"))
+    if pg is not None:
+        box = {}
+        for key in ("w", "h"):
+            raw = pg.get(q(W, key))
+            if raw and raw.isdigit():
+                box[key] = int(raw)
+        orient = pg.get(q(W, "orient"))
+        if orient:
+            box["orient"] = orient
+        if box:
+            found["pgSz"] = box
+    mar = sect.find(q(W, "pgMar"))
+    if mar is not None:
+        edges = {}
+        for key in ("top", "right", "bottom", "left", "header", "footer", "gutter"):
+            raw = mar.get(q(W, key))
+            if raw and (raw.lstrip("-").isdigit()):
+                edges[key] = int(raw)
+        if edges:
+            found["pgMar"] = edges
+    return found
 
 
 def _read_paragraph(paragraph, ctx):
@@ -626,14 +864,20 @@ def _read_paragraph(paragraph, ctx):
         pieces.append(block)
         text_runs.clear()
 
-    for run_node in _iter_runs(paragraph):
-        for kind, payload in _run_events(run_node, ctx):
-            if kind == "text":
+    for kind, node in _walk_paragraph(paragraph):
+        if kind == "run":
+            events = _run_events(node, ctx)
+        elif kind == "alt":
+            events = (("image", image) for image in _alternate_images(node, ctx))
+        else:
+            events = (("image", image) for image in _images_in(node, ctx["rels"], ctx["files"]))
+        for event, payload in events:
+            if event == "text":
                 text_runs.append(_inherit_run(payload, inherited))
-            elif kind == "break":
+            elif event == "break":
                 flush_text()
                 pieces.append({"type": "pagebreak"})
-            elif kind == "image":
+            elif event == "image" and payload:
                 flush_text()
                 pieces.append(payload)
     flush_text()
@@ -649,10 +893,22 @@ def _read_paragraph(paragraph, ctx):
     return pieces
 
 
-def _iter_runs(paragraph):
+def _walk_paragraph(paragraph):
     for child in list(paragraph):
-        for run in _runs_under(child):
-            yield run
+        name = local(child.tag)
+        if name == "AlternateContent":
+            yield "alt", child
+        elif name in ("drawing", "pict", "object"):
+            yield "media", child
+        else:
+            for run in _runs_under(child):
+                yield "run", run
+
+
+def _iter_runs(paragraph):
+    for kind, node in _walk_paragraph(paragraph):
+        if kind == "run":
+            yield node
 
 
 def _runs_under(node):
@@ -691,9 +947,34 @@ def _inherited_props(style_name, ctx):
     return inherited
 
 
+def _is_cjk_font(name):
+    if not name:
+        return False
+    if any("\u4e00" <= char <= "\u9fff" for char in name):
+        return True
+    return str(name).casefold() in (
+        "fangsong_gb2312", "kaiti_gb2312", "simsun", "simhei", "fangsong", "kaiti",
+        "nsimsun", "stfangsong", "stkaiti", "stsong", "stheiti", "stzhongsong",
+    )
+
+
+def _explicit_cjk(run):
+    for key in ("ascii", "hAnsi"):
+        name = run.get(key)
+        if _is_cjk_font(name):
+            return name
+    return None
+
+
 def _inherit_run(run, inherited):
+    # WPS often stores 仿宋_GB2312 in ascii/hAnsi and leaves eastAsia empty.
+    # Keep that requested name; do not replace it with a document default.
+    if run.get("eastAsia") in (None, ""):
+        face = _explicit_cjk(run)
+        if face:
+            run["eastAsia"] = face
     if not inherited:
-        return run
+        return _order_run(run)
     for key in ("eastAsia", "ascii", "hAnsi", "size_pt"):
         if run.get(key) in (None, "") and inherited.get(key) not in (None, ""):
             run[key] = inherited[key]
@@ -704,23 +985,79 @@ def _inherit_run(run, inherited):
 
 def _run_events(run_node, ctx):
     pending = []
+
+    def flush_text():
+        if not pending:
+            return None
+        payload = _read_run(run_node, "".join(pending), ctx.get("theme"))
+        pending[:] = []
+        return payload
+
     for child in list(run_node):
         name = local(child.tag)
         if name == "t":
             pending.append(child.text or "")
         elif name == "br" and child.get(q(W, "type")) == "page":
-            if pending:
-                yield "text", _read_run(run_node, "".join(pending), ctx.get("theme"))
-                pending = []
+            text = flush_text()
+            if text is not None:
+                yield "text", text
             yield "break", None
-        elif name in ("drawing", "pict"):
-            if pending:
-                yield "text", _read_run(run_node, "".join(pending), ctx.get("theme"))
-                pending = []
+        elif name in ("drawing", "pict", "object"):
+            text = flush_text()
+            if text is not None:
+                yield "text", text
             for image in _images_in(child, ctx["rels"], ctx["files"]):
                 yield "image", image
-    if pending:
-        yield "text", _read_run(run_node, "".join(pending), ctx.get("theme"))
+        elif name == "AlternateContent":
+            text = flush_text()
+            if text is not None:
+                yield "text", text
+            for image in _alternate_images(child, ctx):
+                yield "image", image
+    text = flush_text()
+    if text is not None:
+        yield "text", text
+
+
+def _run_images(run_node, ctx):
+    images = []
+    for kind, payload in _run_events(run_node, ctx):
+        if kind == "image" and payload:
+            images.append(payload)
+    if images:
+        return images
+    return _images_in(run_node, ctx["rels"], ctx["files"])
+
+
+def _alternate_images(node, ctx):
+    choice = None
+    fallback = None
+    for child in list(node):
+        name = local(child.tag)
+        if name == "Choice" and choice is None:
+            choice = child
+        elif name == "Fallback" and fallback is None:
+            fallback = child
+    images = _images_in(choice, ctx["rels"], ctx["files"]) if choice is not None else []
+    if images:
+        return _unique_images(images)
+    if fallback is None:
+        return []
+    return _unique_images(_images_in(fallback, ctx["rels"], ctx["files"]))
+
+
+def _unique_images(images):
+    found = []
+    seen = set()
+    for image in images:
+        if not image:
+            continue
+        key = (image.get("asset"), image.get("w"), image.get("h"))
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(image)
+    return found
 
 
 def _run_props(rpr, theme=None):
@@ -917,10 +1254,16 @@ def _read_table(table, ctx):
                 if runs and _paragraph_text(paragraph):
                     runs.append({"text": "\n"})
                 inherited = _inherited_props("", ctx)
-                for run_node in _iter_runs(paragraph):
-                    for image in _images_in(run_node, ctx["rels"], ctx["files"]):
+                for kind, node in _walk_paragraph(paragraph):
+                    if kind == "alt":
+                        loose.extend(image for image in _alternate_images(node, ctx) if image)
+                        continue
+                    if kind == "media":
+                        loose.extend(image for image in _images_in(node, ctx["rels"], ctx["files"]) if image)
+                        continue
+                    for image in _run_images(node, ctx):
                         loose.append(image)
-                    run = _inherit_run(_read_run(run_node, theme=ctx.get("theme")), inherited)
+                    run = _inherit_run(_read_run(node, theme=ctx.get("theme")), inherited)
                     if run.get("text"):
                         runs.append(run)
             row.append({"span": max(span, 1), "vmerge": vmerge, "hmerge": hmerge, "runs": runs})
@@ -1291,7 +1634,7 @@ def _write_page_break(body):
     ET.SubElement(run, q(W, "br")).set(q(W, "type"), "page")
 
 
-def _write_toc(body):
+def _write_toc(body, blocks=None, sections=None):
     paragraph = ET.SubElement(body, q(W, "p"))
     begin = ET.SubElement(paragraph, q(W, "r"))
     ET.SubElement(begin, q(W, "fldChar")).set(q(W, "fldCharType"), "begin")
@@ -1303,8 +1646,146 @@ def _write_toc(body):
     ET.SubElement(separate, q(W, "fldChar")).set(q(W, "fldCharType"), "separate")
     shown = ET.SubElement(paragraph, q(W, "r"))
     ET.SubElement(shown, q(W, "t")).text = "目录"
+    for label, page in _toc_entries(blocks, sections):
+        label_run = ET.SubElement(paragraph, q(W, "r"))
+        label_text = ET.SubElement(label_run, q(W, "t"))
+        label_text.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        label_text.text = label
+        if page is not None:
+            page_run = ET.SubElement(paragraph, q(W, "r"))
+            page_text = ET.SubElement(page_run, q(W, "t"))
+            page_text.text = str(page)
     end = ET.SubElement(paragraph, q(W, "r"))
     ET.SubElement(end, q(W, "fldChar")).set(q(W, "fldCharType"), "end")
+
+
+def _toc_entries(blocks, sections):
+    if not blocks:
+        return []
+    pages = {}
+    try:
+        import compose
+        pages = dict((id(block), number) for block, number in compose.heading_pages(blocks, sections or None))
+    except (ImportError, ValueError, TypeError):
+        pages = {}
+    entries = []
+    for block in blocks:
+        if block.get("type") != "heading":
+            continue
+        label = "".join(run.get("text", "") for run in block.get("runs") or []).strip()
+        if not label:
+            continue
+        entries.append((label + "\t", pages.get(id(block))))
+    return entries
+
+
+def _sections_active(sections):
+    if not sections:
+        return False
+    if len(sections) > 1:
+        return True
+    section = sections[0]
+    if section.get("header") or section.get("footer") or section.get("footer_page"):
+        return True
+    if section.get("pgSz") or section.get("pgMar"):
+        return True
+    return False
+
+
+def _section_at(index, sections):
+    chosen = sections[0]
+    for section in sections:
+        if int(section.get("at") or 0) <= index:
+            chosen = section
+        else:
+            break
+    return chosen
+
+
+def _footer_has_page(section, sections):
+    if section.get("footer_page") is True:
+        return True
+    if section.get("footer_page") is False:
+        return False
+    if len(sections) > 1 or section.get("header") or section.get("footer"):
+        return True
+    return False
+
+
+def _attach_sect(paragraph, section, sections, header_ids, footer_ids, next_break):
+    ppr = paragraph.find(q(W, "pPr"))
+    if ppr is None:
+        ppr = ET.Element(q(W, "pPr"))
+        paragraph.insert(0, ppr)
+    ppr.append(_sect_element(section, sections, header_ids, footer_ids, False, next_break))
+
+
+def _sect_element(section, sections, header_ids, footer_ids, final, next_break):
+    index = 0
+    for cursor, item in enumerate(sections):
+        if item is section:
+            index = cursor
+            break
+    sect = ET.Element(q(W, "sectPr"))
+    if header_ids:
+        header = ET.SubElement(sect, q(W, "headerReference"))
+        header.set(q(W, "type"), "default")
+        header.set(q(R, "id"), header_ids[index])
+        footer = ET.SubElement(sect, q(W, "footerReference"))
+        footer.set(q(W, "type"), "default")
+        footer.set(q(R, "id"), footer_ids[index])
+    if not final:
+        kind = ET.SubElement(sect, q(W, "type"))
+        kind.set(q(W, "val"), section.get("break") or next_break or "nextPage")
+    _write_page_box(sect, section)
+    return sect
+
+
+def _write_page_box(sect, section):
+    pg = section.get("pgSz") if isinstance(section.get("pgSz"), dict) else {}
+    size = ET.SubElement(sect, q(W, "pgSz"))
+    size.set(q(W, "w"), str(int(pg.get("w") or 11906)))
+    size.set(q(W, "h"), str(int(pg.get("h") or 16838)))
+    if pg.get("orient"):
+        size.set(q(W, "orient"), str(pg.get("orient")))
+    edges = section.get("pgMar") if isinstance(section.get("pgMar"), dict) else {}
+    mar = ET.SubElement(sect, q(W, "pgMar"))
+    for key, default in (
+        ("top", 1440), ("right", 1440), ("bottom", 1440), ("left", 1440),
+        ("header", 720), ("footer", 720), ("gutter", 0),
+    ):
+        mar.set(q(W, key), str(int(edges.get(key) if edges.get(key) is not None else default)))
+
+
+def _header_xml(text):
+    root = ET.Element(q(W, "hdr"))
+    paragraph = ET.SubElement(root, q(W, "p"))
+    if text:
+        node = ET.SubElement(ET.SubElement(paragraph, q(W, "r")), q(W, "t"))
+        node.text = text
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _footer_xml(text, with_page):
+    root = ET.Element(q(W, "ftr"))
+    paragraph = ET.SubElement(root, q(W, "p"))
+    if text:
+        node = ET.SubElement(ET.SubElement(paragraph, q(W, "r")), q(W, "t"))
+        node.text = text
+    if with_page:
+        begin = ET.SubElement(paragraph, q(W, "r"))
+        ET.SubElement(begin, q(W, "fldChar")).set(q(W, "fldCharType"), "begin")
+        instr = ET.SubElement(paragraph, q(W, "r"))
+        token = ET.SubElement(instr, q(W, "instrText"))
+        token.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        token.text = " PAGE "
+        separate = ET.SubElement(paragraph, q(W, "r"))
+        ET.SubElement(separate, q(W, "fldChar")).set(q(W, "fldCharType"), "separate")
+        shown = ET.SubElement(paragraph, q(W, "r"))
+        ET.SubElement(shown, q(W, "t")).text = "1"
+        end = ET.SubElement(paragraph, q(W, "r"))
+        ET.SubElement(end, q(W, "fldChar")).set(q(W, "fldCharType"), "end")
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def _document_root(body):
@@ -1317,7 +1798,7 @@ def _xml(tree):
     return ET.tostring(tree.getroot(), encoding="utf-8", xml_declaration=True)
 
 
-def _content_types(assets):
+def _content_types(assets, section_count=0):
     root = ET.Element(q(CT, "Types"))
     defaults = {
         "rels": "application/vnd.openxmlformats-package.relationships+xml",
@@ -1345,6 +1826,14 @@ def _content_types(assets):
         node = ET.SubElement(root, q(CT, "Override"))
         node.set("PartName", part)
         node.set("ContentType", content)
+    for index in range(section_count or 0):
+        for name, content in (
+            ("/word/header%d.xml" % (index + 1), "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"),
+            ("/word/footer%d.xml" % (index + 1), "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"),
+        ):
+            node = ET.SubElement(root, q(CT, "Override"))
+            node.set("PartName", name)
+            node.set("ContentType", content)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
@@ -1355,9 +1844,13 @@ def _package_rels():
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def _document_rels(images):
+def _document_rels(images, header_ids=None, footer_ids=None):
     root = ET.Element(q(REL, "Relationships"))
     _rel(root, "rId1", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles", "styles.xml")
+    for index, rel_id in enumerate(header_ids or []):
+        _rel(root, rel_id, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header", "header%d.xml" % (index + 1))
+    for index, rel_id in enumerate(footer_ids or []):
+        _rel(root, rel_id, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer", "footer%d.xml" % (index + 1))
     for rel_id, asset in images:
         _rel(root, rel_id, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "media/" + asset)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
