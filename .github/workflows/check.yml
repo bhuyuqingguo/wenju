@@ -4,7 +4,8 @@ on:
   push:
 jobs:
   light:
-    runs-on: ubuntu-latest
+    # ubuntu-latest is 26.04, and setup-python no longer publishes 3.8 for it.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
