@@ -20,13 +20,13 @@ description: "Re-check the clipboard import invariants after a change to core/cl
 
 ## 范围
 
-穷举的是长度不超过 2 的文档。每一块只取六种之一：段落、PNG、EMF、空表格、单元格里一张 PNG、单元格里一张 EMF。每种文档都用同一套字节走 HTML `file://` 和 RTF `\bin`。另外单独核对：只走 HTML、只走 RTF、EMF/WMF 替换 PNG 预览、`\bin` 载荷里含 `{}\\`、左右两个单元格各一张图、文档已有图时不再追加那张单独的 MIME 图、以及一份 200 页（400 张 PNG/JPEG/EMF、200 个表格）的样本。
+穷举的是长度不超过 2 的文档。每一块只取六种之一：段落、PNG、EMF、空表格、单元格里一张 PNG、单元格里一张 EMF。每种文档都用同一套字节走 HTML `file://` 和 RTF `\bin`。另外单独核对：只走 HTML、只走 RTF、EMF/WMF 替换 PNG 预览、`\bin` 载荷里含 `{}\\`、左右两个单元格各一张图、文档已有图时不再追加那张单独的 MIME 图、以及一份 200 页（400 张 PNG/JPEG/EMF、每张 1 MiB、200 个表格）的样本。空的 HTML 图不会吃掉下一张 RTF 图；对不上的 RTF 图留在原来的单元格。
 
 读入期间会在临时目录写一份 docx，返回前删掉。`DATA/预览` 里的预览缓存不在第 4 条里。单元格里「图在两个字中间」的先后，这个模型只保证图还在该格。图表、页眉页脚、合并文档、真实 Word 剪贴板样本都不在这次检查里。
 
 ## 代码
 
-- `core/clipboard_import.py`：`document_from_parts`、`_apply_rtf_pictures`、`_through_docx`、`parts_from_mime`、`_file_image`，以及 RTF 的 `bin` 记号。
+- `core/clipboard_import.py`：`document_from_parts`、`_apply_rtf_pictures`、`_through_docx`、`parts_from_mime`、`_file_image`、`_pict`。`_pict` 只收当前这一层的 hex 或 `\bin`，跳过 `\*` 子组。hex 整段用 `bytes.fromhex` 解码。
 - `core/wenju_format.py`：表格单元格 `images` 的写出、读回和校验。
 - `app.py`：`importClipboard`、`_clip_ready`、`_clip_failed`、`setConvertTarget`、`setClipboardBrush` 不写文件；`_begin_batch` 只在 `action=='convert'` 时调用 `_clipboard_item`，由它调用 `save`。
 
@@ -38,7 +38,7 @@ description: "Re-check the clipboard import invariants after a change to core/cl
 python -m unittest test_clipboard_invariants -v
 ```
 
-Python 3.8 即可，不需要额外的检查器。CI 的 `unit` 作业会跑同一个命令。大约一秒。末尾的 `SCALE` 行是 200 页样本的耗时和内存。
+Python 3.8 即可，不需要额外的检查器。CI 的 `unit` 作业会跑同一个命令。短文档部分不到一秒。末尾的 `SCALE` 行是 200 页、每张 1 MiB 的样本，大约十秒。
 
 ## 失败时怎么读
 
@@ -54,6 +54,6 @@ Python 3.8 即可，不需要额外的检查器。CI 的 `unit` 作业会跑同�
 
 ## 同步
 
-覆盖的就是上面三个文件里的那些函数。上次确认检查与代码一致的提交：`4f12bc32da5a6347f7df141eecfa919ac7e1e9aa`。
+覆盖的就是上面三个文件里的那些函数。上次确认检查与代码一致的提交：`89bffb56da8df8bd4383fb57f766d0b312486b2b`。
 
 只有在这个提交之后重新跑过检查，并且确认检查描述的仍是新提交里的代码时，才把 `SYNC_COMMIT` 改成新的提交号。覆盖的代码变了而这一行没变，就说明检查可能还在描述旧代码。
