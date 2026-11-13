@@ -2,12 +2,12 @@ import sys, json, shutil, uuid, os, copy, re
 from pathlib import Path
 from platform_support import data_directory, configure_rendering
 configure_rendering()
-from PySide6.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt
-from PySide6.QtGui import QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase
-from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtQuick import QQuickWindow
-from PySide6.QtQuickControls2 import QQuickStyle
-from PySide6.QtWidgets import QApplication, QFileDialog
+from qt_compat import (
+    QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt,
+    QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont,
+    QQmlApplicationEngine, QQuickWindow, QQuickStyle, QApplication, QFileDialog,
+    QTest, QPoint, QPointF, exec_app, delete_qobject, set_color_scheme, quick_style,
+)
 from templates import CATALOG
 from preset_store import PresetStore, normalize, checked, sections, fields, SIZES, BASE
 from appearance import Appearance
@@ -311,9 +311,9 @@ class Bridge(QObject):
     @Slot()
     def help(self):self.reportReady.emit((ROOT/'使用说明.txt').read_text('utf-8-sig'))
 
-QQuickStyle.setStyle('Basic')
+QQuickStyle.setStyle(quick_style())
 app = QApplication(sys.argv)
-app.styleHints().setColorScheme(Qt.ColorScheme.Light)
+set_color_scheme(app, False)
 palette=QPalette()
 for role,color in [(QPalette.Window,'#f4f6f9'),(QPalette.WindowText,'#22344a'),(QPalette.Base,'#f9fafc'),(QPalette.Text,'#22344a'),(QPalette.Button,'#ffffff'),(QPalette.ButtonText,'#22344a'),(QPalette.Highlight,'#245a83'),(QPalette.HighlightedText,'#ffffff')]:
     palette.setColor(role,QColor(color))
@@ -321,7 +321,7 @@ app.setPalette(palette)
 app.setApplicationName('文矩')
 app.setOrganizationName('WenJu')
 app.setWindowIcon(QIcon(str(ROOT/'core/素材/文矩_图标_512.png')))
-app.setFont(__import__('PySide6.QtGui',fromlist=['QFont']).QFont('Microsoft YaHei UI',10))
+app.setFont(QFont('Microsoft YaHei UI',10))
 appearance=Appearance(DATA,app)
 bridge = Bridge()
 engine = QQmlApplicationEngine()
@@ -334,8 +334,7 @@ window = engine.rootObjects()[0]
 incoming=[arg for arg in sys.argv[1:] if not arg.startswith('--') and Path(arg).is_file()]
 if incoming:bridge.add(incoming)
 if '--test-opening' in sys.argv:
-    from PySide6.QtTest import QTest
-    from PySide6.QtCore import QPoint
+    from qt_compat import QTest, QPoint
     before=copy.deepcopy(bridge.store.rules)
     def opening_capture():
         assert window.property('page')==2
@@ -359,7 +358,7 @@ if '--test-opening' in sys.argv:
     QTimer.singleShot(2100,opening_finished)
     QTimer.singleShot(8000,lambda:app.exit(2))
 if '--test-library-ui' in sys.argv:
-    from PySide6.QtTest import QTest
+    from qt_compat import QTest
     import traceback
     def library_ui_test():
         try:
@@ -423,9 +422,7 @@ if '--capture' in sys.argv:
 app.aboutToQuit.connect(lambda: bridge.proc.waitForFinished(30000) if bridge.running and bridge.proc else None)
 if '--smoke' in sys.argv:
     # Integration test runs with an isolated WENJU_DATA_DIR, never user presets.
-    from PySide6.QtTest import QTest
-    from PySide6.QtCore import QPoint, QPointF
-    from PySide6.QtWidgets import QFileDialog
+    from qt_compat import QTest, QPoint, QPointF, QFileDialog
     import traceback
     def guarded(fn):
         def run():
@@ -521,7 +518,6 @@ if '--smoke' in sys.argv:
         app.quit()
     later(begin_test,700)
     QTimer.singleShot(60000,lambda:app.exit(2))
-exit_code=app.exec()
-import shiboken6
-shiboken6.delete(engine)
+exit_code=exec_app(app)
+delete_qobject(engine)
 sys.exit(exit_code)

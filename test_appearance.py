@@ -1,6 +1,6 @@
 import copy,json,tempfile
 from pathlib import Path
-from PySide6.QtWidgets import QApplication
+from qt_compat import QApplication
 from appearance import Appearance,THEMES
 from preset_store import PresetStore
 
