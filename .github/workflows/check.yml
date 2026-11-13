@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.8"
       - name: compile
-        run: python -m compileall -q core/wenju_format.py core/fontfallback.py core/clipboard_import.py core/convert.py app.py worker.py test_wenju_format.py test_clipboard.py test_convert.py test_fontfallback.py qt_compat.py
+        run: python -m compileall -q core/wenju_format.py core/fontfallback.py core/clipboard_import.py core/compose.py core/convert.py app.py worker.py test_wenju_format.py test_clipboard.py test_compose.py test_convert.py test_fontfallback.py qt_compat.py
       - name: wenju format
         run: python test_wenju_format.py
       - name: clipboard
@@ -23,3 +23,5 @@ jobs:
         run: python test_fontfallback.py
       - name: conversion
         run: python test_convert.py
+      - name: compose
+        run: python test_compose.py

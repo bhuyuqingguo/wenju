@@ -84,6 +84,13 @@ def quick_style():
     return 'Fusion' if QT == '5' else 'Basic'
 
 
+def process_failed(error):
+    if error == getattr(QProcess, "FailedToStart", None):
+        return True
+    kind = getattr(QProcess, "ProcessError", None)
+    return kind is not None and error == getattr(kind, "FailedToStart", None)
+
+
 def failed_to_start(qprocess):
     nested = getattr(qprocess, "ProcessError", None)
     if nested is not None and hasattr(nested, "FailedToStart"):

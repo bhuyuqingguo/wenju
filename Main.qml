@@ -61,10 +61,13 @@ ApplicationWindow {
         function onReportReady(text){reportText.text=text;reportDialog.open();}
         function onRulesChanged(){win.syncPage();}
         function onErrorRaised(text){clipProgress.close();errorText.text=text;errorDialog.open();}
+        function onBatchFinished(text){doneText.text=text;doneDialog.open();}
         function onConvertFinished(text){convertResult.text=text;convertDialog.open();}
         function onClipboardStarted(){clipProgress.open();}
         function onClipboardFinished(text){clipProgress.close();clipDoneText.text=text;clipDone.open();}
     }
+    Dialog{id:doneDialog;anchors.centerIn:parent;width:560;title:"处理完成";modal:true;standardButtons:Dialog.Ok
+        Text{id:doneText;width:520;wrapMode:Text.Wrap;color:win.ink}}
     Dialog{id:errorDialog;anchors.centerIn:parent;width:560;title:"请检查设置";modal:true;standardButtons:Dialog.Ok
         Text{id:errorText;width:520;wrapMode:Text.Wrap;color:win.ink}}
     Dialog{id:convertDialog;anchors.centerIn:parent;width:640;height:460;title:"转换结果";modal:true;standardButtons:Dialog.Ok
@@ -247,28 +250,50 @@ ApplicationWindow {
                                 Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"准备好你的第一份文档";color:appearance.palette["#8795a5"]}
                                 Txt {text:"也可以点击右上角「体验样例」，看看整理效果。";color:appearance.palette["#a0aab7"];font.pixelSize:Math.round(12*appearance.scale)}
                             }
-                            ListView {anchors.fill:parent;clip:true;spacing:8;model:bridge.files
-                                delegate:Rectangle {required property var modelData;required property int index;width:ListView.view.width;height:72;radius:8;color:appearance.palette["#f7f9fc"]
-                                    RowLayout {anchors.fill:parent;anchors.margins:12;spacing:12
-                                        Rectangle{width:32;height:36;radius:5;color:appearance.palette["#e3edf6"];Txt{anchors.centerIn:parent;text:modelData.name.toLowerCase().endsWith(".wenju")?"文":"W";color:blue;font.weight:Font.Bold}}
-                                        ColumnLayout{Layout.fillWidth:true;spacing:4;Txt{text:modelData.name;Layout.fillWidth:true;elide:Text.ElideMiddle;font.pixelSize:Math.round(13*appearance.scale)}Txt{text:modelData.state;color:modelData.output?appearance.palette["#35806c"]:muted;font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}}
+                            ListView {id:fileList;anchors.fill:parent;clip:true;spacing:8;model:bridge.files
+                                delegate:Item {id:fileRow;required property var modelData;required property int index;width:fileList.width;height:108;z:dragArea.pressed?2:0
+                                    Rectangle {id:card;width:fileRow.width;height:fileRow.height;radius:8;color:appearance.palette["#f7f9fc"]
+                                        RowLayout {anchors.fill:parent;anchors.margins:12;anchors.rightMargin:290;spacing:12
+                                            Rectangle{width:28;height:48;radius:6;color:appearance.palette["#e3edf6"]
+                                                Txt{anchors.centerIn:parent;text:"↕";color:blue;font.pixelSize:Math.round(16*appearance.scale)}
+                                            }
+                                            ColumnLayout{Layout.fillWidth:true;spacing:4
+                                                Txt{text:modelData.name;Layout.fillWidth:true;elide:Text.ElideMiddle;font.pixelSize:Math.round(13*appearance.scale)}
+                                                Txt{text:modelData.state;color:modelData.output?appearance.palette["#35806c"]:muted;font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
+                                                ProgressPanel{Layout.fillWidth:true;percent:modelData.percent?modelData.percent:0}
+                                            }
+                                        }
+                                        MouseArea{anchors.fill:parent;anchors.leftMargin:52;anchors.rightMargin:290;onClicked:bridge.openFile(index)}
+                                        Row {anchors.right:parent.right;anchors.rightMargin:8;anchors.verticalCenter:parent.verticalCenter;spacing:6
+                                            Action {text:"存为文矩";implicitWidth:96;implicitHeight:32;enabled:!bridge.busy;onClicked:bridge.saveWenju(index)}
+                                            Action {text:"导出DOCX";implicitWidth:108;implicitHeight:32;enabled:!bridge.busy;onClicked:bridge.exportDocx(index)}
+                                            Action {text:"报告";implicitWidth:64;implicitHeight:32;visible:!!modelData.output||!!modelData.error;onClicked:bridge.showReport(index)}
+                                        }
                                     }
-                                    MouseArea{anchors.fill:parent;anchors.rightMargin:300;onClicked:bridge.openFile(index)}
-                                    Row {anchors.right:parent.right;anchors.rightMargin:8;anchors.verticalCenter:parent.verticalCenter;spacing:6
-                                        Action {text:"存为文矩";implicitWidth:96;implicitHeight:32;enabled:!bridge.busy;onClicked:bridge.saveWenju(index)}
-                                        Action {text:"导出DOCX";implicitWidth:108;implicitHeight:32;enabled:!bridge.busy;onClicked:bridge.exportDocx(index)}
-                                        Action {text:"报告";implicitWidth:64;implicitHeight:32;visible:!!modelData.output||!!modelData.error;onClicked:bridge.showReport(index)}
+                                    MouseArea{id:dragArea;x:12;y:30;width:28;height:48;enabled:!bridge.busy;cursorShape:Qt.SizeVerCursor;preventStealing:true
+                                        property int origin:0
+                                        property real anchorY:0
+                                        onPressed:function(mouse){origin=index;anchorY=mapToItem(fileRow,mouse.x,mouse.y).y}
+                                        onPositionChanged:function(mouse){if(pressed)card.y=mapToItem(fileRow,mouse.x,mouse.y).y-anchorY}
+                                        onReleased:{
+                                            var shift=Math.round(card.y/(fileRow.height+fileList.spacing))
+                                            var dest=Math.max(0,Math.min(fileList.count-1,origin+shift))
+                                            card.y=0
+                                            if(dest!==origin)bridge.reorder(origin,dest)
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
+                ProgressPanel{Layout.fillWidth:true;visible:bridge.overall>0;label:"总进度";percent:bridge.overall}
                 RowLayout {Layout.fillWidth:true
                     Action {text:"打开输出文件夹";onClicked:bridge.openOutput()}
                     Action {text:"按路径添加";implicitWidth:110;onClicked:pathDialog.open()}
                     Item{Layout.fillWidth:true}
                     Action {visible:bridge.busy;text:"停止后续任务";onClicked:bridge.cancel()}
+                    Action {text:"合稿导出";implicitWidth:110;enabled:!bridge.busy;onClicked:bridge.mergeExport()}
                     Action {text:bridge.busy?"正在整理…":"开始整理  →";primary:true;implicitWidth:166;enabled:!bridge.busy;onClicked:{win.contentItem.forceActiveFocus();bridge.start(win.settings());}}
                 }
             }
@@ -375,7 +400,7 @@ ApplicationWindow {
                             }
                             Rectangle {anchors{left:parent.left;right:parent.right;bottom:parent.bottom;leftMargin:24;rightMargin:24;bottomMargin:65}height:1;color:appearance.palette["#edf0f4"]}
                             Text {anchors{left:parent.left;right:parent.right;bottom:parent.bottom;leftMargin:24;rightMargin:24;bottomMargin:30}
-                                text:win.pageEnabled?win.prefix+"1"+win.suffix:"不显示页码";color:"#22344a";font.family:win.pageFont;font.pointSize:win.pageSize;font.letterSpacing:win.spacing*96/72
+                                text:win.pageEnabled?win.prefix+"1"+win.suffix:"不显示页码";color:"#22344a";font.family:bridge.paintFont(win.pageFont);font.pointSize:win.pageSize;font.letterSpacing:win.spacing*96/72
                                 horizontalAlignment:(win.alignment==="底部左侧"||win.alignment==="底部两端对齐")?Text.AlignLeft:win.alignment==="底部右侧"?Text.AlignRight:Text.AlignHCenter
                             }
                         }

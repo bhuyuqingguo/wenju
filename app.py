@@ -14,9 +14,9 @@ from preset_store import PresetStore, normalize, checked, sections, fields, SIZE
 from appearance import Appearance
 
 ROOT = Path(__file__).resolve().parent
+DATA = data_directory(ROOT)
 sys.path.insert(0, str(ROOT / 'core'))
 import fontfallback
-DATA = data_directory(ROOT)
 
 def wenju_modules():
     core = str(ROOT / 'core')
@@ -37,6 +37,7 @@ def source_document(path):
     converted = docx_fmt.convert_to_docx(path)
     if not converted: raise ValueError('无法读取 %s，请先另存为 .docx' % Path(path).name)
     return converted
+
 def qt_log(kind, context, message):
     with (DATA/'界面日志.txt').open('a',encoding='utf-8') as log: log.write(message+'\n')
 qInstallMessageHandler(qt_log)
@@ -44,6 +45,7 @@ qInstallMessageHandler(qt_log)
 class Bridge(QObject):
     changed = Signal()
     reportReady = Signal(str)
+    batchFinished = Signal(str)
     rulesChanged = Signal()
     libraryChanged = Signal()
     errorRaised = Signal(str)
@@ -65,6 +67,11 @@ class Bridge(QObject):
         self.font_notice=fontfallback.guidance(self.store.rules)
         self.section='页面'
         self.task_kind='process'
+        self.overall_value=0
+        self.progress_file=None
+        self.progress_timer=QTimer(self)
+        self.progress_timer.setInterval(120)
+        self.progress_timer.timeout.connect(self.poll_progress)
         self.convert_rows=[]
         self.convert_overall=0
         self.convert_mode='preserve'
@@ -103,6 +110,8 @@ class Bridge(QObject):
     def status(self): return self.message
     @Property(bool, notify=changed)
     def busy(self): return self.running
+    @Property(int, notify=changed)
+    def overall(self): return self.overall_value
     @Property(int, notify=importProgressChanged)
     def importProgress(self): return self.import_progress
     @Property('QVariantMap', constant=True)
@@ -158,6 +167,10 @@ class Bridge(QObject):
         return rows
     @Property('QStringList',constant=True)
     def fontNames(self):return list(dict.fromkeys(['宋体','仿宋','黑体','楷体','Times New Roman','Arial']+QFontDatabase.families()))
+    @Slot(str, result=str)
+    def paintFont(self, name):
+        chosen, found = fontfallback.choose(name or "")
+        return chosen if found else (name or "")
     @Property(str,notify=rulesChanged)
     def sectionName(self):return self.section.replace('.',' / ')
     @Property(str,notify=rulesChanged)
@@ -259,7 +272,7 @@ class Bridge(QObject):
         for p in paths:
             p = str(Path(p).resolve())
             if p not in known and Path(p).suffix.lower() in ('.docx','.doc','.wps','.rtf','.wenju') and Path(p).is_file():
-                self.rows.append(dict(path=p, name=Path(p).name, state='等待整理', output='',report=''))
+                self.rows.append(dict(path=p, name=Path(p).name, state='等待整理', output='', report='', percent=0))
                 known.add(p)
         self.changed.emit()
 
@@ -377,7 +390,42 @@ class Bridge(QObject):
 
     @Slot()
     def clear(self):
-        if not self.running: self.rows = []; self.changed.emit()
+        if not self.running: self.rows = []; self.overall_value = 0; self.changed.emit()
+
+    @Slot(int, int)
+    def reorder(self, src, dst):
+        if self.running or src == dst: return
+        if not (0 <= src < len(self.rows) and 0 <= dst < len(self.rows)): return
+        self.rows.insert(dst, self.rows.pop(src))
+        self.changed.emit()
+
+    @Slot()
+    def mergeExport(self):
+        if self.running: return
+        picked = [(i, row) for i, row in enumerate(self.rows) if str(row['path']).lower().endswith('.wenju')]
+        if not picked:
+            self.message = '请先添加 .wenju 文档'; self.changed.emit(); return
+        self.task_kind = 'merge'
+        self.running = True
+        self.overall_value = 0
+        jobdir = DATA/'输出'/uuid.uuid4().hex[:10]
+        jobdir.mkdir(parents=True)
+        sources, indexes = [], []
+        for i, row in picked:
+            dest = jobdir/('%02d_%s' % (len(sources), Path(row['path']).name))
+            try: shutil.copy2(row['path'], dest)
+            except OSError as exc:
+                row['state'] = '失败：无法读取源文件'; row['error'] = str(exc); continue
+            sources.append(str(dest)); indexes.append(i)
+            row['percent'] = 0; row['output'] = ''; row['state'] = '等待合稿'
+        if not sources:
+            self.running = False; self.error('没有可读的 .wenju 文档'); return
+        font = self.store.rules.get('字体', {}).get('正文', '仿宋')
+        self.merge_indexes = indexes
+        self.message = '正在合稿 %d 份文档' % len(sources)
+        self.launch(jobdir, {'action':'merge', 'sources':sources, 'indexes':indexes,
+            'wenju':str(jobdir/'合稿.wenju'), 'docx':str(jobdir/'合稿.docx'),
+            'template':{'font':font, 'number':'多级数字'}})
 
     def addConvert(self, paths):
         if self.running: return
@@ -488,26 +536,49 @@ class Bridge(QObject):
         })
 
     def poll_progress(self):
-        path=self._progress_path
-        if path is None or not path.is_file() or self.task_kind not in ('convert','export'): return
-        if not (0<=self.convert_pos<len(self.convert_rows)): return
-        try: snap=json.loads(path.read_text('utf-8'))
+        if self.task_kind in ('convert','export'):
+            path=self._progress_path
+            if path is None or not path.is_file(): return
+            if not (0<=self.convert_pos<len(self.convert_rows)): return
+            try: snap=json.loads(path.read_text('utf-8'))
+            except (OSError, ValueError): return
+            files=snap.get('files') or []
+            if not files: return
+            file=files[0]
+            row=self.convert_rows[self.convert_pos]
+            percent=int(file.get('percent') or 0)
+            if percent >= int(row.get('percent') or 0):
+                row['percent']=percent
+            if file.get('message'): row['message']=file['message']
+            if file.get('state') and file.get('state') != '等待':
+                row['state']=file['state']
+            self.convert_overall=int((self.convert_pos*100+row['percent'])/max(1,self.convert_total))
+            self.changed.emit()
+            return
+        path=self.progress_file
+        if not path or not Path(path).exists(): return
+        try: data=json.loads(Path(path).read_text('utf-8'))
         except (OSError, ValueError): return
-        files=snap.get('files') or []
-        if not files: return
-        file=files[0]
-        row=self.convert_rows[self.convert_pos]
-        percent=int(file.get('percent') or 0)
-        if percent >= int(row.get('percent') or 0):
-            row['percent']=percent
-        if file.get('message'): row['message']=file['message']
-        if file.get('state') and file.get('state') != '等待':
-            row['state']=file['state']
-        self.convert_overall=int((self.convert_pos*100+row['percent'])/max(1,self.convert_total))
+        if self.task_kind=='merge':
+            for key, value in (data.get('rows') or {}).items():
+                index=int(key)
+                if 0<=index<len(self.rows):
+                    self.rows[index]['percent']=int(value)
+                    if int(value)<100: self.rows[index]['state']='正在处理 %d%%' % int(value)
+            self.overall_value=int(data.get('overall') or 0)
+        elif self.task_kind=='process' and self.rows:
+            pct=int(data.get('percent') or 0)
+            row=self.rows[self.current]
+            row['percent']=pct
+            row['state']='正在整理 %d%%' % pct
+            self.overall_value=int(sum(int(item.get('percent') or 0) for item in self.rows)/len(self.rows))
+        else:
+            return
         self.changed.emit()
 
     def _apply_convert_result(self):
         if getattr(self, '_convert_closed', False): return
+        self.progress_timer.stop()
         if self._poll: self._poll.stop()
         row=self.convert_rows[self.convert_pos] if 0<=self.convert_pos<len(self.convert_rows) else None
         try:
@@ -543,6 +614,7 @@ class Bridge(QObject):
     def _convert_finish(self):
         if getattr(self, '_convert_closed', False): return
         self._convert_closed=True
+        self.progress_timer.stop()
         if self._poll: self._poll.stop()
         self.convert_queue=[]
         while self.convert_pos < len(self.convert_rows):
@@ -578,6 +650,7 @@ class Bridge(QObject):
         self.save(settings)
         self.batch_rules = copy.deepcopy(self.store.rules)
         self.task_kind='process'
+        self._did_work=False
         self.queue = list(range(len(self.rows)))
         self.running = True
         self.next_file()
@@ -593,12 +666,23 @@ class Bridge(QObject):
     def next_file(self):
         if not self.queue:
             self.running = False
+            self.progress_timer.stop()
+            self.overall_value = 100
+            done = sum(1 for row in self.rows if row.get('output'))
+            failed = sum(1 for row in self.rows if row.get('error'))
             self.message = '任务结束 · 可点击已完成的文档打开结果'
+            if self._did_work or failed:
+                self.batchFinished.emit('处理完成。成功 %d 份，失败 %d 份。' % (done, failed))
             self.changed.emit(); return
         self.current = self.queue.pop(0)
         row = self.rows[self.current]
         row['output']='';row['report']='';row.pop('error',None)
+        row['percent'] = 0
+        if str(row['path']).lower().endswith('.wenju'):
+            row['state'] = '请使用合稿导出'
+            self.changed.emit(); QTimer.singleShot(0, self.next_file); return
         row['state'] = '正在整理…'
+        self._did_work = True
         self.message = '正在整理 ' + row['name']
         jobdir = DATA/'输出'/uuid.uuid4().hex[:10]
         jobdir.mkdir(parents=True)
@@ -610,9 +694,13 @@ class Bridge(QObject):
         self.changed.emit()
 
     def launch(self,jobdir,payload):
+        payload=dict(payload)
+        payload['progress']=str(jobdir/'progress.json')
+        self.progress_file=jobdir/'progress.json'
         job=jobdir/'task.json'
         job.write_text(json.dumps(payload,ensure_ascii=False),'utf-8')
         self.result_file = jobdir/'result.json'
+        self.progress_timer.start()
         self.proc = QProcess(self)
         self.proc.setProgram(sys.executable)
         self.proc.setArguments([str(ROOT/'worker.py'),str(job)])
@@ -630,22 +718,44 @@ class Bridge(QObject):
         self.changed.emit()
 
     def process_error(self, error):
-        if error == failed_to_start(QProcess):
-            if self.task_kind in ('convert','export') and not getattr(self, '_convert_closed', False):
-                if 0<=self.convert_pos<len(self.convert_rows):
-                    row=self.convert_rows[self.convert_pos]
-                    row['state']='失败'; row['percent']=100; row['message']='后台进程启动失败，请检查运行库'
-                    self._convert_failed.append({'name':row['name'],'message':row['message']})
-                    self.convert_pos += 1
-                self.convert_stopped=True
-                self._convert_finish()
-                return
-            self.running=False;self.error('后台进程启动失败，请检查运行库')
+        if error != failed_to_start(QProcess):
+            return
+        self.progress_timer.stop()
+        if self._poll: self._poll.stop()
+        if self.task_kind in ('convert','export') and not getattr(self, '_convert_closed', False):
+            if 0<=self.convert_pos<len(self.convert_rows):
+                row=self.convert_rows[self.convert_pos]
+                row['state']='失败'; row['percent']=100; row['message']='后台进程启动失败，请检查运行库'
+                self._convert_failed.append({'name':row['name'],'message':row['message']})
+                self.convert_pos += 1
+            self.convert_stopped=True
+            self._convert_finish()
+            return
+        self.running=False;self.error('后台进程启动失败，请检查运行库')
+
+    def _finish_merge(self):
+        self.progress_timer.stop(); self.running=False
+        if self._poll: self._poll.stop()
+        try:
+            result=json.loads(self.result_file.read_text('utf-8'))
+            if not result['ok']: raise RuntimeError(result['error'])
+            for index in self.merge_indexes:
+                row=self.rows[index]
+                row['output']=result['output']; row['percent']=100; row['state']='已完成 · 点击打开'
+            self.overall_value=100
+            self.message='合稿完成'
+            self.batchFinished.emit('合稿完成，已导出一份 Word。\n'+result['output'])
+        except Exception as exc:
+            self.error(exc)
+        self.proc.deleteLater(); self.changed.emit()
 
     def finished(self, code, _status):
+        if self.task_kind=='merge':
+            self._finish_merge(); return
         if self.task_kind in ('convert','export'):
             self._apply_convert_result(); return
         if self.task_kind!='process':
+            self.progress_timer.stop()
             try:
                 result=json.loads(self.result_file.read_text('utf-8'))
                 if not result['ok']:raise ValueError(result['error'])
@@ -660,7 +770,7 @@ class Bridge(QObject):
         try:
             result = json.loads(self.result_file.read_text('utf-8'))
             if not result['ok']: raise RuntimeError(result['error'])
-            row['output'] = result['output']; row['report'] = result.get('report',''); row['state'] = '已完成 · 点击打开'
+            row['output'] = result['output']; row['report'] = result.get('report',''); row['percent'] = 100; row['state'] = '已完成 · 点击打开'
         except Exception as exc:
             row['state'] = '失败：' + str(exc)[:100];row['error']=str(exc)
         self.proc.deleteLater()
@@ -732,7 +842,6 @@ if hasattr(window, 'setIcon'):
 incoming=[arg for arg in sys.argv[1:] if not arg.startswith('--') and Path(arg).is_file()]
 if incoming:bridge.add(incoming)
 if '--test-opening' in sys.argv:
-    from qt_compat import QTest, QPoint
     before=copy.deepcopy(bridge.store.rules)
     def opening_capture():
         assert window.property('page')==2
@@ -756,7 +865,6 @@ if '--test-opening' in sys.argv:
     QTimer.singleShot(2100,opening_finished)
     QTimer.singleShot(8000,lambda:app.exit(2))
 if '--test-library-ui' in sys.argv:
-    from qt_compat import QTest
     import traceback
     def library_ui_test():
         try:
@@ -886,7 +994,6 @@ if '--test-convert-ui' in sys.argv:
 app.aboutToQuit.connect(lambda: bridge.proc.waitForFinished(30000) if bridge.running and bridge.proc else None)
 if '--smoke' in sys.argv:
     # Integration test runs with an isolated WENJU_DATA_DIR, never user presets.
-    from qt_compat import QTest, QPoint, QPointF, QFileDialog
     import traceback
     def guarded(fn):
         def run():

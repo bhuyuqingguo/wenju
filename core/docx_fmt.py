@@ -1150,7 +1150,11 @@ def load_rules():
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def process_file(src, rules):
+def process_file(src, rules, progress=None):
+    def tick(pct):
+        if progress:
+            progress(pct)
+    tick(5)
     src = os.path.abspath(src)
     base, ext = os.path.splitext(src)
     if ext.lower() in (".doc", ".wps", ".rtf"):
@@ -1174,7 +1178,9 @@ def process_file(src, rules):
     body = doc_root.find("w:body", NS)
     fm.do_styles(sty_root)
     fm.do_sections(body)
+    tick(40)
     fm.process_body(body)
+    tick(75)
     fm.add_letterhead(body)
     fm.do_page_numbers(body, items)
     items["word/document.xml"] = serialize(doc_root, doc_tag)
@@ -1233,6 +1239,7 @@ def process_file(src, rules):
         lines += ["", "说明：题注已写入 SEQ 域并缓存编号；如需刷新交叉引用，在 Word 中全选后按 F9。",
                   "封面/标题/题注的识别基于文本规律，请复核报告中的数量是否与预期一致。"]
         with open(rep, "w", encoding="utf-8") as f: f.write("\n".join(lines))
+    tick(100)
     return dst, rep
 
 def main():

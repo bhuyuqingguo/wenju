@@ -14,6 +14,8 @@ ColumnLayout {
     property color okColor: "#35806c"
     property color badColor: "#a33b3b"
     property int fontPx: 13
+    property string label: ""
+    property int percent: -1
 
     function barColor(state) {
         if (state === "失败")
@@ -23,13 +25,45 @@ ColumnLayout {
         return fill
     }
 
+    ColumnLayout {
+        visible: root.percent >= 0
+        Layout.fillWidth: true
+        spacing: 2
+        Text {
+            visible: root.label.length > 0
+            text: root.label
+            color: root.ink
+            font.pixelSize: root.fontPx
+            Layout.fillWidth: true
+            elide: Text.ElideRight
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 8
+                radius: 4
+                color: root.track
+                Rectangle {
+                    width: Math.max(0, Math.min(parent.width, parent.width * Math.max(0, Math.min(100, root.percent)) / 100))
+                    height: parent.height
+                    radius: 4
+                    color: root.fill
+                }
+            }
+            Text { text: root.percent + "%"; color: root.muted; font.pixelSize: Math.max(11, root.fontPx - 1) }
+        }
+    }
     RowLayout {
+        visible: root.percent < 0
         Layout.fillWidth: true
         Text { text: root.heading; color: root.ink; font.pixelSize: root.fontPx; font.bold: true }
         Item { Layout.fillWidth: true }
         Text { text: root.overall + "%"; color: root.ink; font.pixelSize: root.fontPx; font.bold: true }
     }
     Rectangle {
+        visible: root.percent < 0
         Layout.fillWidth: true
         Layout.preferredHeight: 10
         radius: 5
@@ -42,7 +76,7 @@ ColumnLayout {
         }
     }
     Text {
-        visible: root.files.length === 0
+        visible: root.percent < 0 && root.files.length === 0
         text: "转换开始后，每一份文件都会显示百分比。"
         color: root.muted
         font.pixelSize: root.fontPx
@@ -53,7 +87,7 @@ ColumnLayout {
         Layout.fillWidth: true
         Layout.fillHeight: true
         Layout.minimumHeight: 48
-        visible: root.files.length > 0
+        visible: root.percent < 0 && root.files.length > 0
         ListView {
             id: list
             anchors.fill: parent
