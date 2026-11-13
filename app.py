@@ -13,6 +13,8 @@ from preset_store import PresetStore, normalize, checked, sections, fields, SIZE
 from appearance import Appearance
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / 'core'))
+import fontfallback
 DATA = data_directory(ROOT)
 def qt_log(kind, context, message):
     with (DATA/'界面日志.txt').open('a',encoding='utf-8') as log: log.write(message+'\n')
@@ -35,6 +37,7 @@ class Bridge(QObject):
         try: self.settings = json.loads((DATA/'page.json').read_text('utf-8'))
         except (OSError, ValueError): pass
         self.store=PresetStore(DATA)
+        self.font_notice=fontfallback.guidance(self.store.rules)
         self.section='页面'
         self.task_kind='process'
         if not (DATA/'current.json').exists() and self.settings:
@@ -56,13 +59,25 @@ class Bridge(QObject):
             r=t['rules'];p=r['页码'];body=r['正文'];size=body['字号']
             heading={'汉字顿号':'一、（一）','多级数字':'1 / 1.1','第X章':'第一章','数字点':'1.'}.get(r['标题']['一级']['格式'],r['标题']['一级']['格式'])
             page=p['左侧字符']+'1'+p['右侧字符'] if p['启用'] else '无页码'
-            rows.append({**{k:v for k,v in t.items() if k!='rules'},'font':r['字体']['正文'],'size':size,'line':body['行距值'],
-                'bodySummary':r['字体']['正文']+' · '+(str(size)+' 磅' if isinstance(size,(float,int)) else size),
+            shown, found = fontfallback.choose(r['字体']['正文'])
+            body_font = shown if found else shown + '（未安装）'
+            rows.append({**{k:v for k,v in t.items() if k!='rules'},'font':body_font,'size':size,'line':body['行距值'],
+                'bodySummary':body_font+' · '+(str(size)+' 磅' if isinstance(size,(float,int)) else size),
                 'lineSummary':body['行距类型']+' '+str(body['行距值'])+(' 倍' if body['行距类型']=='多倍' else ' 磅' if body['行距类型'] in ('固定值','最小值') else ''),
                 'headingSummary':heading+' · '+str(r['标题']['级数'])+' 级',
                 'pageSummary':page+' · '+p['位置'].replace('底部','') if p['启用'] else page,
                 'marginSummary':'上 '+str(r['页面']['上边距'])+' / 下 '+str(r['页面']['下边距'])+' / 左 '+str(r['页面']['左边距'])+' / 右 '+str(r['页面']['右边距'])+' cm'})
         return rows
+    @Property(str, constant=True)
+    def fontNotice(self): return self.font_notice
+    @Slot(str)
+    def installFont(self, path):
+        try:
+            self.message = fontfallback.install_user_font(path)
+            self.font_notice = fontfallback.guidance(self.store.rules)
+        except Exception as exc:
+            self.message = '字体未能安装：' + str(exc)
+        self.changed.emit()
     @Property(str,notify=rulesChanged)
     def selectedId(self):return self.store.selected
     @Property(str,notify=rulesChanged)
@@ -318,6 +333,11 @@ palette=QPalette()
 for role,color in [(QPalette.Window,'#f4f6f9'),(QPalette.WindowText,'#22344a'),(QPalette.Base,'#f9fafc'),(QPalette.Text,'#22344a'),(QPalette.Button,'#ffffff'),(QPalette.ButtonText,'#22344a'),(QPalette.Highlight,'#245a83'),(QPalette.HighlightedText,'#ffffff')]:
     palette.setColor(role,QColor(color))
 app.setPalette(palette)
+for font_file in fontfallback.application_font_files(ROOT):
+    QFontDatabase.addApplicationFont(str(font_file))
+fontfallback.reset_index()
+if hasattr(app, 'setDesktopFileName'):
+    app.setDesktopFileName('wenju')
 app.setApplicationName('文矩')
 app.setOrganizationName('WenJu')
 app.setWindowIcon(QIcon(str(ROOT/'core/素材/文矩_图标_512.png')))
