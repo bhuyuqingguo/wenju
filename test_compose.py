@@ -34,8 +34,8 @@ def paragraph(text, font=None):
     return {"type": "paragraph", "style": "Normal", "runs": [run]}
 
 
-def document(blocks, header, assets=None):
-    return WenjuDoc(blocks, {"sections": [{"at": 0, "header": header, "footer": ""}]}, assets or {}, {"wenju": 1})
+def document(blocks, header, assets=None, footer=""):
+    return WenjuDoc(blocks, {"sections": [{"at": 0, "header": header, "footer": footer}]}, assets or {}, {"wenju": 1})
 
 
 def toc_entries(package):
@@ -134,10 +134,10 @@ def main():
         assert "仿宋".encode("utf-8") in blob
         entries = toc_entries(package)
         assert [(sid, texts[0], texts[-1]) for sid, texts in entries] == [
-            ("TOC1", "1. 总则", "2"),
-            ("TOC2", "1.1 范围", "2"),
-            ("TOC1", "2. 附则", "3"),
-            ("TOC1", "3. 附图", "4"),
+            ("TOC1", "1. 总则", "1"),
+            ("TOC2", "1.1 范围", "1"),
+            ("TOC1", "2. 附则", "2"),
+            ("TOC1", "3. 附图", "3"),
         ]
         assert header_order(package) == ["甲", "乙", "丙"]
         body = ET.fromstring(package["word/document.xml"])
@@ -198,6 +198,68 @@ def main():
     assert [block["runs"][0]["text"] for block in combined_heads] == ["一、第%d篇" % (n + 1) for n in range(12)]
     assert [section["header"] for section in combined.styles["sections"]] == ["页眉%d" % n for n in range(12)]
 
+    ended = document([heading(1, "一、甲"), {"type": "pagebreak"}], "页眉甲")
+    followed = document([heading(1, "一、乙")], "页眉乙")
+    joined = merge([ended, followed])
+    assert [block["type"] for block in joined.blocks].count("pagebreak") == 1
+    with tempfile.TemporaryDirectory(prefix="wenju-break-") as tmp:
+        folder = Path(tmp)
+        save(document([heading(1, "一、甲"), paragraph("甲正文")], "页眉甲", footer="页脚甲"), str(folder / "甲.wenju"))
+        save(document([heading(1, "一、乙"), paragraph("乙正文")], "页眉乙", footer="页脚乙"), str(folder / "乙.wenju"))
+        save(document([heading(1, "一、丙"), paragraph("丙正文")], "页眉丙", footer="页脚丙"), str(folder / "丙.wenju"))
+        once = merge_export([str(folder / "甲.wenju"), str(folder / "乙.wenju")], str(folder / "一次.wenju"), str(folder / "一次.docx"))
+        twice = merge_export([once["wenju"], str(folder / "丙.wenju")], str(folder / "二次.wenju"), str(folder / "二次.docx"))
+        stored = load(twice["wenju"])
+        active = []
+        for index, block in enumerate(stored.blocks):
+            section = stored.styles["sections"][0]
+            for item in stored.styles["sections"]:
+                if item["at"] <= index:
+                    section = item
+            if block["type"] == "heading":
+                active.append((block["runs"][0]["text"], section["header"]))
+        assert active == [("一、甲", "页眉甲"), ("一、乙", "页眉乙"), ("一、丙", "页眉丙")]
+
+    numbered = WenjuDoc([
+        heading(1, "2024年度工作总结"),
+        heading(2, "3名成员"),
+        heading(2, "（一）范围"),
+    ], {}, {}, {"wenju": 1})
+    nested = WenjuDoc([heading(2, "（一）直接从第二级开始")], {}, {}, {"wenju": 1})
+    with tempfile.TemporaryDirectory(prefix="wenju-number-") as tmp:
+        path = Path(tmp) / "out.docx"
+        to_docx(numbered, str(path), template={"font": "仿宋_GB2312", "number": "多级数字"})
+        with zipfile.ZipFile(path) as archive:
+            raw = archive.read("word/document.xml")
+        assert "2024年度工作总结".encode("utf-8") in raw
+        assert "3名成员".encode("utf-8") in raw
+        assert "1.2 范围".encode("utf-8") in raw
+        nested_path = Path(tmp) / "nested.docx"
+        to_docx(nested, str(nested_path), template={"number": "多级数字"})
+        with zipfile.ZipFile(nested_path) as archive:
+            nested_raw = archive.read("word/document.xml")
+        assert "1.1 直接从第二级开始".encode("utf-8") in nested_raw
+
+    square = WenjuDoc([{
+        "type": "table",
+        "rows": [
+            [{"runs": [{"text": "甲"}]}, {"runs": [{"text": "乙"}]}],
+            [{"runs": [{"text": "丙"}]}, {"runs": [{"text": "丁"}]}],
+        ],
+        "merges": [{"row": 0, "col": 0, "rows": 2, "cols": 2}],
+    }], {}, {}, {"wenju": 1})
+    with tempfile.TemporaryDirectory(prefix="wenju-cell-") as tmp:
+        path = Path(tmp) / "out.docx"
+        to_docx(square, str(path))
+        with zipfile.ZipFile(path) as archive:
+            raw = archive.read("word/document.xml")
+        assert "丁".encode("utf-8") in raw
+        root = ET.fromstring(raw)
+        cell = root.find(".//{%s}tc" % W)
+        assert [text_of(paragraph) for paragraph in cell.findall("{%s}p" % W)] == ["甲", "乙", "丙", "丁"]
+
+    check_docx_roundtrip()
+
     broken = WenjuDoc([{"type": "heading", "level": 0, "runs": [{"text": "x"}]}], {}, {}, {"wenju": 1})
     assert validate(broken)
     try:
@@ -207,6 +269,137 @@ def main():
     else:
         raise AssertionError("invalid heading was saved")
     print("PASS: merge order, heading levels, TOC entries, PAGE fields, font fallback, section headers")
+
+
+def write_docx(path, document_xml, extras=None, rels=None):
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"""
+    root_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+    if rels is None:
+        rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"""
+    with zipfile.ZipFile(str(path), "w") as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", root_rels)
+        archive.writestr("word/document.xml", document_xml)
+        archive.writestr("word/_rels/document.xml.rels", rels)
+        for name, data in (extras or {}).items():
+            archive.writestr(name, data)
+
+
+def check_docx_roundtrip():
+    ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    with tempfile.TemporaryDirectory(prefix="wenju-docx-") as tmp:
+        folder = Path(tmp)
+        cells = folder / "cells.docx"
+        write_docx(cells, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s"><w:body>
+  <w:tbl><w:tr><w:tc>
+    <w:p><w:r><w:t>10</w:t></w:r></w:p>
+    <w:p><w:r><w:t>20</w:t></w:r></w:p>
+  </w:tc></w:tr></w:tbl>
+  <w:sectPr/>
+</w:body></w:document>""" % ns)
+        loaded = from_docx(str(cells))
+        assert loaded.blocks[0]["rows"][0][0]["runs"][0]["text"] == "10\n20"
+        cell_out = folder / "cells-out.docx"
+        to_docx(loaded, str(cell_out))
+        with zipfile.ZipFile(cell_out) as archive:
+            cell_root = ET.fromstring(archive.read("word/document.xml"))
+        cell = cell_root.find(".//{%s}tc" % W)
+        assert [text_of(paragraph) for paragraph in cell.findall("{%s}p" % W)] == ["10", "20"]
+
+        before = folder / "before.docx"
+        write_docx(before, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s"><w:body>
+  <w:p><w:r><w:t>甲</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>乙</w:t></w:r></w:p>
+  <w:sectPr/>
+</w:body></w:document>""" % ns)
+        loaded = from_docx(str(before))
+        assert [block["type"] for block in loaded.blocks] == ["paragraph", "pagebreak", "paragraph"]
+
+        split = folder / "split.docx"
+        write_docx(split, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s"><w:body>
+  <w:p><w:r><w:t>甲</w:t></w:r></w:p>
+  <w:p><w:r><w:br w:type="page"/></w:r><w:r><w:t>乙</w:t></w:r></w:p>
+  <w:sectPr/>
+</w:body></w:document>""" % ns)
+        loaded = from_docx(str(split))
+        assert [(block["type"], "".join(run.get("text", "") for run in block.get("runs") or [])) for block in loaded.blocks] == [
+            ("paragraph", "甲"), ("pagebreak", ""), ("paragraph", "乙"),
+        ]
+
+        continuous = folder / "continuous.docx"
+        header = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:hdr xmlns:w="%s"><w:p><w:r><w:t>%%s</w:t></w:r></w:p></w:hdr>""" % ns
+        rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header2.xml"/>
+</Relationships>"""
+        write_docx(continuous, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s" xmlns:r="%s"><w:body>
+  <w:p><w:pPr><w:sectPr><w:type w:val="continuous"/><w:headerReference w:type="default" r:id="rId2"/></w:sectPr></w:pPr><w:r><w:t>甲</w:t></w:r></w:p>
+  <w:p><w:r><w:t>乙</w:t></w:r></w:p>
+  <w:sectPr><w:headerReference w:type="default" r:id="rId3"/></w:sectPr>
+</w:body></w:document>""" % (ns, rel), {
+            "word/header1.xml": header % "连续甲",
+            "word/header2.xml": header % "连续乙",
+        }, rels)
+        loaded = from_docx(str(continuous))
+        assert loaded.styles["sections"][1]["break"] == "continuous"
+        out = folder / "continuous-out.docx"
+        to_docx(loaded, str(out))
+        with zipfile.ZipFile(out) as archive:
+            body = archive.read("word/document.xml")
+        assert b'w:val="continuous"' in body
+        assert b'w:val="nextPage"' not in body
+
+        even = folder / "even.docx"
+        write_docx(even, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s" xmlns:r="%s"><w:body>
+  <w:p><w:r><w:t>正文</w:t></w:r></w:p>
+  <w:sectPr>
+    <w:headerReference w:type="even" r:id="rId2"/>
+    <w:headerReference w:type="default" r:id="rId3"/>
+  </w:sectPr>
+</w:body></w:document>""" % (ns, rel), {
+            "word/header1.xml": header % "偶数页眉",
+            "word/header2.xml": header % "默认页眉",
+        }, rels)
+        loaded = from_docx(str(even))
+        assert loaded.styles["sections"][0]["header"] == "默认页眉"
+
+        sections = folder / "sections.docx"
+        write_docx(sections, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s"><w:body>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr><w:r><w:t>甲</w:t></w:r></w:p>
+  <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>乙</w:t></w:r></w:p>
+  <w:sectPr/>
+</w:body></w:document>""" % ns)
+        loaded = from_docx(str(sections))
+        out = folder / "sections-out.docx"
+        to_docx(loaded, str(out))
+        with zipfile.ZipFile(out) as archive:
+            body = ET.fromstring(archive.read("word/document.xml"))
+        pages = []
+        for paragraph in body.iter("{%s}p" % W):
+            style = paragraph.find("w:pPr/w:pStyle", NS)
+            if style is None or not (style.get("{%s}val" % W) or "").startswith("TOC") or style.get("{%s}val" % W) == "TOCHeading":
+                continue
+            texts = [el.text or "" for el in paragraph.findall(".//w:t", NS)]
+            pages.append((texts[0], texts[-1]))
+        assert pages == [("甲", "1"), ("乙", "2")]
 
 
 if __name__ == "__main__":

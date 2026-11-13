@@ -28,8 +28,10 @@ _PREFIXES = (
     re.compile(r"^\s*第[0-9一二三四五六七八九十百千]+[章节部分篇]\s*"),
     re.compile(r"^\s*[一二三四五六七八九十百千]{1,3}[、.．]\s*"),
     re.compile(r"^\s*[（(][0-9一二三四五六七八九十百千]{1,3}[）)]\s*"),
-    re.compile(r"^\s*\d+(?:[.．]\d+)*[、.．]?\s*"),
+    re.compile(r"^\s*\d+(?:[.．]\d+)*[.．、]\s*"),
+    re.compile(r"^\s*\d+(?:[.．]\d+)+\s+"),
 )
+_PAGE_STARTS = ("nextPage", "evenPage", "oddPage")
 
 
 def _w(tag):
@@ -190,7 +192,7 @@ def apply_template(doc, template):
         level = block["level"]
         counters = counters[:level]
         while len(counters) < level:
-            counters.append(0)
+            counters.append(1 if len(counters) < level - 1 else 0)
         counters[level - 1] += 1
         body = _strip_number(_run_text(block.get("runs")))
         label = _label(counters, level)
@@ -241,29 +243,48 @@ def _lines(block):
     return 1
 
 
-def heading_pages(blocks):
+def heading_pages(blocks, sections=None):
+    """Estimate the page each heading lands on, including a TOC that shares the first page."""
+    sections = sections or [{"at": 0, "break": "nextPage"}]
     page = 1
     used = 0
     found = []
-    for block in blocks:
-        if block.get("type") == "toc":
-            continue
+    open_section = None
+    for index, block in enumerate(blocks):
+        section = _section_for(index, sections)
         if block.get("type") == "pagebreak":
+            nxt = _section_for(index + 1, sections) if index + 1 < len(blocks) else section
+            if not _starts_page(nxt, section):
+                page += 1
+                used = 0
+            open_section = section
+            continue
+        if _starts_page(section, open_section):
             page += 1
             used = 0
-            continue
-        need = _lines(block)
+        open_section = section
+        if block.get("type") == "toc":
+            need = _toc_lines(blocks)
+        else:
+            need = _lines(block)
         if used and used + need > PAGE_LINES:
             page += 1
             used = 0
         if block.get("type") == "heading":
             found.append((block, page))
         used += need
-    heading_count = len(found)
-    toc_pages = 0
-    if any(block.get("type") == "toc" for block in blocks) and heading_count:
-        toc_pages = max(1, (1 + heading_count + PAGE_LINES - 1) // PAGE_LINES)
-    return [(block, number + toc_pages) for block, number in found]
+    return found
+
+
+def _starts_page(section, previous):
+    return previous is not None and section is not previous and section.get("break", "nextPage") in _PAGE_STARTS
+
+
+def _toc_lines(blocks):
+    headings = sum(1 for block in blocks if block.get("type") == "heading")
+    if not headings:
+        return 1
+    return 2 + headings
 
 
 def _ensure_toc(doc):
@@ -286,7 +307,7 @@ def from_docx(path):
     in_toc = False
     emitted_toc = False
     sections = []
-    current = {"at": 0, "header": "", "footer": ""}
+    current = {"at": 0, "header": "", "footer": "", "break": "nextPage"}
     for child in list(body):
         if child.tag == _w("sectPr"):
             _finish_section(current, child, rels, package, sections)
@@ -310,24 +331,20 @@ def from_docx(path):
             continue
         image = _read_image(child, rels, package)
         if image is not None:
+            if _page_break_before(child):
+                blocks.append({"type": "pagebreak"})
             image_seq += 1
             name = "assets/image%d%s" % (image_seq, image[0])
             assets[name] = image[1]
             blocks.append({"type": "image", "asset": name, "w": image[2], "h": image[3]})
+            if _has_page_break(child):
+                blocks.append({"type": "pagebreak"})
         else:
-            style = _style_of(child)
-            text = _plain_text(child)
-            level = _heading_level(child, style)
-            if level:
-                blocks.append({"type": "heading", "level": level, "runs": [{"text": text}]})
-            elif text or style:
-                blocks.append({"type": "paragraph", "style": style or "Normal", "runs": [{"text": text}]})
-        if _has_page_break(child):
-            blocks.append({"type": "pagebreak"})
+            _append_paragraph(blocks, child)
         sect = child.find("w:pPr/w:sectPr", {"w": W})
         if sect is not None:
             _finish_section(current, sect, rels, package, sections)
-            current = {"at": len(blocks), "header": "", "footer": ""}
+            current = {"at": len(blocks), "header": "", "footer": "", "break": _break_type(sect)}
     if not sections:
         final = body.find(_w("sectPr"))
         if final is not None:
@@ -342,6 +359,16 @@ def _finish_section(current, sect, rels, package, sections):
     sections.append(dict(current))
 
 
+def _typed_ref(sect, tag):
+    found = sect.findall(_w(tag))
+    for ref in found:
+        if ref.get(_w("type"), "default") == "default":
+            return ref
+    if found:
+        return found[0]
+    return None
+
+
 def _rels(data):
     found = {}
     if not data:
@@ -352,8 +379,15 @@ def _rels(data):
     return found
 
 
+def _break_type(sect):
+    node = sect.find(_w("type"))
+    if node is None:
+        return "nextPage"
+    return node.get(_w("val")) or "nextPage"
+
+
 def _part_text(sect, rels, package, tag, skip_field=False):
-    ref = sect.find(_w(tag))
+    ref = _typed_ref(sect, tag)
     if ref is None:
         return ""
     target = rels.get(ref.get(_r("id")))
@@ -393,7 +427,7 @@ def _read_table(tbl):
             if grid is not None:
                 span = int(grid.get(_w("val")) or 1)
             vm = tc.find("w:tcPr/w:vMerge", {"w": W})
-            text = _plain_text(tc)
+            text = _cell_text(tc)
             row.append({"runs": [{"text": text}]})
             if span > 1 or (vm is not None and vm.get(_w("val")) == "restart"):
                 merges.append({"row": r_i, "col": col, "rows": 1, "cols": span})
@@ -459,6 +493,67 @@ def _plain_text(node):
     return "".join(el.text or "" for el in node.iter(_w("t")))
 
 
+def _cell_text(cell):
+    paragraphs = cell.findall(_w("p"))
+    if not paragraphs:
+        return _plain_text(cell)
+    return "\n".join(_plain_text(paragraph) for paragraph in paragraphs)
+
+
+def _append_paragraph(blocks, paragraph):
+    if _page_break_before(paragraph):
+        blocks.append({"type": "pagebreak"})
+    style = _style_of(paragraph)
+    level = _heading_level(paragraph, style)
+    pieces = list(_run_pieces(paragraph))
+    if not pieces:
+        text = _plain_text(paragraph)
+        if text or style:
+            blocks.append(_text_block(level, style, text))
+        return
+    buf = []
+    emitted = [False]
+
+    def flush():
+        text = "".join(buf)
+        del buf[:]
+        if not text and not (style and not emitted[0]):
+            return
+        emitted[0] = True
+        blocks.append(_text_block(level, style, text))
+
+    for kind, value in pieces:
+        if kind == "break":
+            flush()
+            blocks.append({"type": "pagebreak"})
+        else:
+            buf.append(value)
+    flush()
+
+
+def _text_block(level, style, text):
+    if level:
+        return {"type": "heading", "level": level, "runs": [{"text": text}]}
+    return {"type": "paragraph", "style": style or "Normal", "runs": [{"text": text}]}
+
+
+def _run_pieces(paragraph):
+    for child in paragraph:
+        if child.tag != _w("r"):
+            continue
+        for el in child:
+            if el.tag == _w("br") and el.get(_w("type")) == "page":
+                yield ("break", "")
+            elif el.tag == _w("t"):
+                yield ("text", el.text or "")
+            elif el.tag == _w("tab"):
+                yield ("text", "\t")
+
+
+def _page_break_before(paragraph):
+    return paragraph.find("w:pPr/w:pageBreakBefore", {"w": W}) is not None
+
+
 def _field_types(paragraph):
     return [el.get(_w("fldCharType")) for el in paragraph.iter(_w("fldChar"))]
 
@@ -485,7 +580,7 @@ def to_docx(doc, path, template=None):
     working = WenjuDoc(json.loads(json.dumps(doc.blocks)), json.loads(json.dumps(doc.styles)), dict(doc.assets), dict(doc.manifest))
     apply_template(working, template)
     _ensure_toc(working)
-    pages = dict((id(block), number) for block, number in heading_pages(working.blocks))
+    pages = dict((id(block), number) for block, number in heading_pages(working.blocks, working.styles.get("sections") or None))
     directory = os.path.dirname(os.path.abspath(path))
     if directory:
         os.makedirs(directory, exist_ok=True)
@@ -563,7 +658,7 @@ def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids):
         if open_section is not None and section is not open_section:
             if last_p is None:
                 last_p = ET.SubElement(body, _w("p"))
-            _attach_sect(last_p, open_section, sections, header_ids, footer_ids, final=False)
+            _attach_sect(last_p, open_section, sections, header_ids, footer_ids, final=False, next_break=section.get("break") or "nextPage")
             last_p = None
         open_section = section
         kind = block["type"]
@@ -591,15 +686,15 @@ def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids):
     return _xml(document), []
 
 
-def _attach_sect(paragraph, section, sections, header_ids, footer_ids, final):
+def _attach_sect(paragraph, section, sections, header_ids, footer_ids, final, next_break="nextPage"):
     ppr = paragraph.find(_w("pPr"))
     if ppr is None:
         ppr = ET.Element(_w("pPr"))
         paragraph.insert(0, ppr)
-    ppr.append(_sect_element(section, sections, header_ids, footer_ids, final=final))
+    ppr.append(_sect_element(section, sections, header_ids, footer_ids, final=final, next_break=next_break))
 
 
-def _sect_element(section, sections, header_ids, footer_ids, final):
+def _sect_element(section, sections, header_ids, footer_ids, final, next_break="nextPage"):
     index = next(i for i, item in enumerate(sections) if item is section)
     sect = ET.Element(_w("sectPr"))
     header = ET.SubElement(sect, _w("headerReference"))
@@ -610,7 +705,7 @@ def _sect_element(section, sections, header_ids, footer_ids, final):
     footer.set(_r("id"), footer_ids[index])
     if not final:
         kind = ET.SubElement(sect, _w("type"))
-        kind.set(_w("val"), "nextPage")
+        kind.set(_w("val"), next_break or "nextPage")
     page = ET.SubElement(sect, _w("pgSz"))
     page.set(_w("w"), "11906")
     page.set(_w("h"), "16838")
@@ -717,45 +812,73 @@ def _emit_image(parent, rel_id, seq, width, height):
 
 def _emit_table(parent, block):
     tbl = ET.SubElement(parent, _w("tbl"))
-    covered = set()
     spans = {}
     for merge in block.get("merges") or []:
-        r0, c0 = merge["row"], merge["col"]
-        spans[(r0, c0)] = merge
-        for r in range(r0, r0 + merge.get("rows", 1)):
-            for c in range(c0, c0 + merge.get("cols", 1)):
-                if (r, c) != (r0, c0):
-                    covered.add((r, c))
+        spans[(merge["row"], merge["col"])] = merge
     for r_i, row in enumerate(block["rows"]):
         tr = ET.SubElement(tbl, _w("tr"))
-        for c_i, cell in enumerate(row):
-            if (r_i, c_i) in covered and not _vertical_continue(r_i, c_i, spans):
+        c_i = 0
+        while c_i < len(row):
+            found = _merge_at(spans, r_i, c_i)
+            if found is not None and (found[0], found[1]) != (r_i, c_i):
+                r0, c0, merge = found
+                if r_i > r0 and c_i == c0:
+                    _emit_continue(tr, merge)
+                c_i = c0 + merge.get("cols", 1) if r_i > r0 and c_i == c0 else c_i + 1
                 continue
             tc = ET.SubElement(tr, _w("tc"))
             tcpr = ET.SubElement(tc, _w("tcPr"))
-            merge = spans.get((r_i, c_i))
-            if merge and merge.get("cols", 1) > 1:
-                grid = ET.SubElement(tcpr, _w("gridSpan"))
-                grid.set(_w("val"), str(merge["cols"]))
-            if merge and merge.get("rows", 1) > 1:
-                vm = ET.SubElement(tcpr, _w("vMerge"))
-                vm.set(_w("val"), "restart")
-            elif _vertical_continue(r_i, c_i, spans):
-                ET.SubElement(tcpr, _w("vMerge"))
-            _emit_paragraph(tc, _run_text(cell.get("runs")), font=_run_font(cell.get("runs")))
-            if merge and merge.get("cols", 1) > 1:
-                for extra in range(c_i + 1, c_i + merge["cols"]):
-                    extra_text = _run_text(block["rows"][r_i][extra].get("runs"))
-                    if extra_text:
-                        _emit_paragraph(tc, extra_text, font=_run_font(block["rows"][r_i][extra].get("runs")))
+            if found is not None:
+                _r0, _c0, merge = found
+                if merge.get("cols", 1) > 1:
+                    grid = ET.SubElement(tcpr, _w("gridSpan"))
+                    grid.set(_w("val"), str(merge["cols"]))
+                if merge.get("rows", 1) > 1:
+                    vm = ET.SubElement(tcpr, _w("vMerge"))
+                    vm.set(_w("val"), "restart")
+                _emit_rectangle(tc, block, merge)
+                c_i += merge.get("cols", 1)
+            else:
+                _emit_cell_text(tc, _run_text(row[c_i].get("runs")), _run_font(row[c_i].get("runs")))
+                c_i += 1
     return tbl
 
 
-def _vertical_continue(row, col, spans):
+def _merge_at(spans, row, col):
     for (r0, c0), merge in spans.items():
-        if c0 == col and merge.get("rows", 1) > 1 and r0 < row < r0 + merge["rows"]:
-            return True
-    return False
+        if r0 <= row < r0 + merge.get("rows", 1) and c0 <= col < c0 + merge.get("cols", 1):
+            return r0, c0, merge
+    return None
+
+
+def _emit_continue(tr, merge):
+    tc = ET.SubElement(tr, _w("tc"))
+    tcpr = ET.SubElement(tc, _w("tcPr"))
+    if merge.get("cols", 1) > 1:
+        grid = ET.SubElement(tcpr, _w("gridSpan"))
+        grid.set(_w("val"), str(merge["cols"]))
+    ET.SubElement(tcpr, _w("vMerge"))
+    _emit_paragraph(tc, "")
+
+
+def _emit_rectangle(parent, block, merge):
+    emitted = False
+    for r in range(merge["row"], merge["row"] + merge.get("rows", 1)):
+        for c in range(merge["col"], merge["col"] + merge.get("cols", 1)):
+            cell = block["rows"][r][c]
+            raw = _run_text(cell.get("runs"))
+            if not raw:
+                continue
+            _emit_cell_text(parent, raw, _run_font(cell.get("runs")))
+            emitted = True
+    if not emitted:
+        _emit_paragraph(parent, "")
+
+
+def _emit_cell_text(parent, text, font):
+    parts = text.split("\n") if text else [""]
+    for part in parts:
+        _emit_paragraph(parent, part, font=font)
 
 
 def _header_xml(text):

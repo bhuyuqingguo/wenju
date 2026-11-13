@@ -9,15 +9,19 @@ def merge(docs):
     sections = []
     assets = {}
     for index, doc in enumerate(docs):
-        if blocks:
+        if blocks and blocks[-1].get("type") != "pagebreak":
             blocks.append({"type": "pagebreak"})
         start = len(blocks)
         blocks.extend(_copy_blocks(doc, index, assets))
-        for section in doc.styles.get("sections") or [{"at": 0, "header": "", "footer": ""}]:
+        for order, section in enumerate(doc.styles.get("sections") or [{"at": 0, "header": "", "footer": ""}]):
+            brk = section.get("break") or "nextPage"
+            if order == 0 and index > 0:
+                brk = "nextPage"
             sections.append({
-                "at": start + int(section.get("at") or 0),
+                "at": start + _content_index(doc.blocks, int(section.get("at") or 0)),
                 "header": section.get("header") or "",
                 "footer": section.get("footer") or "",
+                "break": brk,
             })
     if any(block.get("type") == "heading" for block in blocks) and not any(block.get("type") == "toc" for block in blocks):
         blocks.insert(0, {"type": "toc"})
@@ -25,6 +29,17 @@ def merge(docs):
             if section["at"] > 0:
                 section["at"] += 1
     return WenjuDoc(blocks, {"sections": sections}, assets, {"wenju": 1})
+
+
+def _content_index(blocks, at):
+    """Index within the blocks that remain after toc entries are dropped."""
+    kept = 0
+    for index, block in enumerate(blocks):
+        if index >= at:
+            return kept
+        if block.get("type") != "toc":
+            kept += 1
+    return kept
 
 
 def _copy_blocks(doc, index, assets):
