@@ -1,9 +1,3 @@
-"""Minimal .wenju container until the shared format module lands.
-
-Public names are the agreed contract: WenjuDoc, load, save, from_docx,
-to_docx, validate. Replace this file with that module. Do not grow a
-second container beside it.
-"""
 from __future__ import annotations
 
 import json

@@ -1,4 +1,3 @@
-"""Turn pasted text and office files into a .wenju document."""
 from __future__ import annotations
 
 import json
