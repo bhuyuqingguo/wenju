@@ -140,6 +140,14 @@ def _copy_blocks(doc, index, assets):
             if block.get("preview") in mapping:
                 block["preview"] = mapping[block["preview"]]
             _remap_chart_rels(block.get("rels") or [], mapping)
+        elif block.get("type") == "table":
+            for row in block.get("rows") or []:
+                for cell in row or []:
+                    if not isinstance(cell, dict):
+                        continue
+                    for image in cell.get("images") or []:
+                        if isinstance(image, dict) and image.get("asset") in mapping:
+                            image["asset"] = mapping[image["asset"]]
         copied.append(block)
     return copied
 

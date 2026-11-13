@@ -319,6 +319,25 @@ def main():
             pages = [texts[-1] for _sid, texts in entries]
             assert pages == ["1", last], pages
 
+    png = b"\x89PNG\r\n\x1a\ncell-image"
+    cell = {"runs": [{"text": "格"}], "images": [{"type": "image", "asset": "a.png", "w": 12, "h": 8}]}
+    table = {"type": "table", "rows": [[cell]], "merges": []}
+    merged = merge([
+        document([table], "页眉甲", {"a.png": png}),
+        document([table], "页眉乙", {"a.png": png}),
+    ])
+    assert validate(merged) == []
+    names = []
+    for block in merged.blocks:
+        if block.get("type") != "table":
+            continue
+        for image in block["rows"][0][0].get("images") or []:
+            names.append(image["asset"])
+            assert merged.assets[image["asset"]] == png
+    assert names == ["0_a.png", "1_a.png"], names
+    with tempfile.TemporaryDirectory(prefix="wenju-cell-") as tmp:
+        save(merged, str(Path(tmp) / "cell.wenju"))
+
     broken = blank([{"type": "heading", "level": 0, "runs": [{"text": "x"}]}])
     assert validate(broken)
     try:

@@ -9,8 +9,11 @@ from urllib.parse import unquote, urlparse
 
 import wenju_format
 
-HTML_MIMES = ('text/html',)
-RTF_MIMES = ('text/rtf', 'application/rtf', 'application/x-rtf', 'Rich Text Format')
+HTML_MIMES = ('text/html', 'application/x-qt-windows-mime;value="HTML Format"')
+RTF_MIMES = (
+    'text/rtf', 'application/rtf', 'application/x-rtf', 'Rich Text Format',
+    'application/x-qt-windows-mime;value="Rich Text Format"',
+)
 PLAIN_MIMES = ('text/plain',)
 IMAGE_MIMES = (('image/png', 'png'), ('image/jpeg', 'jpg'), ('image/jpg', 'jpg'), ('image/bmp', 'bmp'), ('image/gif', 'gif'))
 META_MIMES = (
@@ -232,6 +235,28 @@ def _level_from_name(name):
     return None
 
 
+def _class_levels_from_css(text):
+    levels = {}
+    for match in re.finditer(r'([^{}]+)\{([^{}]*)\}', text or ''):
+        selector, body = match.group(1), match.group(2)
+        level = None
+        outline = re.search(r'mso-outline-level\s*:\s*(\d+)', body, re.I)
+        if outline:
+            level = int(outline.group(1))
+        if not level:
+            named = re.search(r'mso-style-name\s*:\s*["\']?([^;"\']+)', body, re.I)
+            if named:
+                level = _level_from_name(named.group(1))
+        if not level:
+            level = _level_from_name(body)
+        if not level or not 1 <= level <= 9:
+            continue
+        for part in selector.split(','):
+            for name in re.findall(r'\.([A-Za-z_][\w-]*)', part):
+                levels[name] = level
+    return levels
+
+
 def _level_from_class(class_name):
     if not class_name:
         return None
@@ -247,6 +272,30 @@ def _level_from_class(class_name):
 def _is_toc(class_name, style_name):
     blob = '%s %s' % (class_name or '', style_name or '')
     return bool(re.search(r'(MsoToc|TOC\s*\d|目录)', blob, re.I))
+
+
+def _keep_one_picture(kept, incoming, assets):
+    """v:imagedata and the img that follows it are one picture."""
+    new_name = incoming.get('asset') or ''
+    old_name = kept.get('asset') or ''
+    new_blob = assets.get(new_name) if new_name else None
+    old_blob = assets.get(old_name) if old_name else None
+    take_new = bool(new_blob) and not old_blob
+    if new_blob and old_blob and _is_meta_name(new_name) and not _is_meta_name(old_name):
+        take_new = True
+    if take_new:
+        if old_name and old_name != new_name:
+            assets.pop(old_name, None)
+        kept['asset'] = new_name
+        if incoming.get('w'):
+            kept['w'] = incoming['w']
+        if incoming.get('h'):
+            kept['h'] = incoming['h']
+        if incoming.get('_from'):
+            kept['_from'] = incoming['_from']
+        return
+    if new_name and new_name != old_name:
+        assets.pop(new_name, None)
 
 
 class _HtmlDoc(HTMLParser):
@@ -266,10 +315,14 @@ class _HtmlDoc(HTMLParser):
         self.images = 0
         self.toc_done = False
         self.later_images = []
+        self.class_levels = {}
+        self.style_text = []
+        self.in_style = False
         self.progress = None
         self.total = 1
         self.seen = 0
         self.page_after = False
+        self._same_image = None
 
     def _style(self):
         merged = {}
@@ -335,13 +388,20 @@ class _HtmlDoc(HTMLParser):
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
         attr = {key.lower(): value or '' for key, value in attrs}
-        if tag in ('script', 'style'):
+        if tag == 'style':
+            self.in_style = True
+            self.style_text = []
+            self.ignore += 1
+            return
+        if tag == 'script':
             self.ignore += 1
             return
         if self.ignore:
             return
         self._tick()
         css = _css(attr.get('style'))
+        if tag != 'img':
+            self._same_image = None
         if tag == 'br':
             if css.get('page') and self.cell is None and self.table is None:
                 self._flush()
@@ -356,10 +416,16 @@ class _HtmlDoc(HTMLParser):
                 width = int(attr['width']) * 0.75 if attr.get('width', '').isdigit() else 0
                 height = int(attr['height']) * 0.75 if attr.get('height', '').isdigit() else 0
                 image = {'type': 'image', 'asset': '', 'w': width, 'h': height}
+            if tag == 'img' and self._same_image is not None:
+                if image:
+                    _keep_one_picture(self._same_image, image, self.assets)
+                self._same_image = None
+                return
             if image and self.cell is not None:
                 self.cell.setdefault('images', []).append(image)
             elif image:
                 self.blocks.append(image)
+            self._same_image = image if tag.endswith('imagedata') else None
             return
         if tag in ('b', 'strong'):
             self.stack.append({'bold': True})
@@ -420,13 +486,29 @@ class _HtmlDoc(HTMLParser):
         elif _is_toc(class_name, css.get('style_name')):
             self.kind = ('p', 'toc')
         else:
-            level = css.get('outline') or _level_from_class(class_name) or _level_from_name(css.get('style_name'))
+            level = (
+                css.get('outline') or _level_from_class(class_name)
+                or self._class_level(class_name) or _level_from_name(css.get('style_name'))
+            )
             style_name = css.get('style_name') or 'body'
             self.kind = ('h', level) if level else ('p', style_name)
         self.stack.append({key: css[key] for key in ('font', 'size', 'bold', 'italic') if key in css})
 
+    def _class_level(self, class_name):
+        for part in (class_name or '').split():
+            level = self.class_levels.get(part)
+            if level:
+                return level
+        return None
+
     def handle_endtag(self, tag):
         tag = tag.lower()
+        if tag == 'style' and self.in_style:
+            self.in_style = False
+            self.ignore = max(0, self.ignore - 1)
+            self.class_levels.update(_class_levels_from_css(''.join(self.style_text)))
+            self.style_text = []
+            return
         if tag in ('script', 'style'):
             self.ignore = max(0, self.ignore - 1)
             return
@@ -464,6 +546,12 @@ class _HtmlDoc(HTMLParser):
             self.table = None
 
     def handle_data(self, data):
+        if data and data.strip():
+            self._same_image = None
+        if self.in_style:
+            if data:
+                self.style_text.append(data)
+            return
         if self.ignore or not data:
             return
         if data.strip() == '':
@@ -564,6 +652,52 @@ def _rtf_string(raw):
     return raw.encode('latin1', 'replace').decode('latin1')
 
 
+# Word writes a picture as one hex run, with a newline about every 64 digits.
+_HEX_BLOB = re.compile(r'[0-9A-Fa-f]{64,}(?:[\r\n]+[0-9A-Fa-f]{2,})*')
+
+
+def _cut_plain(text, start, limit):
+    end = limit
+    for delim in ('\\', '{', '}', '\r', '\n'):
+        pos = text.find(delim, start, end)
+        if pos != -1:
+            end = pos
+    return text[start:end], end
+
+
+def _decode_hex_parts(parts):
+    """Decode pict hex in chunks so a 1 MiB picture is not one giant digit string."""
+    buf = bytearray()
+    carry = ''
+    chunk = []
+    size = 0
+
+    def take(final):
+        nonlocal carry, size
+        if not chunk and not carry:
+            return
+        digits = carry + re.sub(r'[^0-9A-Fa-f]', '', ''.join(chunk))
+        del chunk[:]
+        size = 0
+        carry = ''
+        if len(digits) % 2:
+            if final:
+                digits = digits[:-1]
+            else:
+                carry = digits[-1]
+                digits = digits[:-1]
+        if digits:
+            buf.extend(bytes.fromhex(digits))
+
+    for part in parts:
+        chunk.append(part)
+        size += len(part)
+        if size >= 262144:
+            take(False)
+    take(True)
+    return bytes(buf)
+
+
 def _tokens(text):
     i = 0
     n = len(text)
@@ -581,7 +715,7 @@ def _tokens(text):
             elif char in '\r\n':
                 i += 1
             else:
-                body.append(('text', plain()))
+                body.append(plain())
         if i < n and text[i] == '}':
             i += 1
         return body
@@ -626,10 +760,21 @@ def _tokens(text):
 
     def plain():
         nonlocal i
-        start = i
-        while i < n and text[i] not in '\\{}\r\n':
-            i += 1
-        return text[start:i]
+        if i + 64 <= n:
+            match = _HEX_BLOB.match(text, i)
+            if match is not None:
+                raw = match.group()
+                if len(raw) >= 2048 or '\r' in raw or '\n' in raw:
+                    try:
+                        data = bytes.fromhex(raw)
+                    except ValueError:
+                        data = None
+                    if data:
+                        i = match.end()
+                        return ('hexbytes', data)
+        chunk, end = _cut_plain(text, i, n)
+        i = end
+        return ('text', chunk)
 
     if text[:1] != '{':
         return []
@@ -677,6 +822,7 @@ class _RtfDoc(object):
         self.rtf_total = 1
         self.rtf_seen = 0
         self.in_fallback_pict = False
+        self.skip_next_nonshppict = False
 
     def parse(self, raw, progress=None):
         _progress(progress, 30)
@@ -695,7 +841,7 @@ class _RtfDoc(object):
 
     def _dest(self, tokens):
         index = 0
-        if tokens and tokens[0][0] == 'word' and tokens[0][1] == '*':
+        if tokens and tokens[0][0] in ('word', 'sym') and tokens[0][1] == '*':
             index = 1
             if index < len(tokens) and tokens[index][0] == 'word':
                 return tokens[index][1], index + 1
@@ -792,40 +938,38 @@ class _RtfDoc(object):
     def _pict(self, tokens):
         blip = None
         width = height = None
-        hex_text = []
-        binary = []
+        pieces = []
+        text_parts = []
 
-        def walk(items):
-            nonlocal blip, width, height
-            for token in items:
-                if token[0] == 'word' and (token[1] in ('pngblip', 'jpegblip', 'wbitmap', 'dibitmap', 'emfblip') or token[1] == 'wmetafile'):
-                    blip = token[1]
-                elif token[0] == 'word' and token[1] == 'picwgoal' and token[2]:
-                    width = token[2] / 20.0
-                elif token[0] == 'word' and token[1] == 'pichgoal' and token[2]:
-                    height = token[2] / 20.0
-                elif token[0] == 'bin':
-                    binary.append(token[1])
-                elif token[0] == 'text':
-                    hex_text.append(token[1])
-                elif token[0] == 'group':
-                    walk(token[1])
+        def flush_text():
+            if text_parts:
+                pieces.append(_decode_hex_parts(text_parts))
+                del text_parts[:]
 
-        walk(tokens)
+        for token in tokens:
+            kind = token[0]
+            if kind == 'group':
+                continue
+            if kind == 'word' and (token[1] in ('pngblip', 'jpegblip', 'wbitmap', 'dibitmap', 'emfblip') or token[1] == 'wmetafile'):
+                blip = token[1]
+            elif kind == 'word' and token[1] == 'picwgoal' and token[2]:
+                width = token[2] / 20.0
+            elif kind == 'word' and token[1] == 'pichgoal' and token[2]:
+                height = token[2] / 20.0
+            elif kind == 'bin':
+                flush_text()
+                pieces.append(token[1].encode('latin1'))
+            elif kind == 'hexbytes':
+                flush_text()
+                pieces.append(token[1])
+            elif kind == 'text':
+                text_parts.append(token[1])
+        flush_text()
         if not blip:
             return
-        if binary:
-            data = ''.join(binary).encode('latin1')
-        else:
-            digits = re.sub(r'[^0-9A-Fa-f]', '', ''.join(hex_text))
-            if len(digits) < 2:
-                return
-            if len(digits) % 2:
-                digits = digits[:-1]
-            try:
-                data = bytes.fromhex(digits)
-            except ValueError:
-                return
+        data = b''.join(pieces)
+        if not data:
+            return
         if blip == 'jpegblip':
             ext = 'jpg'
         elif blip == 'emfblip':
@@ -936,10 +1080,19 @@ class _RtfDoc(object):
             kind = token[0]
             if kind == 'group':
                 flush_bytes()
+                dest, _start = self._dest(token[1])
+                if dest == 'nonshppict' and self.skip_next_nonshppict:
+                    self.skip_next_nonshppict = False
+                    continue
                 saved = (dict(self.fmt), dict(self.para), self.skip_chars)
                 self._walk(token[1])
                 self.fmt, self.para, self.skip_chars = saved
+                self.skip_next_nonshppict = dest == 'shppict'
                 continue
+            if kind == 'hexbytes':
+                continue
+            if not (kind == 'text' and not str(token[1]).strip()):
+                self.skip_next_nonshppict = False
             if kind == 'hex':
                 if self.skip_chars:
                     self.skip_chars -= 1
@@ -1276,13 +1429,43 @@ def brush_styles(rules):
     return styles
 
 
-def _file_image(src):
-    if not src or not str(src).lower().startswith('file:'):
-        return b'', ''
-    parsed = urlparse(src)
-    path = unquote(parsed.path or '')
-    if os.name != 'nt' and len(path) > 2 and path[0] == '/' and path[2] == ':':
-        path = path[1:]
+def _strip_drive_slash(path):
+    if len(path) > 2 and path[0] == '/' and path[2] == ':':
+        return path[1:]
+    return path
+
+
+def file_url_candidates(src, windows=None):
+    """Paths a file:// URL may name. UTF-8 percent-decoding is first, GBK second.
+
+    windows is accepted so a test can force the Windows drive-letter rule.
+    A leading slash before a drive letter is not part of the path on either
+    platform: file:///C:/Users is C:/Users.
+    """
+    text = str(src or '').strip()
+    if not text.lower().startswith('file:'):
+        return []
+    if windows is None:
+        windows = os.name == 'nt'
+    text = text.replace('\\', '/')
+    parsed = urlparse(text)
+    raw = parsed.path or ''
+    found = []
+    seen = set()
+    for encoding in ('utf-8', 'gbk'):
+        try:
+            path = unquote(raw, encoding=encoding, errors='strict')
+        except UnicodeDecodeError:
+            continue
+        if windows or os.name != 'nt':
+            path = _strip_drive_slash(path)
+        if path and path not in seen:
+            seen.add(path)
+            found.append(path)
+    return found
+
+
+def _read_image_file(path):
     if not path or not os.path.isfile(path):
         return b'', ''
     try:
@@ -1300,6 +1483,14 @@ def _file_image(src):
     if not kind:
         return b'', ''
     return payload, kind
+
+
+def _file_image(src):
+    for path in file_url_candidates(src, os.name == 'nt'):
+        payload, kind = _read_image_file(path)
+        if payload:
+            return payload, kind
+    return b'', ''
 
 
 def _each_image(blocks):
@@ -1333,30 +1524,121 @@ def _drop_empty_images(blocks):
     return kept
 
 
-def _apply_rtf_pictures(blocks, assets, rtf):
-    rtf_blocks, rtf_assets = parse_rtf(rtf, None)
-    pictures = [block for block in _each_image(rtf_blocks) if block.get('asset')]
-    slots = [image for image in _each_image(blocks) if image.get('_from') != 'data']
-    used = 0
-    for slot in slots:
-        if used >= len(pictures):
-            break
-        src = pictures[used]
-        used += 1
-        blob = rtf_assets.get(src['asset'], b'')
-        name = str(src.get('asset') or '')
-        meta = name.lower().endswith(('.emf', '.wmf'))
-        if slot.get('asset') and not meta:
-            continue
-        assets[name] = blob
-        slot['asset'] = name
+def _is_meta_name(name):
+    return str(name or '').lower().endswith(('.emf', '.wmf'))
+
+
+def _asset_still_used(blocks, name, skip):
+    for image in _each_image(blocks):
+        if image is not skip and image.get('asset') == name:
+            return True
+    return False
+
+
+def _claim_rtf_picture(slot, src, blocks, assets, rtf_assets):
+    """Use this RTF picture only when it belongs in this HTML slot.
+
+    A bitmap slot takes an EMF/WMF at the same position. The same bytes are
+    already the HTML picture, so the RTF copy is not a second picture.
+    Anything else is not consumed: the caller keeps the RTF picture where it
+    was parsed.
+    """
+    if not slot.get('asset') or not src.get('asset'):
+        return False
+    src_blob = rtf_assets.get(src['asset'], b'')
+    slot_blob = assets.get(slot['asset'], b'')
+    if _is_meta_name(src.get('asset')) and not _is_meta_name(slot.get('asset')):
+        old = slot['asset']
+        assets[src['asset']] = src_blob
+        slot['asset'] = src['asset']
         if not slot.get('w'):
             slot['w'] = src.get('w') or 0
         if not slot.get('h'):
             slot['h'] = src.get('h') or 0
-    for src in pictures[used:]:
-        blocks.append(dict(src))
-        assets[src['asset']] = rtf_assets.get(src['asset'], b'')
+        if old != src['asset'] and not _asset_still_used(blocks, old, slot):
+            assets.pop(old, None)
+        return True
+    if slot_blob and slot_blob == src_blob:
+        return True
+    return False
+
+
+def _pair_pictures(html_images, rtf_images, blocks, assets, rtf_assets):
+    """Pair pictures inside one container. Return RTF pictures that stay put.
+
+    An empty or unreadable HTML image does not advance the RTF cursor.
+    used only moves when the picture is actually kept in the HTML slot.
+    """
+    live = [image for image in rtf_images if image.get('asset')]
+    used = 0
+    for slot in html_images:
+        if not slot.get('asset'):
+            continue
+        if used >= len(live):
+            break
+        src = live[used]
+        if not _claim_rtf_picture(slot, src, blocks, assets, rtf_assets):
+            break
+        used += 1
+    kept = []
+    for src in live[used:]:
+        kept.append(src)
+    return kept
+
+
+def _copy_picture(src, assets, rtf_assets):
+    assets[src['asset']] = rtf_assets.get(src['asset'], b'')
+    return {
+        'type': 'image',
+        'asset': src['asset'],
+        'w': src.get('w') or 0,
+        'h': src.get('h') or 0,
+    }
+
+
+def _tables_of(blocks):
+    return [block for block in blocks or [] if block.get('type') == 'table']
+
+
+def _open_cells(table):
+    found = []
+    for row_index, row in enumerate(table.get('rows') or []):
+        for col_index, cell in enumerate(row):
+            if isinstance(cell, dict) and not cell.get('covered'):
+                found.append((row_index, col_index, cell))
+    return found
+
+
+def _apply_rtf_pictures(blocks, assets, rtf):
+    rtf_blocks, rtf_assets = parse_rtf(rtf, None)
+    rtf_top = [(index, block) for index, block in enumerate(rtf_blocks) if block.get('type') == 'image']
+    top_kept = _pair_pictures(
+        [block for block in blocks if block.get('type') == 'image'],
+        [block for _index, block in rtf_top],
+        blocks, assets, rtf_assets,
+    )
+    kept_top = set(id(block) for block in top_kept)
+    html_tables = _tables_of(blocks)
+    rtf_tables = _tables_of(rtf_blocks)
+    for index, rtf_table in enumerate(rtf_tables):
+        html_table = html_tables[index] if index < len(html_tables) else None
+        html_cells = {}
+        if html_table is not None:
+            for row_index, col_index, cell in _open_cells(html_table):
+                html_cells[(row_index, col_index)] = cell
+        for row_index, col_index, cell in _open_cells(rtf_table):
+            html_cell = html_cells.get((row_index, col_index))
+            html_images = list(html_cell.get('images') or []) if html_cell is not None else []
+            kept = _pair_pictures(html_images, list(cell.get('images') or []), blocks, assets, rtf_assets)
+            if html_cell is None or not kept:
+                continue
+            images = list(html_cell.get('images') or [])
+            for src in kept:
+                images.append(_copy_picture(src, assets, rtf_assets))
+            html_cell['images'] = images
+    for index, src in reversed([item for item in rtf_top if id(item[1]) in kept_top]):
+        at = index if index < len(blocks) else len(blocks)
+        blocks.insert(at, _copy_picture(src, assets, rtf_assets))
     return blocks, assets
 
 
@@ -1384,6 +1666,8 @@ def _through_docx(doc, progress=None):
         path = os.path.join(folder, 'paste.docx')
         _progress(progress, 86)
         wenju_format.to_docx(doc, path)
+        doc.blocks = []
+        doc.assets.clear()
         _progress(progress, 93)
         back = wenju_format.from_docx(path)
         back.source = {'kind': 'clipboard', 'name': ''}
@@ -1399,11 +1683,13 @@ def document_from_parts(html=None, rtf=None, plain=None, images=None, progress=N
     assets = {}
     if _has_bytes(html):
         blocks, assets = parse_html(html, progress)
+    html = None
     if _nonempty(blocks, assets):
         if _has_bytes(rtf):
             blocks, assets = _apply_rtf_pictures(blocks, assets, rtf)
     elif _has_bytes(rtf):
         blocks, assets = parse_rtf(rtf, progress)
+    rtf = None
     if not _nonempty(blocks, assets) and plain and str(plain).strip():
         blocks = parse_plain(plain, progress)
         assets = {}
@@ -1421,6 +1707,51 @@ def document_from_parts(html=None, rtf=None, plain=None, images=None, progress=N
     doc = _through_docx(doc, progress)
     _progress(progress, 100)
     return doc
+
+
+def clip_failure_text(exc):
+    """Last line of an exception, or a fixed sentence when the message is empty."""
+    try:
+        lines = str(exc).splitlines()
+    except Exception:
+        return '无法读取剪贴板'
+    text = lines[-1].strip() if lines else ''
+    if not text:
+        return '无法读取剪贴板'
+    return text[:180]
+
+
+class ClipRead(object):
+    """Whether a clipboard parse may still update the preview.
+
+    cancel marks the parse ignored but leaves running set. The completion
+    signal is then dropped. running clears only when the worker thread ends.
+    """
+
+    def __init__(self):
+        self.running = False
+        self.ignore = False
+
+    def start(self):
+        self.running = True
+        self.ignore = False
+
+    def cancel(self):
+        if self.running:
+            self.ignore = True
+
+    def accept(self):
+        if self.ignore or not self.running:
+            return False
+        self.running = False
+        return True
+
+    def thread_finished(self):
+        if not self.ignore:
+            return False
+        self.running = False
+        self.ignore = False
+        return True
 
 
 def parts_from_mime(mime):

@@ -10,6 +10,7 @@ same bytes, in the same order. The check then looks at the document that
 from_docx reads back.
 """
 import ast
+import hashlib
 import os
 import struct
 import tempfile
@@ -40,6 +41,17 @@ _PNG = (
     b'\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d\x00\x00\x00\x00IEND\xaeB`\x82'
 )
 _BLIP = {'png': 'pngblip', 'jpg': 'jpegblip', 'emf': 'emfblip', 'wmf': 'wmetafile'}
+
+
+def fat_picture(kind, serial):
+    size = 1024 * 1024
+    blob = bytearray(picture(kind, serial))
+    if len(blob) >= size:
+        return bytes(blob)
+    blob.extend(b'\x00' * (size - len(blob)))
+    if kind == 'emf':
+        struct.pack_into('<I', blob, 48, size)
+    return bytes(blob)
 
 
 def picture(kind, serial):
@@ -143,6 +155,67 @@ def _write_rtf(items):
             parts.append('\\cell\\row ')
     parts.append('}')
     return ''.join(parts)
+
+
+def _digest(blob):
+    return hashlib.sha256(blob).digest()
+
+
+def _spine_hashes(doc):
+    spine = []
+    for item in actual_spine(doc):
+        kind = item[0]
+        if kind == 'image':
+            spine.append(('image', _digest(item[1])))
+        elif kind == 'table':
+            cells = []
+            for text, blobs in item[1]:
+                cells.append((text, tuple(_digest(blob) for blob in blobs)))
+            spine.append(('table', tuple(cells)))
+        elif kind == 'text':
+            spine.append(('text', item[1]))
+        else:
+            spine.append((kind,))
+    return spine
+
+
+def _scale_inputs(folder):
+    html_parts = ['<html><body>']
+    rtf_parts = ['{\\rtf1\\ansi ']
+    spine = []
+    serial = 0
+    number = 0
+    kinds = ('png', 'jpg', 'emf')
+    for page in range(200):
+        outer = kinds[page % 3]
+        inner = kinds[(page + 1) % 3]
+        html_parts.append('<p style="page-break-after:always">页%d</p>' % page)
+        rtf_parts.append(_rtf_text('页%d' % page) + '\\page ')
+        spine.append(('text', '页%d' % page))
+        spine.append(('break',))
+        blob = fat_picture(outer, serial)
+        serial += 1
+        path = folder / ('i%d.%s' % (number, outer))
+        path.write_bytes(blob)
+        html_parts.append('<img src="%s" width="96" height="96">' % path.as_uri())
+        rtf_parts.append(_pict(outer, blob) + '\\par ')
+        spine.append(('image', _digest(blob)))
+        number += 1
+        blob = fat_picture(inner, serial)
+        serial += 1
+        path = folder / ('i%d.%s' % (number, inner))
+        path.write_bytes(blob)
+        html_parts.append('<table><tr><td>格%d' % page)
+        html_parts.append('<img src="%s" width="96" height="96">' % path.as_uri())
+        html_parts.append('</td></tr></table>')
+        rtf_parts.append('\\trowd\\cellx3000\\intbl ' + _rtf_text('格%d' % page))
+        rtf_parts.append(_pict(inner, blob))
+        rtf_parts.append('\\cell\\row ')
+        spine.append(('table', (('格%d' % page, (_digest(blob),)),)))
+        number += 1
+    html_parts.append('</body></html>')
+    rtf_parts.append('}')
+    return ''.join(html_parts).encode('utf-8'), ''.join(rtf_parts), spine
 
 
 def expected_spine(items):
@@ -356,36 +429,24 @@ class ClipboardInvariantTests(unittest.TestCase):
                 self.assertNotIn('save', calls(node), node.name)
 
     def test_two_hundred_pages_reconcile(self):
-        items = []
-        serial = 0
-        kinds = ('png', 'jpg', 'emf')
-        for page in range(200):
-            outer = kinds[page % 3]
-            inner = kinds[(page + 1) % 3]
-            items.append(('break', '页%d' % page))
-            items.append(('img', outer, picture(outer, serial)))
-            serial += 1
-            items.append(('table', '格%d' % page, [(inner, picture(inner, serial))]))
-            serial += 1
-        tracemalloc.start()
-        started = time.perf_counter()
         progress = []
         with tempfile.TemporaryDirectory() as tmp:
-            html = _write_html(items, Path(tmp))
-            rtf = _write_rtf(items)
+            html, rtf, expected = _scale_inputs(Path(tmp))
+            tracemalloc.start()
+            started = time.perf_counter()
             doc = clip.document_from_parts(html=html, rtf=rtf, progress=progress.append)
-        elapsed = time.perf_counter() - started
-        _current, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
+            elapsed = time.perf_counter() - started
+            _current, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
         rss = _proc_kib('VmRSS')
         hwm = _proc_kib('VmHWM')
-        self.assertEqual(actual_spine(doc), expected_spine(items))
+        self.assertEqual(_spine_hashes(doc), expected)
         self.assertEqual(fmt.validate(doc), [])
         self.assertEqual(progress[-1], 100)
         self.assertLess(elapsed, 120)
-        self.assertLess(peak, 800 * 1024 * 1024)
+        self.assertLess(peak, 4 * 1024 * 1024 * 1024)
         print(
-            'SCALE pages=200 images=400 tables=200 seconds=%.2f tracemalloc_mib=%.1f rss_mib=%.1f hwm_mib=%.1f'
+            'SCALE pages=200 images=400 bytes_each=1048576 tables=200 seconds=%.2f tracemalloc_mib=%.1f rss_mib=%.1f hwm_mib=%.1f'
             % (elapsed, peak / (1024 * 1024), rss / 1024, hwm / 1024)
         )
 

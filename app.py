@@ -94,7 +94,12 @@ class _ClipboardParse(QThread):
             doc = clip.document_from_parts(self._html, self._rtf, self._plain, self._images, self.progressed.emit)
             self.parsed.emit(doc)
         except Exception as exc:
-            self.failed.emit(str(exc).splitlines()[-1][:180] or '无法读取剪贴板')
+            try:
+                clip, _wenju = wenju_modules()
+                message = clip.clip_failure_text(exc)
+            except Exception:
+                message = '无法读取剪贴板'
+            self.failed.emit(message or '无法读取剪贴板')
 
 
 class Bridge(QObject):
@@ -160,6 +165,8 @@ class Bridge(QObject):
         self.clipboard_brush = False
         self._importing = False
         self._clip_thread = None
+        self._clip_read = None
+        self._clip_token = None
         self._preview_doc = None
         self._preview_charts = 0
         self._preview_limit = 40
@@ -377,6 +384,9 @@ class Bridge(QObject):
         clip, _wenju = wenju_modules()
         self._importing = True
         self.running = True
+        if self._clip_read is None:
+            self._clip_read = clip.ClipRead()
+        self._clip_read.start()
         self.clipboard_brush = bool(brush)
         self.import_progress = 0
         self.importProgressChanged.emit()
@@ -391,13 +401,18 @@ class Bridge(QObject):
             self.error(exc)
             return
         worker = _ClipboardParse(html, rtf, plain, images)
+        self._clip_token = object()
+        worker._clip_token = self._clip_token
         worker.progressed.connect(self._set_import_progress)
         worker.parsed.connect(self._clip_ready)
         worker.failed.connect(self._clip_failed)
+        worker.finished.connect(self._clip_thread_done)
         self._clip_thread = worker
         worker.start()
 
     def _clip_ready(self, doc):
+        if self._clip_read is None or not self._clip_read.accept():
+            return
         self.clipboard_doc = doc
         self.clipboard_docx = ''
         self.clipboard_wenju = ''
@@ -410,10 +425,31 @@ class Bridge(QObject):
         self.changed.emit()
 
     def _clip_failed(self, message):
+        if self._clip_read is None or not self._clip_read.accept():
+            return
         self.running = False
         self._importing = False
         self._set_import_progress(0)
         self.error(message or '无法读取剪贴板')
+
+    def _stop_background(self):
+        thread = self._clip_thread
+        if thread is not None and thread.isRunning():
+            thread.wait()
+        if self.running and self.proc:
+            self.proc.waitForFinished(30000)
+
+    def _clip_thread_done(self):
+        worker = self.sender()
+        if worker is not None and getattr(worker, '_clip_token', None) is not self._clip_token:
+            return
+        if self._clip_read is None or not self._clip_read.thread_finished():
+            return
+        self.running = False
+        self._importing = False
+        self._set_import_progress(0)
+        self.message = '已取消读入'
+        self.changed.emit()
 
     @Slot(bool)
     def setClipboardBrush(self, brush):
@@ -889,6 +925,11 @@ class Bridge(QObject):
 
     @Slot()
     def cancel(self):
+        if self._importing and self._clip_read is not None and self._clip_read.running:
+            self._clip_read.cancel()
+            self.message = '正在取消读入…'
+            self.changed.emit()
+            return
         self.queue = []
         self.convert_queue = []
         self.convert_stopped = True
@@ -1254,7 +1295,7 @@ if '--test-convert-ui' in sys.argv:
             traceback.print_exc(); app.exit(1)
     QTimer.singleShot(800, convert_ui)
     QTimer.singleShot(20000, lambda: app.exit(2))
-app.aboutToQuit.connect(lambda: bridge.proc.waitForFinished(30000) if bridge.running and bridge.proc else None)
+app.aboutToQuit.connect(bridge._stop_background)
 if '--smoke' in sys.argv:
     # Integration test runs with an isolated WENJU_DATA_DIR, never user presets.
     import traceback

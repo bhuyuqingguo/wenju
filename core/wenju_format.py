@@ -2405,7 +2405,8 @@ def _place_media(block, assets, image_rels, extra_files, image_start, picture_id
     rel_id = "rId%d" % (image_start + len(image_rels))
     asset = block["asset"]
     image_rels.append((rel_id, "media/" + asset, IMAGE_REL))
-    extra_files["word/media/" + asset] = bytes(assets[asset])
+    blob = assets[asset]
+    extra_files["word/media/" + asset] = blob if isinstance(blob, bytes) else bytes(blob)
     return rel_id, picture_id
 
 
