@@ -243,6 +243,10 @@ class _HtmlDoc(HTMLParser):
         if tag == 'img':
             self._flush()
             image = self._image(attr)
+            if image is None and src_present(attr):
+                width = int(attr['width']) if attr.get('width', '').isdigit() else 0
+                height = int(attr['height']) if attr.get('height', '').isdigit() else 0
+                image = {'type': 'image', 'asset': '', 'w': width, 'h': height}
             if image and self.table is not None:
                 self.later_images.append(image)
             elif image:
@@ -380,10 +384,11 @@ class _HtmlDoc(HTMLParser):
         src = attr.get('src') or ''
         width = int(attr['width']) if attr.get('width', '').isdigit() else 0
         height = int(attr['height']) if attr.get('height', '').isdigit() else 0
-        match = re.match(r'data:image/(png|jpeg|jpg);base64,(.+)', src, re.I | re.S)
+        match = re.match(r'data:image/(png|jpeg|jpg|bmp);base64,(.+)', src, re.I | re.S)
         if not match:
             return None
-        ext = 'jpg' if match.group(1).lower() in ('jpeg', 'jpg') else 'png'
+        kind = match.group(1).lower()
+        ext = 'jpg' if kind in ('jpeg', 'jpg') else ('bmp' if kind == 'bmp' else 'png')
         try:
             data = base64.b64decode(re.sub(r'\s+', '', match.group(2)))
         except Exception:
@@ -637,7 +642,7 @@ class _RtfDoc(object):
         def walk(items):
             nonlocal blip, width, height
             for token in items:
-                if token[0] == 'word' and token[1] in ('pngblip', 'jpegblip'):
+                if token[0] == 'word' and token[1] in ('pngblip', 'jpegblip', 'wbitmap', 'dibitmap'):
                     blip = token[1]
                 elif token[0] == 'word' and token[1] == 'picwgoal' and token[2]:
                     width = int(token[2] / 15)
@@ -659,7 +664,12 @@ class _RtfDoc(object):
         except ValueError:
             return
         self.images += 1
-        ext = 'jpg' if blip == 'jpegblip' else 'png'
+        if blip == 'jpegblip':
+            ext = 'jpg'
+        elif blip in ('wbitmap', 'dibitmap') or data[:2] == b'BM':
+            ext = 'bmp'
+        else:
+            ext = 'png'
         asset = 'assets/rtf%d.%s' % (self.images, ext)
         self.assets[asset] = data
         image = {'type': 'image', 'asset': asset, 'w': width or 0, 'h': height or 0}
@@ -919,18 +929,58 @@ def _nonempty(blocks, assets):
     return bool(blocks or assets)
 
 
+def _has_bytes(raw):
+    if not raw:
+        return False
+    return bool(raw.strip() if isinstance(raw, str) else raw.strip())
+
+
+def src_present(attr):
+    return bool((attr.get('src') or '').strip())
+
+
+def _merge_rtf_images(blocks, assets, rtf):
+    rtf_blocks, rtf_assets = parse_rtf(rtf, None)
+    pictures = [block for block in rtf_blocks if block.get('type') == 'image' and block.get('asset')]
+    used = 0
+    kept = []
+    for block in blocks:
+        if block.get('type') == 'image' and not block.get('asset'):
+            if used >= len(pictures):
+                continue
+            src = pictures[used]
+            used += 1
+            kept.append({
+                'type': 'image',
+                'asset': src['asset'],
+                'w': block.get('w') or src.get('w') or 0,
+                'h': block.get('h') or src.get('h') or 0,
+            })
+            assets[src['asset']] = rtf_assets.get(src['asset'], b'')
+            continue
+        kept.append(block)
+    for src in pictures[used:]:
+        kept.append(dict(src))
+        assets[src['asset']] = rtf_assets.get(src['asset'], b'')
+    return kept, assets
+
+
 def document_from_parts(html=None, rtf=None, plain=None, images=None, progress=None):
     _progress(progress, 5)
     images = dict(images or {})
     blocks = []
     assets = {}
-    if html and (html.strip() if isinstance(html, str) else html.strip()):
+    if _has_bytes(html):
         blocks, assets = parse_html(html, progress)
-    if not _nonempty(blocks, assets) and rtf and (rtf.strip() if isinstance(rtf, str) else rtf.strip()):
+    if _nonempty(blocks, assets):
+        if _has_bytes(rtf) and not any(block.get('type') == 'image' and block.get('asset') for block in blocks):
+            blocks, assets = _merge_rtf_images(blocks, assets, rtf)
+    elif _has_bytes(rtf):
         blocks, assets = parse_rtf(rtf, progress)
     if not _nonempty(blocks, assets) and plain and str(plain).strip():
         blocks = parse_plain(plain, progress)
         assets = {}
+    blocks = [block for block in blocks if not (block.get('type') == 'image' and not block.get('asset'))]
     if images and not any(block.get('type') == 'image' for block in blocks):
         assets.update(images)
         for name in images:

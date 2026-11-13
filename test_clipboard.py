@@ -275,6 +275,33 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(table['rows'][0][0]['runs'][0], {'text': '丙', 'font': '黑体', 'size': 14})
         self.assertEqual(table['rows'][0][1]['runs'][0], {'text': '丁', 'font': '楷体', 'size': 16})
 
+    def test_file_image_in_html_keeps_the_rtf_pict(self):
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==')
+        html = (SAMPLES / 'wps.html').read_text(encoding='utf-8').replace(
+            'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==',
+            'file:///C:/Users/AppData/Local/Temp/wps_clip.png',
+        )
+        rtf = r'{\rtf1\ansi\pard{\pict\pngblip\picwgoal150\pichgoal120 ' + png.hex() + r'}}'
+        doc = clip.document_from_parts(html=html.encode('utf-8'), rtf=rtf.encode('ascii'))
+        self.assertIn('通知标题', text_of(doc))
+        image = next(block for block in doc.blocks if block['type'] == 'image')
+        self.assertEqual(doc.assets[image['asset']], png)
+        self.assertGreater(image['w'], 0)
+
+    def test_bmp_data_uri_and_wbitmap(self):
+        bmp = b'BM\x1a\x00\x00\x00\x00\x00\x00\x00'
+        html = '<p>说明文字</p><img src="data:image/bmp;base64,%s">' % base64.b64encode(bmp).decode('ascii')
+        doc = clip.document_from_parts(html=html)
+        image = next(block for block in doc.blocks if block['type'] == 'image')
+        self.assertEqual(doc.assets[image['asset']], bmp)
+        self.assertIn('说明文字', text_of(doc))
+        rtf = r'{\rtf1\ansi\pard before\par{\pict\wbitmap0\picwgoal150\pichgoal150 424d1a000000}\par after\par}'
+        drawn = clip.document_from_parts(rtf=rtf.encode('ascii'))
+        found = next(block for block in drawn.blocks if block['type'] == 'image')
+        self.assertTrue(drawn.assets[found['asset']].startswith(b'BM'))
+        self.assertIn('before', text_of(drawn))
+        self.assertIn('after', text_of(drawn))
+
     def test_bmp_docx_keeps_the_bitmap(self):
         payload = b'BMrest-of-bitmap'
         doc = clip.document_from_parts(plain='图说', images={'assets/clipboard.bmp': payload})
