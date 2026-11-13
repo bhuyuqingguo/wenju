@@ -179,6 +179,8 @@ class _HtmlDoc(HTMLParser):
         self.cell = None
         self.row = None
         self.table = None
+        self.table_stack = []
+        self.queued_tables = []
         self.images = 0
         self.toc_done = False
         self.later_images = []
@@ -253,10 +255,10 @@ class _HtmlDoc(HTMLParser):
             self.stack.append({'italic': True})
             return
         if tag == 'font':
-            item = {}
+            item = {key: css[key] for key in ('font', 'size', 'bold', 'italic') if key in css}
             if attr.get('face'):
                 item['font'] = attr['face'].split(',')[0].strip()
-            if attr.get('size') and attr['size'].lstrip('+-').isdigit():
+            if 'size' not in item and attr.get('size') and attr['size'].lstrip('+-').isdigit():
                 item['size'] = HTML_FONT_PT.get(int(attr['size'].lstrip('+-')), 12)
             self.stack.append(item)
             return
@@ -265,7 +267,10 @@ class _HtmlDoc(HTMLParser):
             return
         if tag == 'table':
             self._flush()
+            if self.table is not None:
+                self.table_stack.append((self.table, self.cell))
             self.table = {'grid': {}, 'row': -1, 'cursor': 0}
+            self.cell = None
             return
         if tag == 'tr' and self.table is not None:
             self.table['row'] += 1
@@ -276,6 +281,7 @@ class _HtmlDoc(HTMLParser):
             self._flush()
             colspan = int(attr['colspan']) if attr.get('colspan', '').isdigit() else 1
             rowspan = int(attr['rowspan']) if attr.get('rowspan', '').isdigit() else 1
+            self.stack.append({key: css[key] for key in ('font', 'size', 'bold', 'italic') if key in css})
             self.cell = {'runs': [], 'colspan': max(1, colspan), 'rowspan': max(1, rowspan)}
             return
         if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'div'):
@@ -317,6 +323,8 @@ class _HtmlDoc(HTMLParser):
             self._flush()
             self._place_cell()
             self.cell = None
+            if self.stack:
+                self.stack.pop()
             return
         if tag == 'tr':
             self.row = None
@@ -324,8 +332,16 @@ class _HtmlDoc(HTMLParser):
         if tag == 'table' and self.table is not None:
             self._flush()
             rows, merges = wenju_format.pack_grid(self.table['grid'])
-            if rows:
-                self.blocks.append({'type': 'table', 'rows': rows, 'merges': merges})
+            block = {'type': 'table', 'rows': rows, 'merges': merges} if rows else None
+            if self.table_stack:
+                self.table, self.cell = self.table_stack.pop()
+                if block:
+                    self.queued_tables.append(block)
+                return
+            if block:
+                self.blocks.append(block)
+            self.blocks.extend(self.queued_tables)
+            self.queued_tables = []
             self.blocks.extend(self.later_images)
             self.later_images = []
             self.table = None
@@ -479,12 +495,12 @@ def _tokens(text):
 
 
 def _codepage(charset, ansicpg):
+    if ansicpg == 65001 or charset == 65001:
+        return 'utf-8'
     if charset in (136,) or ansicpg == 950:
         return 'big5'
     if charset in (134,) or ansicpg in (936, 54936):
         return 'gb18030'
-    if charset in (65001,) or ansicpg == 65001:
-        return 'utf-8'
     if ansicpg in (0, 1252, None):
         return 'cp1252'
     name = 'cp%d' % ansicpg
@@ -504,6 +520,7 @@ class _RtfDoc(object):
         self.blocks = []
         self.assets = {}
         self.images = 0
+        self.pending_images = []
         self.fmt = {'bold': False, 'italic': False, 'font': None, 'size': None, 'uc': 1}
         self.para = {'outline': None, 'style': None, 'intbl': False}
         self.runs = []
@@ -561,17 +578,41 @@ class _RtfDoc(object):
         charset = None
         raw = bytearray()
         chars = []
+        skip = 0
+        uc = 1
         for token in tokens:
+            if skip and token[0] in ('text', 'hex'):
+                if token[0] == 'hex':
+                    skip -= 1
+                    continue
+                if len(token[1]) <= skip:
+                    skip -= len(token[1])
+                    continue
+                token = ('text', token[1][skip:])
+                skip = 0
             if token[0] == 'word' and token[1] == 'f' and token[2] is not None and number is None:
                 number = token[2]
             elif token[0] == 'word' and token[1] == 'fcharset':
                 charset = token[2]
+            elif token[0] == 'word' and token[1] == 'uc' and token[2] is not None:
+                uc = token[2]
+            elif token[0] == 'word' and token[1] == 'u' and token[2] is not None:
+                code = token[2] if token[2] >= 0 else token[2] + 65536
+                if 0 <= code <= 0x10FFFF:
+                    chars.append(chr(code))
+                skip = uc
             elif token[0] == 'hex':
                 raw.append(token[1] if isinstance(token[1], int) else 0)
             elif token[0] == 'text':
                 chars.append(token[1])
-        name = raw.decode(_codepage(charset, self.ansicpg), 'replace') + ''.join(chars)
-        name = name.replace(';', '').strip()
+        decoded = raw.decode(_codepage(charset, self.ansicpg), 'replace')
+        literal = ''.join(chars)
+        if self.ansicpg == 65001 and literal:
+            try:
+                literal = literal.encode('latin1').decode('utf-8')
+            except UnicodeError:
+                pass
+        name = (decoded + literal).replace(';', '').strip()
         if number is not None:
             self.fonts[number] = {'name': name, 'charset': charset}
 
@@ -617,12 +658,16 @@ class _RtfDoc(object):
             data = bytes.fromhex(digits)
         except ValueError:
             return
-        self._finish_para_before_image()
         self.images += 1
         ext = 'jpg' if blip == 'jpegblip' else 'png'
         asset = 'assets/rtf%d.%s' % (self.images, ext)
         self.assets[asset] = data
-        self.blocks.append({'type': 'image', 'asset': asset, 'w': width or 0, 'h': height or 0})
+        image = {'type': 'image', 'asset': asset, 'w': width or 0, 'h': height or 0}
+        if self.in_row:
+            self.pending_images.append(image)
+            return
+        self._finish_para_before_image()
+        self.blocks.append(image)
 
     def _content(self, tokens):
         pending = bytearray()
@@ -675,6 +720,11 @@ class _RtfDoc(object):
     def _add(self, text):
         if text is None or text == '':
             return
+        if self.ansicpg == 65001:
+            try:
+                text = text.encode('latin1').decode('utf-8')
+            except UnicodeError:
+                pass
         run = {'text': text}
         if self.fmt.get('bold'):
             run['bold'] = True
@@ -772,10 +822,14 @@ class _RtfDoc(object):
             self._flush_para()
             self.blocks.append({'type': 'pagebreak'})
         elif name == 'trowd':
-            self.in_row = True
-            self.row_cells = []
-            self.row_defs = []
-            self.cur_def = {}
+            if self.in_row and self.row_cells:
+                self.row_defs = []
+                self.cur_def = {}
+            else:
+                self.in_row = True
+                self.row_cells = []
+                self.row_defs = []
+                self.cur_def = {}
         elif name == 'clvmgf':
             self.cur_def['vmerge'] = 'restart'
         elif name == 'clvmrg':
@@ -852,6 +906,9 @@ class _RtfDoc(object):
         if rows:
             self.blocks.append({'type': 'table', 'rows': rows, 'merges': merges})
         self.table_rows = []
+        if self.pending_images:
+            self.blocks.extend(self.pending_images)
+            self.pending_images = []
 
 
 def parse_rtf(raw, progress=None):

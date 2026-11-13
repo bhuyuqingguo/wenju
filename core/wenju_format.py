@@ -1,4 +1,3 @@
-"""Minimal .wenju container. Same API the format line owns: WenjuDoc, load, save, from_docx, to_docx, validate."""
 import json
 import zipfile
 from pathlib import Path
@@ -352,15 +351,11 @@ def to_docx(doc, path, template=None):
     for rel_id, block in images:
         asset = block.get('asset')
         data = target.assets.get(asset, b'')
-        ext = 'png'
-        lower = (asset or '').lower()
-        if lower.endswith('.jpg') or lower.endswith('.jpeg') or data[:3] == b'\xff\xd8\xff':
-            ext = 'jpeg'
+        ext, content = _image_kind(asset, data)
         if ext not in seen:
-            content = 'image/png' if ext == 'png' else 'image/jpeg'
             defaults.append('<Default Extension="%s" ContentType="%s"/>' % (ext, content))
             seen.add(ext)
-        filename = 'image%d.%s' % (rel_id, 'jpg' if ext == 'jpeg' else 'png')
+        filename = 'image%d.%s' % (rel_id, ext)
         media.append(('word/media/' + filename, data))
         rels.append('<Relationship Id="rId%d" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/%s"/>' % (rel_id, filename))
     content_types = (
@@ -385,6 +380,15 @@ def to_docx(doc, path, template=None):
             )
         for name, data in media:
             archive.writestr(name, data)
+
+
+def _image_kind(asset, data):
+    lower = (asset or '').lower()
+    if data[:2] == b'BM' or lower.endswith('.bmp'):
+        return 'bmp', 'image/bmp'
+    if data[:3] == b'\xff\xd8\xff' or lower.endswith('.jpg') or lower.endswith('.jpeg'):
+        return 'jpeg', 'image/jpeg'
+    return 'png', 'image/png'
 
 
 def _local(tag):

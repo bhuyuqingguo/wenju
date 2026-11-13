@@ -1,5 +1,6 @@
 import ast
 import base64
+import importlib.util
 import json
 import os
 import shutil
@@ -208,6 +209,89 @@ class ClipboardTests(unittest.TestCase):
         image = next(block for block in doc.blocks if block['type'] == 'image')
         self.assertEqual(doc.assets[image['asset']], png)
 
+    def test_nested_html_table_keeps_outer_cells(self):
+        html = (
+            '<table><tr><td>外左</td><td>前文<table>'
+            '<tr><td colspan="2">内头</td></tr><tr><td>内甲</td><td>内乙</td></tr>'
+            '</table>后文</td></tr><tr><td>外下</td><td>右下</td></tr></table>'
+        )
+        doc = clip.document_from_parts(html=html)
+        found = text_of(doc)
+        for word in ('外左', '前文', '后文', '外下', '右下', '内头', '内甲', '内乙'):
+            self.assertIn(word, found)
+        inner = [block for block in doc.blocks if block['type'] == 'table'][1]
+        self.assertEqual(inner['merges'], [{'row': 0, 'col': 0, 'rowspan': 1, 'colspan': 2}])
+
+    def test_repeated_trowd_keeps_the_row(self):
+        rtf = (
+            r"{\rtf1\ansi\ansicpg936{\fonttbl{\f0\fnil\fcharset134 \'cb\'ce\'cc\'e5;}}"
+            r"\trowd\clmgf\cellx3000\clmrg\cellx6000\intbl\f0 \'b1\'ed\'cd\'b7\cell\cell"
+            r"\trowd\clmgf\cellx3000\clmrg\cellx6000\row\pard after\par}"
+        )
+        doc = clip.document_from_parts(rtf=rtf)
+        table = next(block for block in doc.blocks if block['type'] == 'table')
+        self.assertEqual(text_of(doc).split('\n')[0], '表头')
+        self.assertEqual(table['merges'][0]['colspan'], 2)
+        self.assertIn('after', text_of(doc))
+
+    def test_rtf_pict_inside_a_cell_keeps_the_words(self):
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==')
+        rtf = r'{\rtf1\ansi\trowd\cellx3000\intbl before {\pict\pngblip ' + png.hex() + r'} after\cell\row}'
+        doc = clip.document_from_parts(rtf=rtf)
+        table = next(block for block in doc.blocks if block['type'] == 'table')
+        cell = ''.join(run.get('text', '') for run in table['rows'][0][0]['runs'])
+        self.assertIn('before', cell)
+        self.assertIn('after', cell)
+        image = next(block for block in doc.blocks if block['type'] == 'image')
+        self.assertEqual(doc.assets[image['asset']], png)
+
+    def test_utf8_rtf_and_unicode_font_names(self):
+        raw = '{\\rtf1\\ansi\\ansicpg65001\\deff0{\\fonttbl{\\f0\\fnil\\fcharset134 黑体;}}\\pard\\f0\\fs44 通知\\par}'.encode('utf-8')
+        doc = clip.document_from_parts(rtf=raw)
+        run = doc.blocks[0]['runs'][0]
+        self.assertEqual(run['text'], '通知')
+        self.assertEqual(run['font'], '黑体')
+        self.assertEqual(run['size'], 22)
+        named = clip.document_from_parts(rtf=(
+            r'{\rtf1\ansi\ansicpg936\deff0{\fonttbl{\f0\fnil\fcharset134 \u23435?\u20307?;}}'
+            r'\pard\f0\fs32 \u27491?\u25991?\par}'
+        ))
+        body = named.blocks[0]['runs'][0]
+        self.assertEqual(body['text'], '正文')
+        self.assertEqual(body['font'], '宋体')
+        self.assertEqual(body['size'], 16)
+
+    def test_font_tag_and_cell_style_keep_point_size(self):
+        html = (
+            '<p><font face="宋体" style="font-size:16pt">甲</font></p>'
+            '<p><font face="宋体" size="3" style="font-size:16pt">乙</font></p>'
+            '<table><tr><td style="font-family:黑体;font-size:14pt">丙</td>'
+            '<td style="font-family:楷体;font-size:16pt">丁</td></tr></table>'
+        )
+        doc = clip.document_from_parts(html=html)
+        self.assertEqual(doc.blocks[0]['runs'][0], {'text': '甲', 'font': '宋体', 'size': 16})
+        self.assertEqual(doc.blocks[1]['runs'][0]['size'], 16)
+        table = next(block for block in doc.blocks if block['type'] == 'table')
+        self.assertEqual(table['rows'][0][0]['runs'][0], {'text': '丙', 'font': '黑体', 'size': 14})
+        self.assertEqual(table['rows'][0][1]['runs'][0], {'text': '丁', 'font': '楷体', 'size': 16})
+
+    def test_bmp_docx_keeps_the_bitmap(self):
+        payload = b'BMrest-of-bitmap'
+        doc = clip.document_from_parts(plain='图说', images={'assets/clipboard.bmp': payload})
+        folder = Path(tempfile.mkdtemp())
+        try:
+            docx = folder / 'bmp.docx'
+            fmt.to_docx(doc, docx)
+            with zipfile.ZipFile(str(docx)) as archive:
+                types = archive.read('[Content_Types].xml').decode('utf-8')
+                self.assertIn('Extension="bmp"', types)
+                self.assertIn('image/bmp', types)
+                media = [name for name in archive.namelist() if name.startswith('word/media/')]
+                self.assertTrue(media)
+                self.assertTrue(archive.read(media[0]).startswith(b'BM'))
+        finally:
+            shutil.rmtree(str(folder))
+
     def test_progress_reaches_100(self):
         seen = []
         clip.document_from_parts(html=(SAMPLES / 'wps.html').read_bytes(), progress=seen.append)
@@ -263,11 +347,7 @@ class ClipboardTests(unittest.TestCase):
             os.environ['WENJU_QT'] = '6'
             self.assertEqual(qt_compat.binding(), 'PySide6')
             os.environ.pop('WENJU_QT', None)
-            try:
-                import PySide6  # noqa: F401
-                expected = 'PySide6'
-            except ImportError:
-                expected = 'PySide2'
+            expected = 'PySide6' if importlib.util.find_spec('PySide6') is not None else 'PySide2'
             self.assertEqual(qt_compat.binding(), expected)
         finally:
             if previous is None:

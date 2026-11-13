@@ -265,7 +265,7 @@ class Bridge(QObject):
             doc = clip.document_from_mime(QGuiApplication.clipboard().mimeData(), lambda value: self._set_import_progress(min(80, int(value * 0.8))))
             out = DATA / '输出'
             out.mkdir(parents=True, exist_ok=True)
-            stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+            stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
             wenju_path = out / ('剪贴板-%s.wenju' % stamp)
             docx_path = out / ('剪贴板-%s.docx' % stamp)
             self._write_clipboard(doc, brush, wenju_path, docx_path)
@@ -703,6 +703,15 @@ if '--test-clipboard' in sys.argv:
         assert wenju.load(wenju_path).blocks[0]['runs'][0]['size']==22
         shot=Path('/tmp/clipboard-import.png')
         assert window.grabWindow().save(str(shot)), shot
+        first=Path(bridge.files[-1]['wenju'])
+        mime2=QMimeData()
+        mime2.setHtml('<html><body><p>第二份完全不同</p></body></html>')
+        QGuiApplication.clipboard().setMimeData(mime2)
+        bridge.importClipboard(False)
+        second=Path(bridge.files[-1]['wenju'])
+        assert str(first)!=str(second) and first.is_file() and second.is_file()
+        assert '通知标题' in ''.join(run.get('text','') for block in wenju.load(first).blocks if block.get('type')=='heading' for run in block.get('runs') or [])
+        assert '第二份完全不同' in ''.join(run.get('text','') for block in wenju.load(second).blocks for run in block.get('runs') or [])
         QGuiApplication.clipboard().clear()
         app.processEvents()
         before=len(bridge.files)
