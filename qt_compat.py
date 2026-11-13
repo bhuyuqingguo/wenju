@@ -13,7 +13,7 @@ if os.environ.get('WENJU_QT') == '5':
     QT = '5'
 else:
     try:
-        from PySide6.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt, QPoint, QPointF
+        from PySide6.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt, QPoint, QPointF, QMimeData, QMetaObject
         from PySide6.QtGui import QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont
         from PySide6.QtQml import QQmlApplicationEngine
         from PySide6.QtQuick import QQuickWindow
@@ -25,7 +25,7 @@ else:
         QT = '5'
 
 if QT == '5':
-    from PySide2.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt, QPoint, QPointF
+    from PySide2.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt, QPoint, QPointF, QMimeData, QMetaObject
     from PySide2.QtGui import QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont
     from PySide2.QtQml import QQmlApplicationEngine
     from PySide2.QtQuick import QQuickWindow
