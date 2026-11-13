@@ -9,8 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-import fontfallback
-
 APP_VERSION = "3.3.0"
 FORMAT = "wenju"
 
@@ -1194,10 +1192,6 @@ def _write_ppr(paragraph, style_id, geom, level):
         ET.SubElement(ppr, q(W, "outlineLvl")).set(q(W, "val"), str(int(level) - 1))
 
 
-def _face(name):
-    return fontfallback.resolve(name) if name else name
-
-
 def _write_run(paragraph, run):
     node = ET.SubElement(paragraph, q(W, "r"))
     rpr = ET.SubElement(node, q(W, "rPr"))
@@ -1398,9 +1392,9 @@ def _styles_xml(styles, style_ids):
 
 
 def _fill_rpr(rpr, props, for_run=False):
-    east = _face(props.get("eastAsia"))
-    ascii_font = _face(props.get("ascii"))
-    hansi = _face(props.get("hAnsi") or props.get("ascii"))
+    east = props.get("eastAsia")
+    ascii_font = props.get("ascii")
+    hansi = props.get("hAnsi") or props.get("ascii")
     if east or ascii_font or hansi:
         fonts = ET.SubElement(rpr, q(W, "rFonts"))
         if ascii_font:

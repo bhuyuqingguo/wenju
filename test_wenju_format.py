@@ -38,13 +38,13 @@ def main():
         out = tmp / "round.docx"
         wf.to_docx(loaded, out)
         again = wf.from_docx(out)
-        _assert_fixture(again, png, alias="仿宋")
+        _assert_fixture(again, png, alias="仿宋_GB2312")
         wenju_again = tmp / "again.wenju"
         wf.convert_file(out, wenju_again)
-        _assert_fixture(wf.load(wenju_again), png, alias="仿宋")
+        _assert_fixture(wf.load(wenju_again), png, alias="仿宋_GB2312")
         docx_again = tmp / "again.docx"
         wf.convert_file(package, docx_again)
-        _assert_fixture(wf.from_docx(docx_again), png, alias="仿宋")
+        _assert_fixture(wf.from_docx(docx_again), png, alias="仿宋_GB2312")
         brushed = tmp / "brushed.docx"
         wf.to_docx(doc, brushed, template={"正文": {"eastAsia": "黑体", "ascii": "Arial", "size_pt": 18, "bold": True, "align": "center"}})
         brushed_doc = wf.from_docx(brushed)
@@ -88,9 +88,15 @@ def main():
             styles={"正文": {"eastAsia": "仿宋_GB2312"}},
             assets={},
         )
-        wf.to_docx(kept_font, tmp / "font.docx")
+        font_docx = tmp / "font.docx"
+        wf.to_docx(kept_font, font_docx)
         assert kept_font.blocks[0]["runs"][0]["eastAsia"] == "仿宋_GB2312"
+        assert kept_font.blocks[0]["runs"][0]["ascii"] == "仿宋_GB2312"
         assert kept_font.styles["正文"]["eastAsia"] == "仿宋_GB2312"
+        with zipfile.ZipFile(font_docx) as written:
+            document_xml = written.read("word/document.xml").decode("utf-8")
+            styles_xml = written.read("word/styles.xml").decode("utf-8")
+        assert "仿宋_GB2312" in document_xml and "仿宋_GB2312" in styles_xml
         class Huge(bytes):
             def __len__(self):
                 return wf.MAX_ASSET_BYTES + 1
