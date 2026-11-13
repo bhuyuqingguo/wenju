@@ -39,5 +39,6 @@ with tempfile.TemporaryDirectory(prefix='wenju-photo-') as d:
    assert st.find('w:pPr/w:spacing',NS).get(q('line'))=='579'
   footer=ET.fromstring(z.read(next(n for n in z.namelist() if n.startswith('word/footer') and n.endswith('.xml'))))
   assert ''.join(t.text or '' for t in footer.findall('.//w:t',NS))=='—1—'
-  assert footer.find('.//w:jc',NS).get(q('val'))=='both'
+  page_para=next(p for p in footer.findall('w:p',NS) if any((el.text or '').strip()=='PAGE' for el in p.findall('.//w:instrText',NS)))
+  assert page_para.find('w:pPr/w:jc',NS).get(q('val'))=='center'
  print('PASS: official title, existing security mark, body typography and 28.95pt line spacing in actual DOCX')
