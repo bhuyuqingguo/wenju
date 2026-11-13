@@ -152,10 +152,10 @@ ColumnLayout {
                     Text { text: "目标文件"; color: root.muted; font.pixelSize: Math.max(11, root.fontPx - 1) }
                     Text {
                         id: outputWide
-                        text: modelData.output ? modelData.output : "尚未生成"
+                        text: modelData.target || modelData.output || "尚未生成"
                         Layout.fillWidth: true
                         Layout.preferredWidth: 0
-                        color: modelData.output ? root.ink : root.muted
+                        color: (modelData.target || modelData.output) ? root.ink : root.muted
                         font.pixelSize: Math.max(11, root.fontPx - 1)
                         elide: Text.ElideMiddle
                         MouseArea {
@@ -215,8 +215,8 @@ ColumnLayout {
                         Text {
                             id: outputText
                             width: parent.width
-                            text: modelData.output ? modelData.output : "尚未生成"
-                            color: modelData.output ? root.ink : root.muted
+                            text: modelData.target || modelData.output || "尚未生成"
+                            color: (modelData.target || modelData.output) ? root.ink : root.muted
                             font.pixelSize: Math.max(11, root.fontPx - 1)
                             elide: Text.ElideMiddle
                             MouseArea {

@@ -1,4 +1,5 @@
 import base64
+import datetime
 import json
 import os
 import sys
@@ -857,6 +858,46 @@ def test_keep_fangsong_name(tmp):
         fontfallback.reset_index()
 
 
+def test_output_locations(tmp):
+    folder = tmp / "inbox"
+    folder.mkdir()
+    source = folder / "报告.txt"
+    source.write_text("甲\n", encoding="utf-8")
+    (folder / "报告.wenju").write_text("occupied", encoding="utf-8")
+    snap = convert.run_batch([{"name": "报告.txt", "path": str(source)}], None)
+    placed = Path(snap["files"][0]["output"])
+    assert placed == folder / "报告 (1).wenju"
+    assert snap["files"][0]["target"] == str(placed)
+    again = convert.run_batch([{"name": "报告.txt", "path": str(source)}], None)
+    assert Path(again["files"][0]["output"]) == folder / "报告 (2).wenju"
+    exported = convert.run_export([{"name": "报告.wenju", "path": str(placed)}], None)
+    assert Path(exported["files"][0]["docx"]) == folder / "报告 (1).docx"
+    home = tmp / "home"
+    (home / "文档").mkdir(parents=True)
+    (home / "Documents").mkdir()
+    when = datetime.datetime(2026, 11, 13, 6, 38)
+    pasted = convert.run_batch([{"name": "粘贴的内容", "text": "剪贴板正文"}], None, when=when, home=home)
+    clip = Path(pasted["files"][0]["output"])
+    assert clip == home / "文档" / "文矩输出" / "剪贴板-20261113-0638.wenju"
+    pasted_again = convert.run_batch([{"name": "粘贴的内容", "text": "再一份"}], None, when=when, home=home)
+    assert Path(pasted_again["files"][0]["output"]).name == "剪贴板-20261113-0638 (1).wenju"
+    english = tmp / "english"
+    (english / "Documents").mkdir(parents=True)
+    assert convert.clipboard_dir(english) == english / "Documents" / "文矩输出"
+    chosen = tmp / "chosen"
+    forced = convert.run_batch(
+        [{"name": "报告.txt", "path": str(source), "outdir": str(chosen)}],
+        None,
+    )
+    assert Path(forced["files"][0]["output"]).parent == chosen
+    assert "报告" in Path(forced["files"][0]["output"]).name
+    for part in placed.parts:
+        assert len(part) != 10 or not all(char in "0123456789abcdef" for char in part)
+    wenju, docx = convert.merge_targets(source)
+    assert wenju.parent == folder and wenju.name == "合稿.wenju"
+    assert docx.parent == folder and docx.name == "合稿.docx"
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="wenju-convert-") as directory:
         tmp = Path(directory)
@@ -873,6 +914,7 @@ def main():
         test_keep_fangsong_name(tmp)
         test_xlsx_image_and_merge(tmp)
         test_batch_merge_and_single_export(tmp)
+        test_output_locations(tmp)
     test_qt_switch()
     print("PASS: docx, xlsx, txt, md, paste, doc, wenju export, template brush, batch progress, qt switch")
 
