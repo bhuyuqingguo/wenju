@@ -39,6 +39,18 @@ LICENSE = {
 
 _INDEX = None
 
+# Names stored in a .wenju package stay as written. A docx export uses the
+# family Word actually selects. This alias is the shared contract.
+ALIASES = {
+    "仿宋_GB2312": "仿宋",
+}
+
+
+def resolve(name):
+    if not name:
+        return name
+    return ALIASES.get(str(name), name)
+
 
 def chain_for(name):
     if name in CHAINS:

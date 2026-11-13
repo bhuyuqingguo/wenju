@@ -12,6 +12,9 @@ from wenju_format import WenjuDoc, brush, from_docx, load, save, to_docx
 SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 OFFICE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+EMU_PER_PT = 12700
 _READERS = {}
 
 
@@ -456,6 +459,7 @@ def _read_xlsx(path):
         if sheet is None:
             continue
         blocks.append(_sheet_table(sheet, strings, fonts))
+        blocks.extend(_sheet_images(target, items))
     if not blocks:
         raise ConvertError("这个工作簿没有可转换的工作表：%s" % Path(path).name)
     return _document_from_blocks(blocks, Path(path).name)
@@ -509,11 +513,15 @@ def _xlsx_fonts(payload):
     for font in root.findall(_q(SS, "fonts") + "/" + _q(SS, "font")):
         name = font.find(_q(SS, "name"))
         size = font.find(_q(SS, "sz"))
-        fonts.append({
-            "bold": font.find(_q(SS, "b")) is not None,
-            "font": name.attrib.get("val") if name is not None else None,
-            "size": float(size.attrib["val"]) if size is not None and size.attrib.get("val") else None,
-        })
+        face = name.attrib.get("val") if name is not None else None
+        entry = {"bold": font.find(_q(SS, "b")) is not None}
+        if face and any("\u4e00" <= char <= "\u9fff" for char in face):
+            entry["eastAsia"] = face
+        elif face:
+            entry["ascii"] = face
+        if size is not None and size.attrib.get("val"):
+            entry["size_pt"] = float(size.attrib["val"])
+        fonts.append(entry)
     styles = []
     for xf in root.findall(_q(SS, "cellXfs") + "/" + _q(SS, "xf")):
         try:
@@ -545,13 +553,29 @@ def _sheet_table(payload, strings, fonts):
             next_col = c_index + 1
             grid[(r_index, c_index)] = _xlsx_runs(cell, strings, fonts)
             max_col = max(max_col, c_index)
-    if not grid:
-        return {"type": "table", "rows": [], "merges": _xlsx_merges(root)}
-    max_row = max(key[0] for key in grid)
+    merges = _xlsx_merges(root)
+    max_row = max((key[0] for key in grid), default=-1)
+    for merge in merges:
+        max_row = max(max_row, merge["row"] + merge["rowspan"] - 1)
+        max_col = max(max_col, merge["col"] + merge["colspan"] - 1)
+    if max_row < 0 or max_col < 0:
+        return {"type": "table", "rows": [], "merges": merges}
+    covered = set()
+    for merge in merges:
+        for r_offset in range(merge["rowspan"]):
+            for c_offset in range(merge["colspan"]):
+                if r_offset or c_offset:
+                    covered.add((merge["row"] + r_offset, merge["col"] + c_offset))
     rows = []
     for r_index in range(max_row + 1):
-        rows.append([{"runs": grid.get((r_index, c_index), [{"text": ""}])} for c_index in range(max_col + 1)])
-    return {"type": "table", "rows": rows, "merges": _xlsx_merges(root)}
+        row = []
+        for c_index in range(max_col + 1):
+            if (r_index, c_index) in covered:
+                row.append({"covered": True})
+            else:
+                row.append({"runs": grid.get((r_index, c_index), [{"text": ""}])})
+        rows.append(row)
+    return {"type": "table", "rows": rows, "merges": merges}
 
 
 def _col_index(ref):
@@ -630,11 +654,89 @@ def _xlsx_run(cell, strings, fonts):
         font = fonts[style]
         if font.get("bold"):
             run["bold"] = True
-        if font.get("font"):
-            run["font"] = font["font"]
-        if font.get("size"):
-            run["size"] = font["size"]
+        if font.get("eastAsia"):
+            run["eastAsia"] = font["eastAsia"]
+        if font.get("ascii"):
+            run["ascii"] = font["ascii"]
+        if font.get("size_pt"):
+            run["size_pt"] = font["size_pt"]
     return run
+
+
+def _sheet_images(sheet_path, items):
+    rel_xml = items.get(_rels_for(sheet_path))
+    if not rel_xml:
+        return []
+    images = []
+    for rel in ET.fromstring(rel_xml):
+        target = rel.attrib.get("Target")
+        kind = rel.attrib.get("Type") or ""
+        if not target or not kind.endswith("/drawing"):
+            continue
+        drawing_path = _resolve_part(sheet_path, target)
+        payload = items.get(drawing_path)
+        if not payload:
+            continue
+        drawing_rels = {}
+        rel_payload = items.get(_rels_for(drawing_path))
+        if rel_payload:
+            for link in ET.fromstring(rel_payload):
+                rid = link.attrib.get("Id")
+                media = link.attrib.get("Target")
+                if rid and media:
+                    drawing_rels[rid] = _resolve_part(drawing_path, media)
+        root = ET.fromstring(payload)
+        for anchor in list(root):
+            width, height = 100, 100
+            for extent in anchor.iter(_q(XDR, "ext")):
+                width = _points(extent.attrib.get("cx"))
+                height = _points(extent.attrib.get("cy"))
+                break
+            for blip in anchor.iter(_q(A_NS, "blip")):
+                rid = blip.attrib.get(_q(OFFICE_REL, "embed"))
+                media = drawing_rels.get(rid or "")
+                if not media or media not in items:
+                    continue
+                images.append({
+                    "type": "image",
+                    "asset": media.split("/")[-1] or "image.bin",
+                    "w": width,
+                    "h": height,
+                    "_bytes": items[media],
+                })
+    return images
+
+
+def _rels_for(part):
+    folder, _, name = part.replace("\\", "/").rpartition("/")
+    return "%s/_rels/%s.rels" % (folder, name)
+
+
+def _resolve_part(base, target):
+    target = (target or "").replace("\\", "/")
+    if target.startswith("/"):
+        return target.lstrip("/")
+    folder = base.replace("\\", "/").rsplit("/", 1)[0]
+    parts = []
+    for piece in (folder + "/" + target).split("/"):
+        if piece == "..":
+            if parts:
+                parts.pop()
+        elif piece and piece != ".":
+            parts.append(piece)
+    return "/".join(parts)
+
+
+def _points(value):
+    try:
+        number = float(value) / EMU_PER_PT
+    except (TypeError, ValueError):
+        return 100
+    if number <= 0:
+        return 100
+    if number == int(number):
+        return int(number)
+    return round(number, 2)
 
 
 def _unique_asset(assets, name, payload):

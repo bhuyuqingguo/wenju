@@ -34,7 +34,9 @@ def text_of(doc):
         elif block["type"] == "table":
             for row in block["rows"]:
                 for cell in row:
-                    found.append("".join(run["text"] for run in cell["runs"]))
+                    if not isinstance(cell, dict) or cell.get("covered") is True:
+                        continue
+                    found.append("".join(run.get("text", "") for run in cell.get("runs") or []))
     return found
 
 
@@ -108,16 +110,16 @@ def test_docx_roundtrip(tmp):
     assert doc.blocks[0]["level"] == 1
     assert text_of(doc)[0] == "题目"
     run = doc.blocks[1]["runs"][0]
-    assert run["text"] == "正文" and run["bold"] is True and run["font"] == "楷体" and run["size"] == 12
+    assert run["text"] == "正文" and run["bold"] is True and run["eastAsia"] == "楷体" and run["size_pt"] == 12
     assert doc.blocks[2]["rows"][0][0]["runs"][0]["text"] == "合"
     assert doc.blocks[2]["merges"] == [{"row": 0, "col": 0, "rowspan": 1, "colspan": 2}]
     assert doc.blocks[2]["rows"][1][1]["runs"][0]["text"] == "乙"
-    assert doc.blocks[5]["w"] == 96 and doc.blocks[5]["h"] == 96
+    assert doc.blocks[5]["w"] == 72 and doc.blocks[5]["h"] == 72
     assert doc.assets["pixel.png"] == PNG
     saved = tmp / "sample.wenju"
     save(doc, str(saved))
     with zipfile.ZipFile(saved) as archive:
-        assert json.loads(archive.read("document.json"))[0]["type"] == "heading"
+        assert json.loads(archive.read("document.json"))["blocks"][0]["type"] == "heading"
         assert "assets/pixel.png" in archive.namelist()
         assert "assets/" in archive.namelist()
     again = load(str(saved))
@@ -135,14 +137,14 @@ def test_template_brush(tmp):
     source = tmp / "brush.docx"
     write_docx(source)
     kept = convert.convert_path(str(source), "preserve")
-    assert kept.blocks[1]["runs"][0]["font"] == "楷体"
+    assert kept.blocks[1]["runs"][0]["eastAsia"] == "楷体"
     brushed = convert.convert_path(str(source), "template", TEMPLATE)
     heading = brushed.blocks[0]["runs"][0]
     body = brushed.blocks[1]["runs"][0]
-    assert heading["font"] == "黑体" and heading["bold"] is True and heading["size"] == 16
-    assert body["font"] == "仿宋_GB2312" and body["size"] == 16 and body["bold"] is True
+    assert heading["eastAsia"] == "黑体" and heading["bold"] is True and heading["size_pt"] == 16
+    assert body["eastAsia"] == "仿宋_GB2312" and body["size_pt"] == 16 and body["bold"] is True
     plain = convert.convert_text("一段正文", "template", TEMPLATE)
-    assert plain.blocks[0]["runs"][0]["font"] == "仿宋_GB2312"
+    assert plain.blocks[0]["runs"][0]["eastAsia"] == "仿宋_GB2312"
     assert "bold" not in plain.blocks[0]["runs"][0]
     cleared = dict(TEMPLATE)
     cleared["正文"] = dict(TEMPLATE["正文"], 保留加粗斜体下划线=False)
@@ -151,7 +153,7 @@ def test_template_brush(tmp):
     exported = tmp / "brushed.docx"
     to_docx(kept, str(exported), TEMPLATE)
     xml = zipfile.ZipFile(exported).read("word/document.xml").decode("utf-8")
-    assert "仿宋_GB2312" in xml
+    assert "仿宋" in xml and "仿宋_GB2312" not in xml
     try:
         convert.convert_text("正文", "template", None)
     except convert.ConvertError as exc:
@@ -194,7 +196,7 @@ def test_xlsx(tmp):
     table = doc.blocks[1]
     assert table["rows"][0][0]["runs"][0]["text"] == "姓名"
     assert table["rows"][0][0]["runs"][0]["bold"] is True
-    assert table["rows"][0][0]["runs"][0]["font"] == "黑体"
+    assert table["rows"][0][0]["runs"][0]["eastAsia"] == "黑体"
     assert table["rows"][1][0]["runs"][0]["text"] == "甲"
     assert table["rows"][1][1]["runs"][0]["text"] == "10"
 
@@ -338,7 +340,7 @@ def test_kept_content(tmp):
     assert runs[0]["text"] == "粗" and runs[0].get("bold") is True
     assert runs[1]["text"] == "常" and "bold" not in runs[1]
     assert runs[2]["text"] == "斜" and runs[2].get("italic") is True
-    assert runs[2]["font"] == "楷体" and runs[2]["size"] == 16
+    assert runs[2]["eastAsia"] == "楷体" and runs[2]["size_pt"] == 16
 
     styles = (
         '<?xml version="1.0" encoding="UTF-8"?>'
@@ -354,8 +356,10 @@ def test_kept_content(tmp):
     ), styles)
     styled_doc = from_docx(str(styled))
     heading = styled_doc.blocks[0]["runs"][0]
-    assert heading["bold"] is True and heading["font"] == "黑体"
-    assert heading["size"] == 16 and heading["color"] == "FF0000"
+    named = styled_doc.styles["heading 1"]
+    assert heading["text"] == "题目" and "bold" not in heading
+    assert named["bold"] is True and named["eastAsia"] == "黑体"
+    assert named["size_pt"] == 16 and named["color"] == "FF0000"
     assert "bold" not in styled_doc.blocks[1]["runs"][0]
 
     wrapped = tmp / "sdt.docx"
@@ -388,7 +392,7 @@ def test_kept_content(tmp):
     fonts = tmp / "fonts.docx"
     pack_docx(fonts, '<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="21"/></w:rPr><w:t>A中</w:t></w:r></w:p>')
     font_run = from_docx(str(fonts)).blocks[0]["runs"][0]
-    assert font_run["font"] == "宋体" and font_run["ascii"] == "Times New Roman"
+    assert font_run["eastAsia"] == "宋体" and font_run["ascii"] == "Times New Roman" and font_run["hAnsi"] == "Times New Roman"
     exported = tmp / "fonts-out.docx"
     to_docx(from_docx(str(fonts)), str(exported))
     root = ET.fromstring(zipfile.ZipFile(exported).read("word/document.xml"))
@@ -498,7 +502,7 @@ def test_edges(tmp):
     assert blocks[0]["runs"][0]["text"] == "粗" and blocks[0]["runs"][0]["bold"] is True
     assert blocks[1]["type"] == "pagebreak"
     later = blocks[2]["runs"][0]
-    assert later["text"] == "体" and later["bold"] is True and later["font"] == "楷体" and later["size"] == 16
+    assert later["text"] == "体" and later["bold"] is True and later["eastAsia"] == "楷体" and later["size_pt"] == 16
 
     link = tmp / "cell-link.docx"
     pack_docx(link, (
@@ -611,6 +615,77 @@ def test_qt_switch():
     qt_compat.set_color_scheme(BareApp(), True)
 
 
+def test_contract(tmp):
+    styles = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<w:styles xmlns:w="%s"><w:style w:styleId="Heading1"><w:name w:val="heading 1"/>'
+        '<w:rPr><w:b/><w:rFonts w:eastAsia="黑体" w:ascii="Times New Roman" w:hAnsi="Calibri"/>'
+        '<w:sz w:val="32"/></w:rPr></w:style></w:styles>'
+    ) % W
+    body = (
+        '<w:p><w:pPr><w:pStyle w:val="Heading1"/><w:jc w:val="center"/>'
+        '<w:spacing w:line="560" w:lineRule="exact"/>'
+        '<w:ind w:firstLineChars="200"/></w:pPr>'
+        '<w:r><w:rPr><w:b/><w:i/><w:u w:val="single"/><w:color w:val="FF0000"/>'
+        '<w:rFonts w:eastAsia="仿宋_GB2312" w:ascii="Times New Roman" w:hAnsi="Calibri"/>'
+        '<w:sz w:val="21"/></w:rPr><w:t>标题甲</w:t></w:r></w:p>'
+        '<w:p><w:pPr><w:jc w:val="both"/><w:spacing w:line="360" w:lineRule="auto"/></w:pPr>'
+        '<w:r><w:rPr><w:i/><w:rFonts w:eastAsia="楷体" w:ascii="Times New Roman" w:hAnsi="Calibri"/>'
+        '<w:sz w:val="24"/></w:rPr><w:t>正文乙</w:t></w:r></w:p>'
+    )
+    source = tmp / "contract.docx"
+    pack_docx(source, body, styles)
+    doc = convert.convert_path(str(source), "preserve")
+    run = doc.blocks[0]["runs"][0]
+    assert run["eastAsia"] == "仿宋_GB2312" and run["ascii"] == "Times New Roman"
+    assert run["hAnsi"] == "Calibri" and run["size_pt"] == 10.5
+    assert "font" not in run and "size" not in run
+    assert doc.blocks[0]["align"] == "center"
+    assert doc.blocks[0]["line"] == {"rule": "exact", "pt": 28}
+    assert doc.blocks[0]["indent"]["first_chars"] == 2
+    assert doc.blocks[1]["align"] == "both"
+    assert doc.blocks[1]["line"] == {"rule": "auto", "multiple": 1.5}
+    assert doc.styles["heading 1"]["eastAsia"] == "黑体"
+    assert doc.styles["heading 1"]["hAnsi"] == "Calibri"
+    assert doc.styles["heading 1"]["size_pt"] == 16
+    covered = WenjuDoc([{
+        "type": "table",
+        "rows": [
+            [{"runs": [{"text": "合", "eastAsia": "仿宋_GB2312", "size_pt": 10.5}]}, {"covered": True}],
+            [{"covered": True}, {"runs": [{"text": "下"}]}],
+        ],
+        "merges": [{"row": 0, "col": 0, "rowspan": 2, "colspan": 2}],
+    }], {}, {}, {"format": "wenju", "version": 1})
+    assert validate(covered) == []
+    save(covered, str(tmp / "covered.wenju"))
+    shaped = WenjuDoc([
+        {"type": "heading", "level": 1, "align": "居中",
+         "line": {"rule": "exact", "pt": 28},
+         "indent": {"first_chars": 2},
+         "runs": [{"text": "标题甲", "eastAsia": "仿宋_GB2312", "ascii": "Times New Roman",
+                   "hAnsi": "Calibri", "size_pt": 10.5}]},
+        {"type": "paragraph", "align": "两端对齐", "runs": [{"text": "散"}]},
+        {"type": "paragraph", "align": "分散对齐", "runs": [{"text": "开"}]},
+    ])
+    out = tmp / "shaped.docx"
+    to_docx(shaped, str(out))
+    root = ET.fromstring(zipfile.ZipFile(out).read("word/document.xml"))
+    fonts = root.find(".//{%s}rFonts" % W)
+    assert fonts.attrib["{%s}eastAsia" % W] == "仿宋"
+    assert fonts.attrib["{%s}ascii" % W] == "Times New Roman"
+    assert fonts.attrib["{%s}hAnsi" % W] == "Calibri"
+    assert [node.attrib.get("{%s}val" % W) for node in root.iter("{%s}jc" % W)] == ["center", "both", "distribute"]
+    rules = dict(TEMPLATE)
+    rules["字体"] = dict(TEMPLATE["字体"], 西文="Times New Roman")
+    brushed = convert.convert_path(str(source), "template", rules)
+    kept = brushed.blocks[1]["runs"][0]
+    assert kept["eastAsia"] == "仿宋_GB2312" and kept["ascii"] == "Times New Roman"
+    assert kept["hAnsi"] == "Calibri" and kept["italic"] is True
+    wenju = tmp / "as-template.wenju"
+    save(doc, str(wenju))
+    to_docx(shaped, str(tmp / "from-wenju.docx"), str(wenju))
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="wenju-convert-") as directory:
         tmp = Path(directory)
@@ -623,6 +698,7 @@ def main():
         test_vertical_merge(tmp)
         test_kept_content(tmp)
         test_edges(tmp)
+        test_contract(tmp)
     test_qt_switch()
     print("PASS: docx, xlsx, txt, md, paste, doc, wenju export, template brush, batch progress, qt switch")
 

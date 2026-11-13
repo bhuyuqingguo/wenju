@@ -14,8 +14,15 @@ PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
 XML = "http://www.w3.org/XML/1998/namespace"
-EMU_PER_PX = 914400 / 96
+EMU_PER_PT = 12700
 _CN = "一二三四五六七八九"
+_ALIGNS = {
+    "left": "left", "center": "center", "right": "right", "both": "both",
+    "distribute": "distribute", "justify": "both",
+    "左": "left", "中": "center", "右": "right",
+    "左对齐": "left", "居中": "center", "右对齐": "right",
+    "两端对齐": "both", "分散对齐": "distribute",
+}
 _BLOCK_TYPES = {"heading", "paragraph", "table", "image", "pagebreak", "toc"}
 _SIZE_NAMES = {
     "初号": 42, "小初": 36, "一号": 26, "小一": 24, "二号": 22, "小二": 18,
@@ -26,6 +33,13 @@ _SIZE_NAMES = {
 
 def _q(ns, tag):
     return "{%s}%s" % (ns, tag)
+
+
+def _num(value):
+    number = float(value)
+    if number == int(number):
+        return int(number)
+    return round(number, 2)
 
 
 def _size_pt(value, default=12):
@@ -98,6 +112,8 @@ def validate(doc):
                         if not isinstance(cell, dict):
                             errors.append("%s 单元格 %d,%d 无法识别" % (where, r_index + 1, c_index + 1))
                             continue
+                        if cell.get("covered") is True:
+                            continue
                         errors.extend(_runs_errors(cell.get("runs"), "%s 单元格 %d,%d" % (where, r_index + 1, c_index + 1)))
             merges = block.get("merges", [])
             if not isinstance(merges, list):
@@ -133,7 +149,7 @@ def save(doc, path):
         os.makedirs(parent, exist_ok=True)
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", _dumps(doc.manifest))
-        archive.writestr("document.json", _dumps(doc.blocks))
+        archive.writestr("document.json", _dumps({"blocks": doc.blocks}))
         archive.writestr("styles.json", _dumps(doc.styles))
         archive.writestr("assets/", "")
         for name, payload in doc.assets.items():
@@ -157,7 +173,12 @@ def load(path):
         for name in names:
             if name.startswith("assets/") and not name.endswith("/"):
                 assets[name.split("/")[-1]] = archive.read(name)
-    blocks = document if isinstance(document, list) else document.get("blocks") if isinstance(document, dict) else None
+    if isinstance(document, dict):
+        blocks = document.get("blocks")
+    elif isinstance(document, list):
+        blocks = document
+    else:
+        blocks = None
     doc = WenjuDoc(blocks, styles if isinstance(styles, dict) else {}, assets, manifest if isinstance(manifest, dict) else {})
     errors = validate(doc)
     if errors:
@@ -175,15 +196,19 @@ def from_docx(path):
     if "word/document.xml" not in items:
         raise ValueError("这个文件不是可读的 docx：缺少 word/document.xml")
     rels = _relationships(items.get("word/_rels/document.xml.rels", b""))
-    styles = _style_map(items.get("word/styles.xml", b""))
+    styles, by_id = _style_map(items.get("word/styles.xml", b""))
     root = ET.fromstring(items["word/document.xml"])
     body = root.find(_q(W, "body"))
     blocks = []
     assets = {}
     if body is not None:
         for child in list(body):
-            blocks.extend(_block_from_body(child, rels, items, styles, assets))
-    manifest = {"format": "wenju", "version": 1, "source": os.path.basename(path)}
+            blocks.extend(_block_from_body(child, rels, items, by_id, assets))
+    manifest = {
+        "format": "wenju",
+        "version": 1,
+        "source": {"kind": "docx", "name": os.path.basename(path)},
+    }
     return WenjuDoc(blocks, styles, assets, manifest)
 
 
@@ -200,13 +225,18 @@ def to_docx(doc, path, template=None):
 
 
 def brush(doc, template):
-    rules = _load_rules(template)
-    if not rules:
-        raise ValueError("按模板刷需要模板规则")
+    loaded = _load_template(template)
+    if loaded["kind"] == "styles":
+        if not loaded["styles"]:
+            raise ValueError("按模板刷需要模板规则")
+        _apply_styles(doc, loaded["styles"])
+        return doc
+    rules = loaded["rules"]
     fonts = rules.get("字体") or {}
     body = rules.get("正文") or {}
     heads = rules.get("标题") or {}
     keep_marks = body.get("保留加粗斜体下划线", True)
+    western = fonts.get("西文") or ""
     body_font = fonts.get("正文") or ""
     body_size = _size_pt(body.get("字号"), 16)
     body_bold = bool(body.get("加粗"))
@@ -220,16 +250,18 @@ def brush(doc, template):
             size = _size_pt(spec.get("字号"), body_size)
             bold = bool(spec.get("加粗"))
             for run in block.get("runs") or []:
-                _paint(run, font, size, bold, keep_marks)
+                _paint(run, font, size, bold, keep_marks, western)
         elif kind == "paragraph":
             block["style"] = "正文"
             for run in block.get("runs") or []:
-                _paint(run, body_font, body_size, body_bold, keep_marks)
+                _paint(run, body_font, body_size, body_bold, keep_marks, western)
         elif kind == "table":
             for row in block.get("rows") or []:
                 for cell in row:
+                    if not isinstance(cell, dict) or cell.get("covered") is True:
+                        continue
                     for run in cell.get("runs") or []:
-                        _paint(run, table_font, body_size, False, keep_marks)
+                        _paint(run, table_font, body_size, False, keep_marks, western)
     return doc
 
 
@@ -237,17 +269,92 @@ def _clone(doc):
     return WenjuDoc(deepcopy(doc.blocks), deepcopy(doc.styles), dict(doc.assets), deepcopy(doc.manifest))
 
 
-def _load_rules(template):
+def _is_rules(data):
+    if not isinstance(data, dict):
+        return False
+    if "字体" in data or "标题" in data:
+        return True
+    body = data.get("正文")
+    return isinstance(body, dict) and "字号" in body
+
+
+def _load_template(template):
     if template is None or template == "":
-        return None
-    if isinstance(template, dict):
-        return template
-    if isinstance(template, str) and os.path.isfile(template):
-        with open(template, "r", encoding="utf-8") as handle:
-            loaded = json.load(handle)
-        if isinstance(loaded, dict):
-            return loaded
-    raise ValueError("模板必须是规则对象或 JSON 文件")
+        raise ValueError("按模板刷需要模板规则")
+    if isinstance(template, WenjuDoc):
+        data = template.styles if isinstance(template.styles, dict) else {}
+    elif isinstance(template, dict):
+        data = template
+    elif isinstance(template, str) and os.path.isfile(template):
+        if template.lower().endswith(".wenju"):
+            data = load(template).styles
+        else:
+            with open(template, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        if not isinstance(data, dict):
+            raise ValueError("模板必须是规则对象、JSON 文件或文矩文件")
+    else:
+        raise ValueError("模板必须是规则对象、JSON 文件或文矩文件")
+    if _is_rules(data):
+        return {"kind": "rules", "rules": data}
+    return {"kind": "styles", "styles": data}
+
+
+def _apply_styles(doc, styles):
+    for block in doc.blocks:
+        if not isinstance(block, dict):
+            continue
+        style = _style_for_block(block, styles)
+        if not style:
+            continue
+        for key in ("align", "indent", "line"):
+            if style.get(key) not in (None, {}, ""):
+                block[key] = deepcopy(style[key])
+        for run in _block_runs(block):
+            if style.get("eastAsia"):
+                run["eastAsia"] = style["eastAsia"]
+                run.pop("font", None)
+            if style.get("ascii"):
+                run["ascii"] = style["ascii"]
+            if style.get("hAnsi"):
+                run["hAnsi"] = style["hAnsi"]
+            if style.get("size_pt") is not None:
+                run["size_pt"] = style["size_pt"]
+                run.pop("size", None)
+            if "bold" in style:
+                if style["bold"]:
+                    run["bold"] = True
+                else:
+                    run.pop("bold", None)
+
+
+def _style_for_block(block, styles):
+    name = block.get("style")
+    if isinstance(name, str) and isinstance(styles.get(name), dict):
+        return styles[name]
+    if block.get("type") == "heading":
+        level = block.get("level")
+        for key in ("标题%d" % level, "标题 %d" % level, "heading %d" % level, "Heading %d" % level, "Heading%d" % level):
+            if isinstance(styles.get(key), dict):
+                return styles[key]
+    for key in ("正文", "Normal"):
+        if isinstance(styles.get(key), dict):
+            return styles[key]
+    return {}
+
+
+def _block_runs(block):
+    kind = block.get("type")
+    if kind in ("heading", "paragraph"):
+        return [run for run in block.get("runs") or [] if isinstance(run, dict)]
+    if kind == "table":
+        found = []
+        for row in block.get("rows") or []:
+            for cell in row:
+                if isinstance(cell, dict) and cell.get("covered") is not True:
+                    found.extend(run for run in cell.get("runs") or [] if isinstance(run, dict))
+        return found
+    return []
 
 
 def _level_key(level):
@@ -256,14 +363,17 @@ def _level_key(level):
     return None
 
 
-def _paint(run, font, size, bold, keep_marks):
+def _paint(run, font, size, bold, keep_marks, western=""):
     if not isinstance(run, dict):
         return
+    run.pop("font", None)
+    run.pop("size", None)
     if font:
-        run["font"] = font
-        run.pop("ascii", None)
+        run["eastAsia"] = font
+    if western:
+        run["ascii"] = western
     if size:
-        run["size"] = float(size)
+        run["size_pt"] = float(size)
     if keep_marks:
         if bold:
             run["bold"] = True
@@ -294,9 +404,10 @@ def _relationships(payload):
 
 
 def _style_map(payload):
-    found = {}
+    public = {}
+    by_id = {}
     if not payload:
-        return found
+        return public, by_id
     root = ET.fromstring(payload)
     for style in root.findall(_q(W, "style")):
         sid = style.attrib.get(_q(W, "styleId"))
@@ -309,8 +420,19 @@ def _style_map(payload):
         props = style.find(_q(W, "rPr"))
         if props is not None:
             mark = _mark_from_rpr(props)
-        found[sid] = {"name": name, "level": level, "mark": mark}
-    return found
+        paragraph = style.find(_q(W, "pPr"))
+        geometry = _paragraph_geometry(paragraph)
+        stored = {}
+        for key in ("eastAsia", "ascii", "hAnsi", "size_pt", "bold", "italic", "underline", "color"):
+            if mark.get(key) not in (None, "", False):
+                stored[key] = mark[key]
+        for key in ("align", "line", "indent"):
+            if geometry.get(key) not in (None, {}, ""):
+                stored[key] = geometry[key]
+        by_id[sid] = {"name": name, "level": level}
+        if name:
+            public[name] = stored
+    return public, by_id
 
 
 def _heading_level(value):
@@ -345,12 +467,15 @@ def _is_toc(element):
     return False
 
 
-_RUN_KEYS = ("bold", "italic", "underline", "font", "ascii", "size", "color")
+_RUN_KEYS = ("bold", "italic", "underline", "eastAsia", "ascii", "hAnsi", "size_pt", "color")
 
 
 def _paragraph_blocks(paragraph, rels, items, styles, assets):
     level = _paragraph_level(paragraph, styles)
     base = _paragraph_base_mark(paragraph, styles)
+    props = paragraph.find(_q(W, "pPr"))
+    style_name = _style_name(props, styles)
+    geometry = _paragraph_geometry(props)
     runs = []
     blocks = []
     current = {"text": ""}
@@ -378,7 +503,7 @@ def _paragraph_blocks(paragraph, rels, items, styles, assets):
         nonlocal runs
         flush()
         if runs:
-            blocks.append(_text_block(level, runs))
+            blocks.append(_text_block(level, runs, style_name, geometry))
             runs = []
 
     def take_drawing(node):
@@ -442,7 +567,7 @@ def _paragraph_blocks(paragraph, rels, items, styles, assets):
         blocks.append({"type": "toc"})
         runs = [run for run in runs if run.get("text", "").strip()]
     if runs:
-        blocks.append(_text_block(level, runs))
+        blocks.append(_text_block(level, runs, style_name, geometry))
     return blocks
 
 
@@ -467,17 +592,61 @@ def _textbox_blocks(drawing, rels, items, styles, assets):
 
 
 def _paragraph_base_mark(paragraph, styles):
+    del styles
     props = paragraph.find(_q(W, "pPr"))
     if props is None:
         return {}
-    mark = {}
-    style = props.find(_q(W, "pStyle"))
-    if style is not None:
-        mark.update((styles.get(style.attrib.get(_q(W, "val"))) or {}).get("mark") or {})
     direct = props.find(_q(W, "rPr"))
-    if direct is not None:
-        mark = _merge_mark(mark, _mark_from_rpr(direct))
-    return mark
+    if direct is None:
+        return {}
+    return _mark_from_rpr(direct)
+
+
+def _style_name(props, styles):
+    if props is None:
+        return None
+    style = props.find(_q(W, "pStyle"))
+    if style is None:
+        return None
+    sid = style.attrib.get(_q(W, "val"))
+    mapped = styles.get(sid) or {}
+    return mapped.get("name") or sid
+
+
+def _paragraph_geometry(props):
+    if props is None:
+        return {}
+    found = {}
+    align = props.find(_q(W, "jc"))
+    if align is not None and align.attrib.get(_q(W, "val")):
+        value = align.attrib.get(_q(W, "val"))
+        found["align"] = "both" if value == "justify" else value
+    spacing = props.find(_q(W, "spacing"))
+    if spacing is not None and spacing.attrib.get(_q(W, "line")):
+        rule = spacing.attrib.get(_q(W, "lineRule")) or "auto"
+        line = int(spacing.attrib.get(_q(W, "line")))
+        if rule == "auto":
+            found["line"] = {"rule": "auto", "multiple": _num(line / 240.0)}
+        else:
+            found["line"] = {"rule": "exact" if rule == "exact" else "atLeast", "pt": _num(line / 20.0)}
+    indent_node = props.find(_q(W, "ind"))
+    if indent_node is not None:
+        indent = {}
+        for src, dst, scale in (
+            ("firstLineChars", "first_chars", 100),
+            ("leftChars", "left_chars", 100),
+            ("rightChars", "right_chars", 100),
+        ):
+            raw = indent_node.attrib.get(_q(W, src))
+            if raw and str(raw).lstrip("-").isdigit():
+                indent[dst] = _num(int(raw) / float(scale))
+        if not indent:
+            first = indent_node.attrib.get(_q(W, "firstLine"))
+            if first and str(first).isdigit():
+                indent["first_twips"] = int(first)
+        if indent:
+            found["indent"] = indent
+    return found
 
 
 def _merge_mark(base, direct):
@@ -493,10 +662,17 @@ def _mark_key(mark):
     return tuple(sorted((key, mark[key]) for key in _RUN_KEYS if key in mark))
 
 
-def _text_block(level, runs):
+def _text_block(level, runs, style_name=None, geometry=None):
     if level:
-        return {"type": "heading", "level": level, "runs": runs}
-    return {"type": "paragraph", "style": "Normal", "runs": runs}
+        block = {"type": "heading", "level": level, "runs": runs}
+        if style_name:
+            block["style"] = style_name
+    else:
+        block = {"type": "paragraph", "style": style_name or "Normal", "runs": runs}
+    for key in ("align", "line", "indent"):
+        if (geometry or {}).get(key) not in (None, {}, ""):
+            block[key] = geometry[key]
+    return block
 
 
 def _paragraph_level(paragraph, styles):
@@ -536,17 +712,13 @@ def _mark_from_rpr(props):
         mark["underline"] = underline.attrib.get(_q(W, "val"), "single") not in ("none", "false", "0")
     fonts = props.find(_q(W, "rFonts"))
     if fonts is not None:
-        east = fonts.attrib.get(_q(W, "eastAsia"))
-        latin = fonts.attrib.get(_q(W, "ascii")) or fonts.attrib.get(_q(W, "hAnsi"))
-        if east:
-            mark["font"] = east
-        elif latin:
-            mark["font"] = latin
-        if latin and latin != mark.get("font"):
-            mark["ascii"] = latin
+        for key in ("eastAsia", "ascii", "hAnsi"):
+            value = fonts.attrib.get(_q(W, key))
+            if value:
+                mark[key] = value
     size = props.find(_q(W, "sz"))
-    if size is not None and str(size.attrib.get(_q(W, "val"), "")).isdigit():
-        mark["size"] = int(size.attrib.get(_q(W, "val"))) / 2.0
+    if size is not None and str(size.attrib.get(_q(W, "val"), "")).lstrip("-").isdigit():
+        mark["size_pt"] = _num(int(size.attrib.get(_q(W, "val"))) / 2.0)
     color = props.find(_q(W, "color"))
     if color is not None:
         value = color.attrib.get(_q(W, "val"))
@@ -585,19 +757,22 @@ def _image_block(drawing, rels, items, assets):
         unique = "%s-%d%s" % (stem, number, suffix)
         number += 1
     assets[unique] = payload
-    width, height = 0, 0
+    width, height = 100, 100
     for node in drawing.iter(_q(WP, "extent")):
-        width = _emu_px(node.attrib.get("cx"))
-        height = _emu_px(node.attrib.get("cy"))
+        width = _emu_pt(node.attrib.get("cx"))
+        height = _emu_pt(node.attrib.get("cy"))
         break
     return {"type": "image", "asset": unique, "w": width, "h": height}
 
 
-def _emu_px(value):
+def _emu_pt(value):
     try:
-        return int(round(int(value) / EMU_PER_PX))
+        number = _num(float(value) / EMU_PER_PT)
     except (TypeError, ValueError):
-        return 0
+        return 100
+    if number <= 0:
+        return 100
+    return number
 
 
 def _table_block(table, rels, items, styles, assets):
@@ -619,6 +794,12 @@ def _table_block(table, rels, items, styles, assets):
                 merge = props.find(_q(W, "vMerge"))
                 if merge is not None:
                     vertical = merge.attrib.get(_q(W, "val"), "continue")
+            if vertical not in (None, "restart"):
+                if col in open_merge:
+                    open_merge[col]["rowspan"] += 1
+                row.extend({"covered": True} for _extra in range(span))
+                col += span
+                continue
             runs, extras = _cell_runs(cell, rels, items, styles, assets)
             row.append({"runs": runs})
             trailing.extend(extras)
@@ -626,14 +807,11 @@ def _table_block(table, rels, items, styles, assets):
                 record = {"row": r_index, "col": col, "rowspan": 1, "colspan": span}
                 merges.append(record)
                 open_merge[col] = record
-            elif vertical is not None and col in open_merge:
-                open_merge[col]["rowspan"] += 1
-            elif vertical is None:
+            else:
                 open_merge.pop(col, None)
                 if span > 1:
                     merges.append({"row": r_index, "col": col, "rowspan": 1, "colspan": span})
-            for _extra in range(span - 1):
-                row.append({"runs": [{"text": ""}]})
+            row.extend({"covered": True} for _extra in range(span - 1))
             col += span
         rows.append(row)
     return {"type": "table", "rows": rows, "merges": merges}, trailing
@@ -699,7 +877,7 @@ def _write_docx(doc, path):
         margin.set(_q(W, key), value)
     document = ET.Element(_q(W, "document"))
     document.append(body)
-    styles = _styles_root()
+    styles = _styles_root(doc.styles)
     content_types = _content_types(media)
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("[Content_Types].xml", content_types)
@@ -717,6 +895,10 @@ def _write_paragraph(block):
     if block.get("type") == "heading":
         style = ET.SubElement(props, _q(W, "pStyle"))
         style.set(_q(W, "val"), "Heading%d" % int(block.get("level") or 1))
+    elif block.get("style") not in (None, "", "Normal"):
+        style = ET.SubElement(props, _q(W, "pStyle"))
+        style.set(_q(W, "val"), _style_sid(block.get("style")))
+    _write_geometry(props, block)
     for run in block.get("runs") or []:
         _write_run(paragraph, run)
     if not list(paragraph.findall(_q(W, "r"))):
@@ -745,7 +927,41 @@ def _write_run(paragraph, run):
             text.set(_q(XML, "space"), "preserve")
 
 
+def _write_geometry(props, block):
+    line = block.get("line") or {}
+    if line.get("rule") == "auto" and line.get("multiple"):
+        spacing = ET.SubElement(props, _q(W, "spacing"))
+        spacing.set(_q(W, "line"), str(int(round(float(line["multiple"]) * 240))))
+        spacing.set(_q(W, "lineRule"), "auto")
+    elif line.get("rule") in ("exact", "atLeast") and line.get("pt"):
+        spacing = ET.SubElement(props, _q(W, "spacing"))
+        spacing.set(_q(W, "line"), str(int(round(float(line["pt"]) * 20))))
+        spacing.set(_q(W, "lineRule"), "exact" if line["rule"] == "exact" else "atLeast")
+    indent = block.get("indent") or {}
+    if any(indent.get(key) not in (None, 0) for key in ("first_chars", "left_chars", "right_chars", "first_twips")):
+        node = ET.SubElement(props, _q(W, "ind"))
+        size = 16
+        for run in block.get("runs") or []:
+            if isinstance(run, dict) and run.get("size_pt"):
+                size = float(run["size_pt"])
+                break
+        for src, chars_attr, twip_attr in (
+            ("first_chars", "firstLineChars", "firstLine"),
+            ("left_chars", "leftChars", "left"),
+            ("right_chars", "rightChars", "right"),
+        ):
+            if indent.get(src):
+                node.set(_q(W, chars_attr), str(int(round(float(indent[src]) * 100))))
+                node.set(_q(W, twip_attr), str(int(round(float(indent[src]) * size * 20))))
+        if indent.get("first_twips") and "first_chars" not in indent:
+            node.set(_q(W, "firstLine"), str(int(indent["first_twips"])))
+    align = _ALIGNS.get(block.get("align") or "")
+    if align:
+        ET.SubElement(props, _q(W, "jc")).set(_q(W, "val"), align)
+
+
 def _write_rpr(run, source):
+    import fontfallback
     props = ET.Element(_q(W, "rPr"))
     if source.get("bold"):
         ET.SubElement(props, _q(W, "b"))
@@ -754,16 +970,21 @@ def _write_rpr(run, source):
     if source.get("underline"):
         underline = ET.SubElement(props, _q(W, "u"))
         underline.set(_q(W, "val"), "single")
-    east = source.get("font") or source.get("ascii")
-    latin = source.get("ascii") or source.get("font")
-    if east or latin:
+    east = fontfallback.resolve(source.get("eastAsia") or source.get("font"))
+    ascii_font = source.get("ascii")
+    hansi = source.get("hAnsi") or ascii_font
+    if east or ascii_font or hansi:
         fonts = ET.SubElement(props, _q(W, "rFonts"))
-        for key in ("ascii", "hAnsi", "cs"):
-            fonts.set(_q(W, key), latin)
-        fonts.set(_q(W, "eastAsia"), east)
-    if source.get("size"):
-        size = ET.SubElement(props, _q(W, "sz"))
-        size.set(_q(W, "val"), str(int(round(float(source["size"]) * 2))))
+        if ascii_font:
+            fonts.set(_q(W, "ascii"), ascii_font)
+        if hansi:
+            fonts.set(_q(W, "hAnsi"), hansi)
+        if east:
+            fonts.set(_q(W, "eastAsia"), east)
+    size = source.get("size_pt", source.get("size"))
+    if size:
+        written = ET.SubElement(props, _q(W, "sz"))
+        written.set(_q(W, "val"), str(int(round(float(size) * 2))))
     if source.get("color"):
         color = ET.SubElement(props, _q(W, "color"))
         color.set(_q(W, "val"), str(source["color"]))
@@ -849,8 +1070,8 @@ def _write_image(block, rid):
     drawing = ET.SubElement(run, _q(W, "drawing"))
     inline = ET.SubElement(drawing, _q(WP, "inline"))
     extent = ET.SubElement(inline, _q(WP, "extent"))
-    extent.set("cx", str(int(round(float(block.get("w") or 0) * EMU_PER_PX))))
-    extent.set("cy", str(int(round(float(block.get("h") or 0) * EMU_PER_PX))))
+    extent.set("cx", str(int(round(float(block.get("w") or 0) * EMU_PER_PT))))
+    extent.set("cy", str(int(round(float(block.get("h") or 0) * EMU_PER_PT))))
     graphic = ET.SubElement(inline, _q(A, "graphic"))
     data = ET.SubElement(graphic, _q(A, "graphicData"))
     data.set("uri", PIC)
@@ -861,18 +1082,57 @@ def _write_image(block, rid):
     return paragraph
 
 
-def _styles_root():
+def _style_sid(name):
+    text = str(name or "").strip()
+    level = _heading_level(text)
+    if level:
+        return "Heading%d" % level
+    if text in ("正文", "Normal"):
+        return "Normal"
+    cleaned = "".join(ch for ch in text if ch.isalnum()) or "wenju"
+    return cleaned[:24]
+
+
+def _styles_root(styles=None):
+    styles = styles or {}
     root = ET.Element(_q(W, "styles"))
+    written = set()
+    entries = []
     for level in range(1, 10):
+        spec = styles.get("heading %d" % level) or styles.get("Heading%d" % level) or {}
+        entries.append(("Heading%d" % level, "heading %d" % level, level, spec if isinstance(spec, dict) else {}))
+        written.add("heading %d" % level)
+        written.add("Heading%d" % level)
+    for name, spec in styles.items():
+        if name in written or not isinstance(spec, dict):
+            continue
+        entries.append((_style_sid(name), name, _heading_level(name), spec))
+    for sid, name, level, spec in entries:
         style = ET.SubElement(root, _q(W, "style"))
         style.set(_q(W, "type"), "paragraph")
-        style.set(_q(W, "styleId"), "Heading%d" % level)
-        name = ET.SubElement(style, _q(W, "name"))
-        name.set(_q(W, "val"), "heading %d" % level)
-        props = ET.SubElement(style, _q(W, "pPr"))
-        outline = ET.SubElement(props, _q(W, "outlineLvl"))
-        outline.set(_q(W, "val"), str(level - 1))
+        style.set(_q(W, "styleId"), sid)
+        label = ET.SubElement(style, _q(W, "name"))
+        label.set(_q(W, "val"), name)
+        if level:
+            props = ET.SubElement(style, _q(W, "pPr"))
+            outline = ET.SubElement(props, _q(W, "outlineLvl"))
+            outline.set(_q(W, "val"), str(level - 1))
+        if spec:
+            _write_style_mark(style, spec)
     return root
+
+
+def _write_style_mark(style, spec):
+    props = ET.SubElement(style, _q(W, "rPr"))
+    _write_rpr(props, spec)
+    # _write_rpr inserts an rPr inside the node it is given. Lift those children up.
+    nested = props.find(_q(W, "rPr"))
+    if nested is not None:
+        props.remove(nested)
+        for child in list(nested):
+            props.append(child)
+    if not list(props):
+        style.remove(props)
 
 
 def _content_types(media):
