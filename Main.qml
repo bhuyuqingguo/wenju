@@ -58,7 +58,10 @@ ApplicationWindow {
         function onReportReady(text){reportText.text=text;reportDialog.open();}
         function onRulesChanged(){win.syncPage();}
         function onErrorRaised(text){errorText.text=text;errorDialog.open();}
+        function onBatchFinished(text){doneText.text=text;doneDialog.open();}
     }
+    Dialog{id:doneDialog;anchors.centerIn:parent;width:560;title:"处理完成";modal:true;standardButtons:Dialog.Ok
+        Text{id:doneText;width:520;wrapMode:Text.Wrap;color:win.ink}}
     Dialog{id:errorDialog;anchors.centerIn:parent;width:560;title:"请检查设置";modal:true;standardButtons:Dialog.Ok
         Text{id:errorText;width:520;wrapMode:Text.Wrap;color:win.ink}}
     Dialog{id:saveDialog;anchors.centerIn:parent;width:480;title:"另存为个人模板";modal:true
@@ -197,7 +200,7 @@ ApplicationWindow {
                     Column {anchors.centerIn:parent;spacing:12
                         Rectangle {anchors.horizontalCenter:parent.horizontalCenter;width:46;height:46;radius:12;color:appearance.colors.surface;Txt{anchors.centerIn:parent;text:"+";font.pixelSize:Math.round(30*appearance.scale);color:blue}}
                         Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"把 Word 文档拖到这里";font.pixelSize:Math.round(19*appearance.scale);font.weight:Font.DemiBold}
-                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"DOCX / DOC / WPS / RTF · 可批量添加 · 原文件保持不变";color:muted;font.pixelSize:Math.round(12*appearance.scale)}
+                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"DOCX / DOC / WPS / RTF / WENJU · 可批量添加 · 原文件保持不变";color:muted;font.pixelSize:Math.round(12*appearance.scale)}
                         Action {anchors.horizontalCenter:parent.horizontalCenter;text:"选择文档";primary:true;onClicked:bridge.choose()}
                     }
                     DropArea {anchors.fill:parent;onDropped:function(drop){if(drop.hasUrls)bridge.dropFiles(drop.urls);}}
@@ -222,24 +225,44 @@ ApplicationWindow {
                                 Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"准备好你的第一份文档";color:appearance.palette["#8795a5"]}
                                 Txt {text:"也可以点击右上角「体验样例」，看看整理效果。";color:appearance.palette["#a0aab7"];font.pixelSize:Math.round(12*appearance.scale)}
                             }
-                            ListView {anchors.fill:parent;clip:true;spacing:8;model:bridge.files
-                                delegate:Rectangle {required property var modelData;required property int index;width:ListView.view.width;height:64;radius:8;color:appearance.palette["#f7f9fc"]
-                                    RowLayout {anchors.fill:parent;anchors.margins:12;spacing:12
-                                        Rectangle{width:32;height:36;radius:5;color:appearance.palette["#e3edf6"];Txt{anchors.centerIn:parent;text:"W";color:blue;font.weight:Font.Bold}}
-                                        ColumnLayout{Layout.fillWidth:true;spacing:4;Txt{text:modelData.name;Layout.fillWidth:true;elide:Text.ElideMiddle;font.pixelSize:Math.round(13*appearance.scale)}Txt{text:modelData.state;color:modelData.output?appearance.palette["#35806c"]:muted;font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}}
+                            ListView {id:fileList;anchors.fill:parent;clip:true;spacing:8;model:bridge.files
+                                delegate:Item {id:fileRow;required property var modelData;required property int index;width:fileList.width;height:88;z:dragArea.drag.active?2:0
+                                    Rectangle {id:card;width:fileRow.width;height:fileRow.height;radius:8;color:appearance.palette["#f7f9fc"]
+                                        RowLayout {anchors.fill:parent;anchors.margins:12;spacing:12
+                                            Rectangle{width:28;height:48;radius:6;color:appearance.palette["#e3edf6"]
+                                                Txt{anchors.centerIn:parent;text:"↕";color:blue;font.pixelSize:Math.round(16*appearance.scale)}
+                                                MouseArea{id:dragArea;anchors.fill:parent;enabled:!bridge.busy;cursorShape:Qt.SizeVerCursor;drag.target:card;drag.axis:Drag.YAxis;drag.threshold:6
+                                                    property int origin:0
+                                                    onPressed:origin=index
+                                                    onReleased:{
+                                                        var shift=Math.round(card.y/(fileRow.height+fileList.spacing))
+                                                        var dest=Math.max(0,Math.min(fileList.count-1,origin+shift))
+                                                        card.y=0
+                                                        if(dest!==origin)bridge.reorder(origin,dest)
+                                                    }
+                                                }
+                                            }
+                                            ColumnLayout{Layout.fillWidth:true;spacing:4
+                                                Txt{text:modelData.name;Layout.fillWidth:true;elide:Text.ElideMiddle;font.pixelSize:Math.round(13*appearance.scale)}
+                                                Txt{text:modelData.state;color:modelData.output?appearance.palette["#35806c"]:muted;font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
+                                                ProgressPanel{Layout.fillWidth:true;percent:modelData.percent?modelData.percent:0}
+                                            }
+                                        }
+                                        MouseArea{anchors.fill:parent;anchors.leftMargin:40;anchors.rightMargin:95;onClicked:bridge.openFile(index)}
+                                        Action {anchors.right:parent.right;anchors.rightMargin:10;anchors.verticalCenter:parent.verticalCenter;text:"查看报告";implicitWidth:88;implicitHeight:32;visible:!!modelData.output||!!modelData.error;onClicked:bridge.showReport(index)}
                                     }
-                                    MouseArea{anchors.fill:parent;anchors.rightMargin:95;onClicked:bridge.openFile(index)}
-                                    Action {anchors.right:parent.right;anchors.rightMargin:10;anchors.verticalCenter:parent.verticalCenter;text:"查看报告";implicitWidth:88;implicitHeight:32;visible:!!modelData.output||!!modelData.error;onClicked:bridge.showReport(index)}
                                 }
                             }
                         }
                     }
                 }
+                ProgressPanel{Layout.fillWidth:true;visible:bridge.overall>0;label:"总进度";percent:bridge.overall}
                 RowLayout {Layout.fillWidth:true
                     Action {text:"打开输出文件夹";onClicked:bridge.openOutput()}
                     Action {text:"按路径添加";implicitWidth:110;onClicked:pathDialog.open()}
                     Item{Layout.fillWidth:true}
                     Action {visible:bridge.busy;text:"停止后续任务";onClicked:bridge.cancel()}
+                    Action {text:"合稿导出";implicitWidth:110;enabled:!bridge.busy;onClicked:bridge.mergeExport()}
                     Action {text:bridge.busy?"正在整理…":"开始整理  →";primary:true;implicitWidth:166;enabled:!bridge.busy;onClicked:{win.contentItem.forceActiveFocus();bridge.start(win.settings());}}
                 }
             }

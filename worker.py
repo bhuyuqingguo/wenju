@@ -6,7 +6,23 @@ import docx_fmt
 from templates import apply_template
 from preset_store import normalize
 
+def _progress(job, payload):
+    path = job.get('progress')
+    if path:
+        Path(path).write_text(json.dumps(payload, ensure_ascii=False), 'utf-8')
+
 def execute(job):
+    if job.get('action')=='merge':
+        import compose
+        indexes = job.get('indexes') or list(range(len(job['sources'])))
+        def progress(percents, overall):
+            rows = {}
+            for i, pct in enumerate(percents):
+                if i < len(indexes):
+                    rows[str(indexes[i])] = pct
+            _progress(job, {'rows': rows, 'overall': overall})
+        merged = compose.merge_export(job['sources'], job['wenju'], job['docx'], job.get('template'), progress)
+        return {'ok': True, 'output': merged['docx'], 'wenju': merged['wenju'], 'report': ''}
     if job.get('action')=='infer':
         import infer
         source=job['source']
@@ -42,7 +58,9 @@ def execute(job):
         rules['页码'].update({'左侧字符':s['prefix'],'右侧字符':s['suffix'],
             '字体':s['font'],'中文字体':s['font'],'字号':float(s['size']),
             '字间距':float(s['spacing']),'位置':s['alignment'],'起始位置':s['start']})
-    output, report=docx_fmt.process_file(job['source'],rules)
+    def tick(pct):
+        _progress(job, {'percent': pct})
+    output, report=docx_fmt.process_file(job['source'], rules, tick)
     if not output:raise ValueError(report or '文档处理失败')
     return {'ok':True,'output':output,'report':report}
 

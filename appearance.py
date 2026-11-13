@@ -1,8 +1,7 @@
 """UI-only preferences; independent from document formatting and templates."""
 from pathlib import Path
 import json
-from PySide6.QtCore import QObject, Property, Signal, Slot, Qt
-from PySide6.QtGui import QPalette, QColor, QFont
+from qt_compat import QObject, Property, Signal, Slot, QPalette, QColor, QFont, set_color_scheme
 from preset_store import atomic_json
 
 THEMES = [
@@ -74,7 +73,7 @@ class Appearance(QObject):
         for role,value in [(QPalette.Window,c['bg']),(QPalette.WindowText,c['ink']),(QPalette.Base,c['field']),(QPalette.Text,c['ink']),(QPalette.Button,c['surface']),(QPalette.ButtonText,c['ink']),(QPalette.Highlight,c['accent']),(QPalette.HighlightedText,c['onAccent']),(QPalette.ToolTipBase,c['surface']),(QPalette.ToolTipText,c['ink'])]:p.setColor(role,QColor(value))
         self.app.setPalette(p)
         f=QFont(self.fontFamily);f.setPixelSize(self.fontSize);self.app.setFont(f)
-        self.app.styleHints().setColorScheme(Qt.ColorScheme.Dark if c['dark'] else Qt.ColorScheme.Light)
+        set_color_scheme(self.app, c['dark'])
     @Slot(str,str,int)
     def setPreferences(self,theme,font,size):
         if theme not in [t['id'] for t in THEMES] or size not in (12,14,16,18) or not font.strip():return
