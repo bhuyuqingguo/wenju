@@ -69,6 +69,60 @@ def main():
             ],
         }], styles={}, assets={})
         assert any("重叠" in item for item in wf.validate(overlap))
+        hidden = wf.WenjuDoc(blocks=[{
+            "type": "table",
+            "rows": [
+                [{"runs": [{"text": "甲"}]}, {"runs": [{"text": "右"}]}],
+                [{"covered": True, "runs": [{"text": "藏"}]}, {"runs": [{"text": "下"}]}],
+            ],
+            "merges": [{"row": 0, "col": 0, "rowspan": 2, "colspan": 1}],
+        }], styles={}, assets={})
+        assert wf.validate(hidden)
+        try:
+            wf.to_docx(hidden, tmp / "hidden.docx")
+            raise AssertionError("covered text was exported")
+        except ValueError:
+            pass
+        kept_font = wf.WenjuDoc(
+            blocks=[{"type": "paragraph", "runs": [{"text": "甲", "eastAsia": "仿宋_GB2312", "ascii": "仿宋_GB2312", "hAnsi": "仿宋_GB2312"}]}],
+            styles={"正文": {"eastAsia": "仿宋_GB2312"}},
+            assets={},
+        )
+        wf.to_docx(kept_font, tmp / "font.docx")
+        assert kept_font.blocks[0]["runs"][0]["eastAsia"] == "仿宋_GB2312"
+        assert kept_font.styles["正文"]["eastAsia"] == "仿宋_GB2312"
+        class Huge(bytes):
+            def __len__(self):
+                return wf.MAX_ASSET_BYTES + 1
+        oversized = wf.WenjuDoc(
+            blocks=[{"type": "paragraph", "runs": [{"text": "甲"}]}],
+            styles={},
+            assets={"a.bin": Huge(b"x")},
+        )
+        assert any("64MB" in item for item in wf.validate(oversized))
+        for member in ("assets/../evil.txt", "assets\\..\\..\\evil.txt", "../evil.txt", "/tmp/interrogate-pwned.txt"):
+            bad_zip = tmp / "bad-member.wenju"
+            with zipfile.ZipFile(bad_zip, "w") as archive:
+                archive.writestr("manifest.json", b'{"format":"wenju","version":1,"title":"t","source":{"kind":"new","name":""}}')
+                archive.writestr("document.json", b'{"blocks":[{"type":"paragraph","runs":[{"text":"a"}]}]}')
+                archive.writestr("styles.json", b"{}")
+                archive.writestr(member, b"PWNED")
+            try:
+                wf.load(bad_zip)
+                raise AssertionError("unsafe member loaded: %s" % member)
+            except ValueError as exc:
+                assert "不安全" in str(exc), exc
+        missing = tmp / "missing.wenju"
+        with zipfile.ZipFile(missing, "w") as archive:
+            archive.writestr("document.json", b'{"blocks":[]}')
+            archive.writestr("styles.json", b"{}")
+        try:
+            wf.load(missing)
+            raise AssertionError("package without manifest loaded")
+        except ValueError as exc:
+            assert "manifest.json" in str(exc)
+        unknown = wf.WenjuDoc(blocks=[{"type": "footnote"}], styles={}, assets={})
+        assert any("无法识别" in item for item in wf.validate(unknown))
         try:
             wf.save(bad, tmp / "bad.wenju")
             raise AssertionError("invalid document was saved")

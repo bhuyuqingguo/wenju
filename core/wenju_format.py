@@ -26,6 +26,7 @@ DCTERMS = "http://purl.org/dc/terms/"
 CP = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
 
 EMU_PER_PT = 12700
+MAX_ASSET_BYTES = 64 * 1024 * 1024
 BLOCK_TYPES = ("heading", "paragraph", "table", "image", "pagebreak", "toc")
 HEADING_NAME = re.compile(r"^(?:heading|标题)\s*(\d)$", re.I)
 ALIGNS = {
@@ -125,6 +126,11 @@ def validate(doc):
         doc_assets = {}
     else:
         doc_assets = doc.assets
+        for name, data in doc_assets.items():
+            if not isinstance(name, str) or _unsafe_asset_name(name):
+                errors.append("图片名不安全：%s" % name)
+            elif isinstance(data, (bytes, bytearray)) and len(data) > MAX_ASSET_BYTES:
+                errors.append("图片超过 64MB：%s" % name)
     for index, block in enumerate(doc.blocks):
         _check_block(block, index, doc_assets, errors)
     return errors
@@ -134,7 +140,13 @@ def load(path):
     path = str(path)
     try:
         with zipfile.ZipFile(path) as package:
-            names = set(package.namelist())
+            infos = package.infolist()
+            for info in infos:
+                _safe_zip_name(info.filename)
+                normalized = info.filename.replace("\\", "/")
+                if normalized.startswith("assets/") and not normalized.endswith("/") and info.file_size > MAX_ASSET_BYTES:
+                    raise ValueError("图片超过 64MB：%s" % info.filename)
+            names = {info.filename for info in infos}
             for required in ("manifest.json", "document.json", "styles.json"):
                 if required not in names:
                     raise ValueError("文矩包缺少 %s" % required)
@@ -144,7 +156,6 @@ def load(path):
             assets = {}
             for name in names:
                 if name.startswith("assets/") and not name.endswith("/"):
-                    _safe_zip_name(name)
                     assets[name.split("/", 1)[1]] = package.read(name)
     except ValueError:
         raise
@@ -335,7 +346,7 @@ def _check_block(block, index, assets, errors):
                     occupied.add(pos)
                     if dr or dc:
                         covered = rows[row + dr][col + dc]
-                        if not (isinstance(covered, dict) and covered.get("covered") is True):
+                        if not (isinstance(covered, dict) and covered.get("covered") is True) or _cell_text(covered):
                             errors.append("%s 的合并盖住了仍有内容的单元格" % where)
     elif kind == "image":
         asset = block.get("asset")
@@ -396,9 +407,26 @@ def _dump(obj):
     return (json.dumps(obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
 
 
+def _cell_text(cell):
+    if not isinstance(cell, dict):
+        return ""
+    parts = []
+    for run in cell.get("runs") or []:
+        if isinstance(run, dict) and run.get("text"):
+            parts.append(run["text"])
+    return "".join(parts)
+
+
+def _unsafe_asset_name(name):
+    normalized = str(name).replace("\\", "/")
+    parts = normalized.split("/")
+    return not normalized or normalized.startswith("/") or "/" in normalized or ".." in parts
+
+
 def _safe_zip_name(name):
-    parts = name.replace("\\", "/").split("/")
-    if not name or name.startswith("/") or ".." in parts:
+    normalized = name.replace("\\", "/")
+    parts = normalized.split("/")
+    if not name or normalized.startswith("/") or ".." in parts:
         raise ValueError("压缩包路径不安全：%s" % name)
     return name
 
