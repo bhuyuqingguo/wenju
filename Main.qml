@@ -226,21 +226,11 @@ ApplicationWindow {
                                 Txt {text:"也可以点击右上角「体验样例」，看看整理效果。";color:appearance.palette["#a0aab7"];font.pixelSize:Math.round(12*appearance.scale)}
                             }
                             ListView {id:fileList;anchors.fill:parent;clip:true;spacing:8;model:bridge.files
-                                delegate:Item {id:fileRow;required property var modelData;required property int index;width:fileList.width;height:88;z:dragArea.drag.active?2:0
+                                delegate:Item {id:fileRow;required property var modelData;required property int index;width:fileList.width;height:88;z:dragArea.pressed?2:0
                                     Rectangle {id:card;width:fileRow.width;height:fileRow.height;radius:8;color:appearance.palette["#f7f9fc"]
                                         RowLayout {anchors.fill:parent;anchors.margins:12;spacing:12
                                             Rectangle{width:28;height:48;radius:6;color:appearance.palette["#e3edf6"]
                                                 Txt{anchors.centerIn:parent;text:"↕";color:blue;font.pixelSize:Math.round(16*appearance.scale)}
-                                                MouseArea{id:dragArea;anchors.fill:parent;enabled:!bridge.busy;cursorShape:Qt.SizeVerCursor;drag.target:card;drag.axis:Drag.YAxis;drag.threshold:6
-                                                    property int origin:0
-                                                    onPressed:origin=index
-                                                    onReleased:{
-                                                        var shift=Math.round(card.y/(fileRow.height+fileList.spacing))
-                                                        var dest=Math.max(0,Math.min(fileList.count-1,origin+shift))
-                                                        card.y=0
-                                                        if(dest!==origin)bridge.reorder(origin,dest)
-                                                    }
-                                                }
                                             }
                                             ColumnLayout{Layout.fillWidth:true;spacing:4
                                                 Txt{text:modelData.name;Layout.fillWidth:true;elide:Text.ElideMiddle;font.pixelSize:Math.round(13*appearance.scale)}
@@ -248,8 +238,20 @@ ApplicationWindow {
                                                 ProgressPanel{Layout.fillWidth:true;percent:modelData.percent?modelData.percent:0}
                                             }
                                         }
-                                        MouseArea{anchors.fill:parent;anchors.leftMargin:40;anchors.rightMargin:95;onClicked:bridge.openFile(index)}
+                                        MouseArea{anchors.fill:parent;anchors.leftMargin:52;anchors.rightMargin:95;onClicked:bridge.openFile(index)}
                                         Action {anchors.right:parent.right;anchors.rightMargin:10;anchors.verticalCenter:parent.verticalCenter;text:"查看报告";implicitWidth:88;implicitHeight:32;visible:!!modelData.output||!!modelData.error;onClicked:bridge.showReport(index)}
+                                    }
+                                    MouseArea{id:dragArea;x:12;y:20;width:28;height:48;enabled:!bridge.busy;cursorShape:Qt.SizeVerCursor;preventStealing:true
+                                        property int origin:0
+                                        property real anchorY:0
+                                        onPressed:function(mouse){origin=index;anchorY=mapToItem(fileRow,mouse.x,mouse.y).y}
+                                        onPositionChanged:function(mouse){if(pressed)card.y=mapToItem(fileRow,mouse.x,mouse.y).y-anchorY}
+                                        onReleased:{
+                                            var shift=Math.round(card.y/(fileRow.height+fileList.spacing))
+                                            var dest=Math.max(0,Math.min(fileList.count-1,origin+shift))
+                                            card.y=0
+                                            if(dest!==origin)bridge.reorder(origin,dest)
+                                        }
                                     }
                                 }
                             }

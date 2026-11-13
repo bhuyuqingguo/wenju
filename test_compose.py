@@ -190,6 +190,14 @@ def main():
         assert reported["overall"] == 100
         assert reported["rows"] == {"2": 100, "0": 100, "1": 100}
 
+    many = []
+    for n in range(12):
+        many.append(document([heading(1, "一、第%d篇" % (n + 1))], "页眉%d" % n))
+    combined = merge(many)
+    combined_heads = [block for block in combined.blocks if block["type"] == "heading"]
+    assert [block["runs"][0]["text"] for block in combined_heads] == ["一、第%d篇" % (n + 1) for n in range(12)]
+    assert [section["header"] for section in combined.styles["sections"]] == ["页眉%d" % n for n in range(12)]
+
     broken = WenjuDoc([{"type": "heading", "level": 0, "runs": [{"text": "x"}]}], {}, {}, {"wenju": 1})
     assert validate(broken)
     try:
