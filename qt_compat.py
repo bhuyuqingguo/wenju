@@ -8,8 +8,9 @@ import importlib
 import importlib.util
 import os
 
+_forced_pyside2 = os.environ.get('WENJU_QT') == '5'
 QT = '6'
-if os.environ.get('WENJU_QT') == '5':
+if _forced_pyside2:
     QT = '5'
 else:
     try:
@@ -25,14 +26,19 @@ else:
         QT = '5'
 
 if QT == '5':
-    from PySide2.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt, QPoint, QPointF, QMimeData, QMetaObject
-    from PySide2.QtGui import QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont
-    from PySide2.QtQml import QQmlApplicationEngine
-    from PySide2.QtQuick import QQuickWindow
-    from PySide2.QtQuickControls2 import QQuickStyle
-    from PySide2.QtWidgets import QApplication, QFileDialog
-    from PySide2.QtTest import QTest
-    import shiboken2 as _shiboken
+    try:
+        from PySide2.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt, QPoint, QPointF, QMimeData, QMetaObject
+        from PySide2.QtGui import QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont
+        from PySide2.QtQml import QQmlApplicationEngine
+        from PySide2.QtQuick import QQuickWindow
+        from PySide2.QtQuickControls2 import QQuickStyle
+        from PySide2.QtWidgets import QApplication, QFileDialog
+        from PySide2.QtTest import QTest
+        import shiboken2 as _shiboken
+    except ImportError:
+        if _forced_pyside2:
+            raise
+        QT = ''
 
 
 def binding():
