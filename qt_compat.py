@@ -72,7 +72,7 @@ def delete_qobject(obj):
 
 
 def set_color_scheme(app, dark):
-    scheme = getattr(Qt, 'ColorScheme', None)
+    scheme = getattr(globals().get('Qt'), 'ColorScheme', None)
     hints = app.styleHints()
     if scheme is None or not hasattr(hints, 'setColorScheme'):
         return
