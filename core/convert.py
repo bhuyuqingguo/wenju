@@ -90,7 +90,7 @@ def run_batch(items, dest_dir, mode="preserve", template=None, on_progress=None)
             files[index]["output"] = str(target)
             files[index]["percent"] = 100
             files[index]["state"] = "成功"
-            files[index]["message"] = target.name
+            files[index]["message"] = "已写入"
             succeeded.append(target.name)
         except ConvertError as exc:
             files[index]["percent"] = 100
@@ -143,7 +143,7 @@ def run_export(items, dest_dir, template=None, on_progress=None):
             files[index]["docx"] = str(target)
             files[index]["percent"] = 100
             files[index]["state"] = "成功"
-            files[index]["message"] = target.name
+            files[index]["message"] = "已写入"
             succeeded.append(target.name)
         except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError) as exc:
             message = "无法读取 %s：%s" % (files[index]["name"], exc)

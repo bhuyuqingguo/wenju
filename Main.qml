@@ -299,10 +299,10 @@ ApplicationWindow {
             }
 
             ColumnLayout {
-                anchors.fill:parent;spacing:14;visible:page===5
+                anchors.fill:parent;spacing:10;visible:page===5
                 Rectangle {
-                    Layout.fillWidth:true;Layout.preferredHeight:132;radius:12;color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
-                    Column {anchors.centerIn:parent;spacing:8
+                    Layout.fillWidth:true;Layout.preferredHeight:Math.max(120, Math.round(100 * appearance.scale));radius:12;clip:true;color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
+                    Column {anchors.centerIn:parent;spacing:6
                         Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"把文件拖到这里，转成文矩格式";font.pixelSize:Math.round(18*appearance.scale);font.weight:Font.DemiBold}
                         Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"DOCX / XLSX / TXT / MD / DOC · 可一次拖入多份 · 原文件保持不变";color:muted;font.pixelSize:Math.round(12*appearance.scale)}
                         Action {anchors.horizontalCenter:parent.horizontalCenter;text:"选择文件";primary:true;enabled:!bridge.busy;onClicked:bridge.chooseConvert()}
@@ -314,19 +314,19 @@ ApplicationWindow {
                     Action {text:"按模板刷";primary:bridge.convertMode==="template";enabled:!bridge.busy;onClicked:bridge.setConvertMode("template")}
                     Txt {text:bridge.convertMode==="template"?"使用当前模板："+win.templateName:"保留文件里原来的字体和字号";color:muted;font.pixelSize:Math.round(12*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
                 }
-                Rectangle {Layout.fillWidth:true;Layout.preferredHeight:92;radius:10;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
+                Rectangle {Layout.fillWidth:true;Layout.preferredHeight:58;radius:10;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
                     TextArea {
-                        anchors.fill:parent;anchors.margins:10
+                        anchors.fill:parent;anchors.margins:8
                         placeholderText:"也可以把文字粘贴在这里，和文件一起转换"
                         selectByMouse:true;wrapMode:TextEdit.Wrap;color:win.ink
                         font.pixelSize:Math.round(13*appearance.scale)
                         onTextChanged:bridge.setConvertPaste(text)
                     }
                 }
-                Rectangle {Layout.fillWidth:true;Layout.fillHeight:true;radius:12;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
+                Rectangle {Layout.fillWidth:true;Layout.fillHeight:true;clip:true;radius:12;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
                     ProgressPanel {
                         objectName:"progressPanel"
-                        anchors.fill:parent;anchors.margins:16
+                        anchors.fill:parent;anchors.margins:12
                         files:bridge.convertFiles
                         overall:bridge.convertOverall
                         heading:"总进度"
