@@ -5,7 +5,7 @@ on:
   pull_request:
 
 jobs:
-  wenju:
+  unit:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -13,6 +13,8 @@ jobs:
         with:
           python-version: "3.8"
       - name: compile
-        run: python -m compileall -q core/wenju_format.py core/fontfallback.py app.py worker.py test_wenju_format.py
-      - name: unit
+        run: python -m compileall -q core/wenju_format.py core/fontfallback.py core/clipboard_import.py app.py worker.py test_wenju_format.py test_clipboard.py qt_compat.py
+      - name: wenju format
         run: python test_wenju_format.py
+      - name: clipboard
+        run: python -m unittest test_clipboard -v

@@ -8,15 +8,11 @@ faces are not redistributable; this module never ships those files.
 import os, sys, shutil, subprocess
 from pathlib import Path
 
-ALIASES = {
-    '仿宋_GB2312': '仿宋',
-}
-
-
 def resolve(name):
+    """Name stored in the docx. A missing face is substituted only when drawing."""
     if not name:
         return name
-    return ALIASES.get(str(name), name)
+    return str(name)
 
 
 # Each list is the order to try. The first entry is the preferred family.
