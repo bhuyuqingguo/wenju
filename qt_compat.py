@@ -72,7 +72,7 @@ def delete_qobject(obj):
 
 
 def set_color_scheme(app, dark):
-    scheme = getattr(Qt, 'ColorScheme', None)
+    scheme = getattr(globals().get('Qt'), 'ColorScheme', None)
     hints = app.styleHints()
     if scheme is None or not hasattr(hints, 'setColorScheme'):
         return
@@ -82,3 +82,10 @@ def set_color_scheme(app, dark):
 def quick_style():
     # Basic exists on Qt 6. Qt 5.15 uses Fusion; the QML controls paint their own backgrounds.
     return 'Fusion' if QT == '5' else 'Basic'
+
+
+def failed_to_start(qprocess):
+    nested = getattr(qprocess, "ProcessError", None)
+    if nested is not None and hasattr(nested, "FailedToStart"):
+        return nested.FailedToStart
+    return qprocess.FailedToStart

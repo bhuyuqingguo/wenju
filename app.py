@@ -7,6 +7,7 @@ from qt_compat import (
     QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont,
     QQmlApplicationEngine, QQuickWindow, QQuickStyle, QApplication, QFileDialog,
     QTest, QPoint, QPointF, exec_app, delete_qobject, set_color_scheme, quick_style,
+    failed_to_start,
 )
 from templates import CATALOG
 from preset_store import PresetStore, normalize, checked, sections, fields, SIZES, BASE
@@ -46,6 +47,7 @@ class Bridge(QObject):
     rulesChanged = Signal()
     libraryChanged = Signal()
     errorRaised = Signal(str)
+    convertFinished = Signal(str)
     importProgressChanged = Signal()
     clipboardStarted = Signal()
     clipboardFinished = Signal(str)
@@ -63,6 +65,22 @@ class Bridge(QObject):
         self.font_notice=fontfallback.guidance(self.store.rules)
         self.section='页面'
         self.task_kind='process'
+        self.convert_rows=[]
+        self.convert_overall=0
+        self.convert_mode='preserve'
+        self.convert_paste=''
+        self.convert_queue=[]
+        self.convert_total=0
+        self.convert_pos=0
+        self.convert_stopped=False
+        self._convert_closed=False
+        self._convert_succeeded=[]
+        self._convert_failed=[]
+        self._convert_skipped=[]
+        self._convert_title='转换完成'
+        self._convert_dir=None
+        self._progress_path=None
+        self._poll=None
         self.import_progress = 0
         self.clipboard_doc = None
         self.clipboard_docx = ''
@@ -75,6 +93,12 @@ class Bridge(QObject):
 
     @Property('QVariantList', notify=changed)
     def files(self): return self.rows
+    @Property('QVariantList', notify=changed)
+    def convertFiles(self): return self.convert_rows
+    @Property(int, notify=changed)
+    def convertOverall(self): return int(self.convert_overall)
+    @Property(str, notify=changed)
+    def convertMode(self): return self.convert_mode
     @Property(str, notify=changed)
     def status(self): return self.message
     @Property(bool, notify=changed)
@@ -355,6 +379,188 @@ class Bridge(QObject):
     def clear(self):
         if not self.running: self.rows = []; self.changed.emit()
 
+    def addConvert(self, paths):
+        if self.running: return
+        known={r.get('path') for r in self.convert_rows}
+        for raw in paths:
+            if not raw: continue
+            path=Path(raw)
+            if not path.is_file(): continue
+            resolved=str(path.resolve())
+            if resolved in known: continue
+            self.convert_rows.append({'name':path.name,'path':resolved,'percent':0,'state':'等待','message':'','output':''})
+            known.add(resolved)
+        self.changed.emit()
+
+    @Slot()
+    def chooseConvert(self):
+        paths,_=QFileDialog.getOpenFileNames(None,'选择要转换的文件','','文档 (*.docx *.doc *.xlsx *.xls *.txt *.md *.markdown *.wenju)')
+        self.addConvert(paths)
+
+    @Slot('QVariantList')
+    def dropConvert(self, urls):
+        self.addConvert([QUrl(u).toLocalFile() for u in urls])
+
+    @Slot()
+    def clearConvert(self):
+        if self.running: return
+        self.convert_rows=[]
+        self.convert_overall=0
+        self.changed.emit()
+
+    @Slot(str)
+    def setConvertMode(self, mode):
+        if mode in ('preserve','template'):
+            self.convert_mode=mode
+            self.changed.emit()
+
+    @Slot(str)
+    def setConvertPaste(self, text):
+        self.convert_paste=text or ''
+
+    @Slot()
+    def startConvert(self):
+        self._begin_batch('convert')
+
+    @Slot()
+    def exportConvert(self):
+        self._begin_batch('export')
+
+    def _begin_batch(self, action):
+        if self.running: return
+        items=[]
+        if action=='convert':
+            text=(self.convert_paste or '').strip()
+            if text: items.append({'name':'粘贴的内容','text':text})
+            for row in list(self.convert_rows):
+                if row.get('path'): items.append({'name':row['name'],'path':row['path']})
+            self._convert_title='转换完成'
+        else:
+            for row in list(self.convert_rows):
+                output=row.get('output') or ''
+                if output.lower().endswith('.wenju') and Path(output).is_file():
+                    items.append({'name':row['name'],'path':output})
+            self._convert_title='导出完成'
+        if not items:
+            self.message='请先拖入文件，或粘贴要转换的文字' if action=='convert' else '没有可导出的文矩文件'
+            self.changed.emit(); return
+        self.task_kind=action
+        self.running=True
+        self.convert_stopped=False
+        self._convert_closed=False
+        self.convert_queue=items
+        self.convert_total=len(items)
+        self.convert_pos=0
+        self.convert_overall=0
+        self._convert_succeeded=[]
+        self._convert_failed=[]
+        self._convert_skipped=[]
+        self.convert_rows=[]
+        for item in items:
+            self.convert_rows.append({'name':item['name'],'path':item.get('path') or '','percent':0,'state':'等待','message':'','output':item.get('path') if action=='export' else ''})
+        self._convert_dir=DATA/'输出'/uuid.uuid4().hex[:10]
+        self._convert_dir.mkdir(parents=True, exist_ok=True)
+        self.message='正在转换' if action=='convert' else '正在导出'
+        self.changed.emit()
+        self._launch_convert()
+
+    def _launch_convert(self):
+        if not self.convert_queue:
+            self._convert_finish(); return
+        item=self.convert_queue.pop(0)
+        row=self.convert_rows[self.convert_pos]
+        row['state']='正在转换' if self.task_kind=='convert' else '正在导出'
+        row['percent']=8
+        row['message']='正在读取'
+        self.convert_overall=int((self.convert_pos*100+8)/max(1,self.convert_total))
+        self.message=row['state']+' '+row['name']
+        progress=self._convert_dir/'progress.json'
+        if progress.exists(): progress.unlink()
+        template=copy.deepcopy(self.store.rules) if self.task_kind=='convert' and self.convert_mode=='template' else None
+        self.changed.emit()
+        self.launch(self._convert_dir,{
+            'action':self.task_kind,
+            'mode':self.convert_mode,
+            'template':template,
+            'items':[item],
+            'outdir':str(self._convert_dir),
+            'progress':str(progress),
+        })
+
+    def poll_progress(self):
+        path=self._progress_path
+        if path is None or not path.is_file() or self.task_kind not in ('convert','export'): return
+        if not (0<=self.convert_pos<len(self.convert_rows)): return
+        try: snap=json.loads(path.read_text('utf-8'))
+        except (OSError, ValueError): return
+        files=snap.get('files') or []
+        if not files: return
+        file=files[0]
+        row=self.convert_rows[self.convert_pos]
+        percent=int(file.get('percent') or 0)
+        if percent >= int(row.get('percent') or 0):
+            row['percent']=percent
+        if file.get('message'): row['message']=file['message']
+        if file.get('state') and file.get('state') != '等待':
+            row['state']=file['state']
+        self.convert_overall=int((self.convert_pos*100+row['percent'])/max(1,self.convert_total))
+        self.changed.emit()
+
+    def _apply_convert_result(self):
+        if getattr(self, '_convert_closed', False): return
+        if self._poll: self._poll.stop()
+        row=self.convert_rows[self.convert_pos] if 0<=self.convert_pos<len(self.convert_rows) else None
+        try:
+            result=json.loads(self.result_file.read_text('utf-8'))
+            if not result.get('ok'): raise RuntimeError(result.get('error') or '转换失败')
+            file=(result.get('snapshot') or {}).get('files',[{}])[0]
+            if row is not None:
+                row['percent']=100
+                row['state']=file.get('state') or '失败'
+                row['message']=file.get('message') or ''
+                if self.task_kind=='convert': row['output']=file.get('output') or ''
+                else: row['docx']=file.get('docx') or ''
+            if file.get('state')=='成功':
+                label=row['name'] if row is not None else '未命名'
+                if self.task_kind=='export' and file.get('docx'):
+                    label=label+' → '+Path(file['docx']).name
+                self._convert_succeeded.append(label)
+            else:
+                self._convert_failed.append({'name':row['name'] if row is not None else '未命名','message':file.get('message') or '转换失败'})
+        except Exception as exc:
+            message=str(exc).splitlines()[-1][:180] or '转换失败'
+            if row is not None:
+                row['percent']=100; row['state']='失败'; row['message']=message
+            self._convert_failed.append({'name':row['name'] if row is not None else '未命名','message':message})
+        if self.proc: self.proc.deleteLater()
+        self.convert_pos += 1
+        self.convert_overall=int(self.convert_pos*100/max(1,self.convert_total))
+        self.changed.emit()
+        if self.convert_queue:
+            QTimer.singleShot(0,self._launch_convert); return
+        self._convert_finish()
+
+    def _convert_finish(self):
+        if getattr(self, '_convert_closed', False): return
+        self._convert_closed=True
+        if self._poll: self._poll.stop()
+        self.convert_queue=[]
+        while self.convert_pos < len(self.convert_rows):
+            row=self.convert_rows[self.convert_pos]
+            if row.get('state') in ('等待','正在转换','正在导出'):
+                row['state']='未开始'
+                self._convert_skipped.append(row.get('name') or '未命名')
+            self.convert_pos += 1
+        self.running=False
+        self.convert_overall=100
+        title='转换已停止' if self.convert_stopped and self.task_kind=='convert' else ('导出已停止' if self.convert_stopped else self._convert_title)
+        self.message=title
+        core=str(ROOT/'core')
+        if core not in sys.path: sys.path.insert(0, core)
+        import convert
+        self.convertFinished.emit(convert.summary({'succeeded':self._convert_succeeded,'failed':self._convert_failed,'skipped':self._convert_skipped}, title))
+        self.changed.emit()
+
     @Slot('QVariantMap')
     def save(self, settings):
         self.updatePage(settings)
@@ -379,6 +585,8 @@ class Bridge(QObject):
     @Slot()
     def cancel(self):
         self.queue = []
+        self.convert_queue = []
+        self.convert_stopped = True
         self.message = '将在当前文档完成后停止'
         self.changed.emit()
 
@@ -410,14 +618,33 @@ class Bridge(QObject):
         self.proc.setArguments([str(ROOT/'worker.py'),str(job)])
         self.proc.finished.connect(self.finished)
         self.proc.errorOccurred.connect(self.process_error)
+        self._progress_path=Path(payload['progress']) if payload.get('progress') else None
+        if self._progress_path is not None:
+            if self._poll is None:
+                self._poll=QTimer(self)
+                self._poll.timeout.connect(self.poll_progress)
+            self._poll.start(80)
+        elif self._poll:
+            self._poll.stop()
         self.proc.start()
         self.changed.emit()
 
     def process_error(self, error):
-        if error == QProcess.ProcessError.FailedToStart:
+        if error == failed_to_start(QProcess):
+            if self.task_kind in ('convert','export') and not getattr(self, '_convert_closed', False):
+                if 0<=self.convert_pos<len(self.convert_rows):
+                    row=self.convert_rows[self.convert_pos]
+                    row['state']='失败'; row['percent']=100; row['message']='后台进程启动失败，请检查运行库'
+                    self._convert_failed.append({'name':row['name'],'message':row['message']})
+                    self.convert_pos += 1
+                self.convert_stopped=True
+                self._convert_finish()
+                return
             self.running=False;self.error('后台进程启动失败，请检查运行库')
 
     def finished(self, code, _status):
+        if self.task_kind in ('convert','export'):
+            self._apply_convert_result(); return
         if self.task_kind!='process':
             try:
                 result=json.loads(self.result_file.read_text('utf-8'))
@@ -496,7 +723,7 @@ bridge = Bridge()
 engine = QQmlApplicationEngine()
 engine.rootContext().setContextProperty('bridge',bridge)
 engine.rootContext().setContextProperty('appearance',appearance)
-engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro and os.environ.get('WENJU_LOW_POWER')!='1' and not any(a in sys.argv for a in ('--smoke','--capture','--capture-themes','--test-clipboard')))
+engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro and os.environ.get('WENJU_LOW_POWER')!='1' and not any(a in sys.argv for a in ('--smoke','--capture','--capture-themes','--test-convert-ui','--test-clipboard')))
 engine.load(QUrl.fromLocalFile(str(ROOT/'Main.qml')))
 if not engine.rootObjects(): sys.exit(1)
 window = engine.rootObjects()[0]
@@ -590,6 +817,72 @@ if '--capture' in sys.argv:
         window.grabWindow().save(str(ROOT/'高级设置预览.png'))
         app.quit()
     QTimer.singleShot(1500,capture)
+if '--test-convert-ui' in sys.argv:
+    import traceback
+    sample = DATA/'convert-sample.txt'
+    def convert_ui():
+        try:
+            window.setProperty('page', 5)
+            app.processEvents()
+            panel = window.findChild(QObject, 'progressPanel')
+            assert panel is not None, 'progress panel missing'
+            assert panel.property('overall') == 0
+            sample.write_text('界面转换\n', encoding='utf-8')
+            rejected = sample.with_suffix('.xls')
+            rejected.write_bytes(b'not-xlsx')
+            bridge.addConvert([str(sample), str(rejected)])
+            bridge.setConvertPaste('粘贴一行')
+            bridge.setConvertMode('template')
+            assert bridge.convertMode == 'template'
+            bridge.setConvertMode('preserve')
+            assert bridge.convertMode == 'preserve'
+            bridge.startConvert()
+            assert bridge.busy
+            assert any(row['percent'] > 0 for row in bridge.convertFiles)
+            app.processEvents()
+            QTimer.singleShot(100, wait_convert)
+        except Exception:
+            traceback.print_exc(); app.exit(1)
+    def wait_convert():
+        try:
+            if bridge.busy:
+                QTimer.singleShot(100, wait_convert); return
+            files = {row['name']: row for row in bridge.convertFiles}
+            assert files['convert-sample.txt']['state'] == '成功', files
+            assert files['convert-sample.txt']['percent'] == 100
+            assert files['粘贴的内容']['state'] == '成功'
+            assert files['convert-sample.xls']['state'] == '失败'
+            assert '.xlsx' in files['convert-sample.xls']['message']
+            assert bridge.convertOverall == 100
+            panel = window.findChild(QObject, 'progressPanel')
+            assert panel.property('overall') == 100
+            assert bridge.status == '转换完成', bridge.status
+            report = window.findChild(QObject, 'convertResult')
+            text = report.property('text') or ''
+            assert '成功 2 个' in text and '失败 1 个' in text, text
+            assert 'convert-sample.txt' in text and 'convert-sample.xls' in text
+            bridge.exportConvert()
+            assert bridge.busy
+            QTimer.singleShot(100, wait_export)
+        except Exception:
+            traceback.print_exc(); app.exit(1)
+    def wait_export():
+        try:
+            if bridge.busy:
+                QTimer.singleShot(100, wait_export); return
+            assert bridge.status == '导出完成', bridge.status
+            docx_rows = [row for row in bridge.convertFiles if row.get('docx')]
+            assert len(docx_rows) == 2, bridge.convertFiles
+            assert all(row['percent'] == 100 and row['state'] == '成功' for row in docx_rows)
+            report = window.findChild(QObject, 'convertResult')
+            text = report.property('text') or ''
+            assert '导出完成' in text and '成功 2 个' in text, text
+            print('PASS: convert page shows per-file progress, lists successes and failures, and exports docx')
+            app.quit()
+        except Exception:
+            traceback.print_exc(); app.exit(1)
+    QTimer.singleShot(800, convert_ui)
+    QTimer.singleShot(20000, lambda: app.exit(2))
 app.aboutToQuit.connect(lambda: bridge.proc.waitForFinished(30000) if bridge.running and bridge.proc else None)
 if '--smoke' in sys.argv:
     # Integration test runs with an isolated WENJU_DATA_DIR, never user presets.
