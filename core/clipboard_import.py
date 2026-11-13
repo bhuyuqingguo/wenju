@@ -8,7 +8,24 @@ import wenju_format
 HTML_MIMES = ('text/html',)
 RTF_MIMES = ('text/rtf', 'application/rtf', 'application/x-rtf', 'Rich Text Format')
 PLAIN_MIMES = ('text/plain',)
-IMAGE_MIMES = (('image/png', 'png'), ('image/jpeg', 'jpg'), ('image/jpg', 'jpg'), ('image/bmp', 'bmp'))
+IMAGE_MIMES = (('image/png', 'png'), ('image/jpeg', 'jpg'), ('image/jpg', 'jpg'), ('image/bmp', 'bmp'), ('image/gif', 'gif'))
+META_MIMES = (
+    ('image/x-emf', 'emf'),
+    ('image/emf', 'emf'),
+    ('application/x-emf', 'emf'),
+    ('application/emf', 'emf'),
+    ('image/x-wmf', 'wmf'),
+    ('image/wmf', 'wmf'),
+    ('application/x-wmf', 'wmf'),
+    ('application/wmf', 'wmf'),
+    ('application/x-qt-windows-mime;value="Enhanced Metafile"', 'emf'),
+    ('application/x-qt-windows-mime;value="MetaFilePict"', 'wmf'),
+)
+_HTML_IMAGE = {
+    'png': 'png', 'gif': 'gif', 'bmp': 'bmp', 'x-bmp': 'bmp',
+    'jpeg': 'jpg', 'jpg': 'jpg',
+    'emf': 'emf', 'x-emf': 'emf', 'wmf': 'wmf', 'x-wmf': 'wmf',
+}
 HTML_FONT_PT = {1: 8, 2: 10, 3: 12, 4: 14, 5: 18, 6: 24, 7: 36}
 _SKIP_RTF = {
     'colortbl', 'info', 'header', 'footer', 'headerf', 'footerf', 'headerl', 'footerr',
@@ -17,7 +34,7 @@ _SKIP_RTF = {
     'rsidtbl', 'mmath', 'object', 'objdata', 'background', 'pn', 'filetbl', 'pgptbl',
     'operator', 'author', 'title', 'subject', 'doccomm', 'comment', 'creatim', 'revtim',
 }
-_DEST = _SKIP_RTF | {'rtf', 'fonttbl', 'stylesheet', 'pict'}
+_DEST = _SKIP_RTF | {'rtf', 'fonttbl', 'stylesheet', 'pict', 'nonshppict', 'shppict'}
 _GENERICS = {'serif', 'sans-serif', 'monospace', 'cursive', 'fantasy'}
 
 
@@ -328,7 +345,7 @@ class _HtmlDoc(HTMLParser):
             else:
                 self._add('\n')
             return
-        if tag == 'img':
+        if tag == 'img' or tag.endswith('imagedata'):
             self._flush()
             image = self._image(attr)
             if image is None and src_present(attr):
@@ -478,11 +495,13 @@ class _HtmlDoc(HTMLParser):
         src = attr.get('src') or ''
         width = int(attr['width']) * 0.75 if attr.get('width', '').isdigit() else 0
         height = int(attr['height']) * 0.75 if attr.get('height', '').isdigit() else 0
-        match = re.match(r'data:image/(png|jpeg|jpg|bmp);base64,(.+)', src, re.I | re.S)
+        match = re.match(r'data:image/([a-z0-9.+-]+);base64,(.+)', src, re.I | re.S)
         if not match:
             return None
         kind = match.group(1).lower()
-        ext = 'jpg' if kind in ('jpeg', 'jpg') else ('bmp' if kind == 'bmp' else 'png')
+        ext = _HTML_IMAGE.get(kind)
+        if not ext:
+            return None
         try:
             data = base64.b64decode(re.sub(r'\s+', '', match.group(2)))
         except Exception:
@@ -636,6 +655,7 @@ class _RtfDoc(object):
         self.progress = None
         self.rtf_total = 1
         self.rtf_seen = 0
+        self.in_fallback_pict = False
 
     def parse(self, raw, progress=None):
         _progress(progress, 30)
@@ -677,6 +697,16 @@ class _RtfDoc(object):
             return
         if dest == 'pict':
             self._pict(tokens[start:])
+            return
+        if dest == 'nonshppict':
+            self.in_fallback_pict = True
+            try:
+                self._content(tokens[start:])
+            finally:
+                self.in_fallback_pict = False
+            return
+        if dest == 'object':
+            self._object(tokens[start:])
             return
         if dest in _SKIP_RTF or dest == '*':
             return
@@ -746,7 +776,7 @@ class _RtfDoc(object):
         def walk(items):
             nonlocal blip, width, height
             for token in items:
-                if token[0] == 'word' and token[1] in ('pngblip', 'jpegblip', 'wbitmap', 'dibitmap'):
+                if token[0] == 'word' and (token[1] in ('pngblip', 'jpegblip', 'wbitmap', 'dibitmap', 'emfblip') or token[1] == 'wmetafile'):
                     blip = token[1]
                 elif token[0] == 'word' and token[1] == 'picwgoal' and token[2]:
                     width = token[2] / 20.0
@@ -767,16 +797,93 @@ class _RtfDoc(object):
             data = bytes.fromhex(digits)
         except ValueError:
             return
-        self.images += 1
         if blip == 'jpegblip':
             ext = 'jpg'
+        elif blip == 'emfblip':
+            ext = 'emf'
+        elif blip == 'wmetafile':
+            ext = 'wmf'
         elif blip in ('wbitmap', 'dibitmap') or data[:2] == b'BM':
             ext = 'bmp'
+        elif data[:6] in (b'GIF87a', b'GIF89a'):
+            ext = 'gif'
         else:
             ext = 'png'
+        if self._skip_raster_fallback(ext):
+            return
+        self.images += 1
         asset = 'rtf%d.%s' % (self.images, ext)
         self.assets[asset] = data
         width, height = _point_size(width, height, data)
+        image = {'type': 'image', 'asset': asset, 'w': width, 'h': height}
+        if self.in_row:
+            self.pending_images.append(image)
+            return
+        self._finish_para_before_image()
+        self.blocks.append(image)
+
+    def _skip_raster_fallback(self, ext):
+        if not self.in_fallback_pict or ext not in ('png', 'jpg', 'gif', 'bmp'):
+            return False
+        candidates = list(self.blocks) + list(self.pending_images)
+        if not candidates:
+            return False
+        last = candidates[-1]
+        return last.get('type') == 'image' and str(last.get('asset') or '').lower().endswith(('.emf', '.wmf'))
+
+    def _object(self, tokens):
+        images_before = self.images
+        self._walk_object(tokens, False)
+        if self.images == images_before:
+            self._walk_object(tokens, True)
+
+    def _walk_object(self, tokens, objdata_only):
+        for token in tokens:
+            if token[0] != 'group':
+                continue
+            dest, start = self._dest(token[1])
+            body = token[1][start:] if dest else token[1]
+            if dest == 'objdata':
+                if objdata_only:
+                    self._objdata_image(body)
+                continue
+            if objdata_only:
+                self._walk_object(token[1], True)
+                continue
+            if dest == 'pict':
+                self._pict(body)
+            elif dest in ('result', None):
+                self._content(body)
+            else:
+                self._walk_object(body, False)
+
+    def _objdata_image(self, tokens):
+        hex_text = []
+
+        def walk(items):
+            for token in items:
+                if token[0] == 'text':
+                    hex_text.append(token[1])
+                elif token[0] == 'group':
+                    walk(token[1])
+
+        walk(tokens)
+        digits = re.sub(r'[^0-9A-Fa-f]', '', ''.join(hex_text))
+        if len(digits) < 32 or len(digits) > wenju_format.MAX_ASSET_BYTES * 2:
+            return
+        if len(digits) % 2:
+            digits = digits[:-1]
+        try:
+            data = bytes.fromhex(digits)
+        except ValueError:
+            return
+        payload, kind = wenju_format.image_bytes(data)
+        if not payload or kind not in ('emf', 'wmf', 'png', 'jpg', 'gif', 'bmp'):
+            return
+        self.images += 1
+        asset = 'rtf%d.%s' % (self.images, kind)
+        self.assets[asset] = payload
+        width, height = _point_size(None, None, payload)
         image = {'type': 'image', 'asset': asset, 'w': width, 'h': height}
         if self.in_row:
             self.pending_images.append(image)
@@ -1178,12 +1285,51 @@ def document_from_mime(mime, progress=None):
             else:
                 plain = raw.decode('utf-8', 'replace')
     images = {}
-    for mime_name, ext in IMAGE_MIMES:
-        raw = _first_bytes(mime, (mime_name,))
-        if raw:
-            images['clipboard.%s' % ext] = raw
-            break
+    meta = _meta_from_mime(mime)
+    if meta:
+        images[meta[0]] = meta[1]
+    else:
+        for mime_name, ext in IMAGE_MIMES:
+            raw = _first_bytes(mime, (mime_name,))
+            if raw:
+                images['clipboard.%s' % ext] = raw
+                break
     return document_from_parts(html, rtf, plain, images, progress)
+
+
+def _meta_from_mime(mime):
+    for name, ext in META_MIMES:
+        raw = _first_bytes(mime, (name,))
+        if raw:
+            return _coerce_meta(raw, ext)
+    formats = getattr(mime, 'formats', None)
+    if not formats:
+        return None
+    try:
+        names = list(formats())
+    except Exception:
+        return None
+    for name in names:
+        low = str(name).lower()
+        if 'metafile' not in low and '/emf' not in low and '/wmf' not in low and not low.endswith('emf') and not low.endswith('wmf'):
+            continue
+        raw = _first_bytes(mime, (name,))
+        if not raw:
+            continue
+        ext = 'wmf' if ('wmf' in low or 'metafilepict' in low) else 'emf'
+        found = _coerce_meta(raw, ext)
+        if found:
+            return found
+    return None
+
+
+def _coerce_meta(raw, ext):
+    cleaned, kind = wenju_format.clipboard_metafile(raw)
+    if kind:
+        return ('clipboard.%s' % kind, cleaned)
+    if raw:
+        return ('clipboard.%s' % ext, bytes(raw) if not isinstance(raw, bytes) else raw)
+    return None
 
 
 def read_clipboard(progress=None):
