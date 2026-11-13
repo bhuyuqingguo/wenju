@@ -22,8 +22,11 @@ ET.register_namespace("a", A)
 ET.register_namespace("pic", PIC)
 
 BLOCK_TYPES = ("heading", "paragraph", "table", "image", "pagebreak", "toc")
-PAGE_LINES = 28
-CHARS_PER_LINE = 28
+PAGE_HEIGHT = 16838
+PAGE_MARGIN = 1440
+LINE_TWIP = 240
+PAGE_LINES = (PAGE_HEIGHT - 2 * PAGE_MARGIN) // LINE_TWIP
+CHARS_PER_LINE = (11906 - 2 * PAGE_MARGIN) // LINE_TWIP
 _PREFIXES = (
     re.compile(r"^\s*第[0-9一二三四五六七八九十百千]+[章节部分篇]\s*"),
     re.compile(r"^\s*[一二三四五六七八九十百千]{1,3}[、.．]\s*"),
@@ -234,7 +237,8 @@ def _walk_runs(doc, default):
 def _lines(block):
     kind = block.get("type")
     if kind == "table":
-        return max(1, len(block.get("rows") or []))
+        spans = _span_map(block)
+        return max(1, sum(_row_span_lines(block, spans, r) for r in range(len(block.get("rows") or []))))
     if kind == "image":
         return max(1, int(round(float(block.get("h") or 20) / 20.0)))
     if kind in ("heading", "paragraph"):
@@ -267,13 +271,28 @@ def heading_pages(blocks, sections=None):
             need = _toc_lines(blocks)
         else:
             need = _lines(block)
-        if used and used + need > PAGE_LINES:
+        start, page, used = _place(page, used, need)
+        if block.get("type") == "heading":
+            found.append((block, start))
+    return found
+
+
+def _place(page, used, need):
+    if need < 1:
+        need = 1
+    if used >= PAGE_LINES:
+        page += 1
+        used = 0
+    start = page
+    while need:
+        room = PAGE_LINES - used
+        take = need if need < room else room
+        used += take
+        need -= take
+        if need:
             page += 1
             used = 0
-        if block.get("type") == "heading":
-            found.append((block, page))
-        used += need
-    return found
+    return start, page, used
 
 
 def _starts_page(section, previous):
@@ -329,16 +348,8 @@ def from_docx(path):
             if "end" in _field_types(child):
                 in_toc = False
             continue
-        image = _read_image(child, rels, package)
-        if image is not None:
-            if _page_break_before(child):
-                blocks.append({"type": "pagebreak"})
-            image_seq += 1
-            name = "assets/image%d%s" % (image_seq, image[0])
-            assets[name] = image[1]
-            blocks.append({"type": "image", "asset": name, "w": image[2], "h": image[3]})
-            if _has_page_break(child):
-                blocks.append({"type": "pagebreak"})
+        if _read_image(child, rels, package) is not None:
+            image_seq = _append_rich(blocks, child, rels, package, assets, image_seq)
         else:
             _append_paragraph(blocks, child)
         sect = child.find("w:pPr/w:sectPr", {"w": W})
@@ -445,6 +456,51 @@ def _read_table(tbl):
     if merges:
         block["merges"] = merges
     return block
+
+
+def _append_rich(blocks, paragraph, rels, package, assets, image_seq):
+    if _page_break_before(paragraph):
+        blocks.append({"type": "pagebreak"})
+    style = _style_of(paragraph)
+    level = _heading_level(paragraph, style)
+    buf = []
+
+    def flush():
+        text = "".join(buf)
+        del buf[:]
+        if text:
+            blocks.append(_text_block(level, style, text))
+
+    for child in list(paragraph):
+        if child.tag != _w("r"):
+            continue
+        if _run_has_drawing(child):
+            flush()
+            image = _read_image(child, rels, package)
+            if image is None:
+                continue
+            image_seq += 1
+            name = "assets/image%d%s" % (image_seq, image[0])
+            assets[name] = image[1]
+            blocks.append({"type": "image", "asset": name, "w": image[2], "h": image[3]})
+            continue
+        for el in list(child):
+            if el.tag == _w("br") and el.get(_w("type")) == "page":
+                flush()
+                blocks.append({"type": "pagebreak"})
+            elif el.tag == _w("t"):
+                buf.append(el.text or "")
+            elif el.tag == _w("tab"):
+                buf.append("\t")
+    flush()
+    return image_seq
+
+
+def _run_has_drawing(run):
+    for el in run.iter():
+        if el.tag == "{%s}blip" % A:
+            return True
+    return False
 
 
 def _read_image(paragraph, rels, package):
@@ -561,13 +617,6 @@ def _field_types(paragraph):
 def _paragraph_has_toc(paragraph):
     for el in paragraph.iter(_w("instrText")):
         if el.text and re.search(r"\bTOC\b", el.text):
-            return True
-    return False
-
-
-def _has_page_break(paragraph):
-    for el in paragraph.iter(_w("br")):
-        if el.get(_w("type")) == "page":
             return True
     return False
 
@@ -708,7 +757,13 @@ def _sect_element(section, sections, header_ids, footer_ids, final, next_break="
         kind.set(_w("val"), next_break or "nextPage")
     page = ET.SubElement(sect, _w("pgSz"))
     page.set(_w("w"), "11906")
-    page.set(_w("h"), "16838")
+    page.set(_w("h"), str(PAGE_HEIGHT))
+    mar = ET.SubElement(sect, _w("pgMar"))
+    for edge in ("top", "right", "bottom", "left"):
+        mar.set(_w(edge), str(PAGE_MARGIN))
+    mar.set(_w("header"), "720")
+    mar.set(_w("footer"), "720")
+    mar.set(_w("gutter"), "0")
     numbering = ET.SubElement(sect, _w("pgNumType"))
     numbering.set(_w("fmt"), "decimal")
     if index == 0:
@@ -810,13 +865,61 @@ def _emit_image(parent, rel_id, seq, width, height):
     return paragraph
 
 
+def _span_map(block):
+    spans = {}
+    for merge in block.get("merges") or []:
+        spans[(merge["row"], merge["col"])] = merge
+    return spans
+
+
+def _text_lines(text):
+    if not text:
+        return 1
+    return max(1, len(text.split("\n")))
+
+
+def _row_span_lines(block, spans, r_i):
+    row = block["rows"][r_i]
+    lines = 1
+    c_i = 0
+    while c_i < len(row):
+        found = _merge_at(spans, r_i, c_i)
+        if found is not None and (found[0], found[1]) != (r_i, c_i):
+            _r0, c0, merge = found
+            c_i = c0 + merge.get("cols", 1) if r_i > found[0] and c_i == c0 else c_i + 1
+            continue
+        if found is not None:
+            merge = found[2]
+            count = 0
+            for r in range(merge["row"], merge["row"] + merge.get("rows", 1)):
+                for c in range(merge["col"], merge["col"] + merge.get("cols", 1)):
+                    raw = _run_text(block["rows"][r][c].get("runs"))
+                    if raw:
+                        count += _text_lines(raw)
+            lines = max(lines, count or 1)
+            c_i += merge.get("cols", 1)
+        else:
+            lines = max(lines, _text_lines(_run_text(row[c_i].get("runs"))))
+            c_i += 1
+    return lines
+
+
 def _emit_table(parent, block):
     tbl = ET.SubElement(parent, _w("tbl"))
+    props = ET.SubElement(tbl, _w("tblPr"))
+    margins = ET.SubElement(props, _w("tblCellMar"))
+    for edge in ("top", "left", "bottom", "right"):
+        node = ET.SubElement(margins, _w(edge))
+        node.set(_w("w"), "0")
+        node.set(_w("type"), "dxa")
     spans = {}
     for merge in block.get("merges") or []:
         spans[(merge["row"], merge["col"])] = merge
     for r_i, row in enumerate(block["rows"]):
         tr = ET.SubElement(tbl, _w("tr"))
+        height = ET.SubElement(ET.SubElement(tr, _w("trPr")), _w("trHeight"))
+        height.set(_w("val"), str(LINE_TWIP * _row_span_lines(block, spans, r_i)))
+        height.set(_w("hRule"), "exact")
         c_i = 0
         while c_i < len(row):
             found = _merge_at(spans, r_i, c_i)
@@ -903,6 +1006,14 @@ def _footer_xml(text):
 def _styles_xml(font):
     face = fontfallback.resolve(font)
     styles = ET.Element(_w("styles"))
+    defaults = ET.SubElement(styles, _w("docDefaults"))
+    rdef = ET.SubElement(ET.SubElement(defaults, _w("rPrDefault")), _w("rPr"))
+    fonts = ET.SubElement(rdef, _w("rFonts"))
+    for attr in ("ascii", "hAnsi", "cs", "eastAsia"):
+        fonts.set(_w(attr), face)
+    ET.SubElement(rdef, _w("sz")).set(_w("val"), "24")
+    ET.SubElement(rdef, _w("szCs")).set(_w("val"), "24")
+    _single_spacing(ET.SubElement(ET.SubElement(defaults, _w("pPrDefault")), _w("pPr")))
     normal = ET.SubElement(styles, _w("style"))
     normal.set(_w("type"), "paragraph")
     normal.set(_w("styleId"), "Normal")
@@ -911,6 +1022,7 @@ def _styles_xml(font):
     fonts = ET.SubElement(rpr, _w("rFonts"))
     for attr in ("ascii", "hAnsi", "cs", "eastAsia"):
         fonts.set(_w(attr), face)
+    _single_spacing(ET.SubElement(normal, _w("pPr")))
     for level in range(1, 10):
         style = ET.SubElement(styles, _w("style"))
         style.set(_w("type"), "paragraph")
@@ -918,7 +1030,16 @@ def _styles_xml(font):
         ET.SubElement(style, _w("name")).set(_w("val"), "heading %d" % level)
         ppr = ET.SubElement(style, _w("pPr"))
         ET.SubElement(ppr, _w("outlineLvl")).set(_w("val"), str(level - 1))
+        _single_spacing(ppr)
     return _xml(styles)
+
+
+def _single_spacing(ppr):
+    spacing = ET.SubElement(ppr, _w("spacing"))
+    spacing.set(_w("before"), "0")
+    spacing.set(_w("after"), "0")
+    spacing.set(_w("line"), str(LINE_TWIP))
+    spacing.set(_w("lineRule"), "auto")
 
 
 def _settings():
@@ -935,44 +1056,39 @@ def _rels_xml(rels):
         "footer": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer",
         "image": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
     }
-    root = ET.Element("{%s}Relationships" % REL_NS)
+    lines = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', '<Relationships xmlns="%s">' % REL_NS]
     for rel_id, kind, target in rels:
-        node = ET.SubElement(root, "{%s}Relationship" % REL_NS)
-        node.set("Id", rel_id)
-        node.set("Type", types[kind])
-        node.set("Target", target)
-    return _xml(root)
+        lines.append('<Relationship Id="%s" Type="%s" Target="%s"/>' % (rel_id, types[kind], target))
+    lines.append("</Relationships>")
+    return "\n".join(lines).encode("utf-8")
 
 
 def _content_types(parts, _overrides):
-    root = ET.Element("{%s}Types" % CT_NS)
-    defaults = {
-        "rels": "application/vnd.openxmlformats-package.relationships+xml",
-        "xml": "application/xml",
-        "png": "image/png",
-        "jpeg": "image/jpeg",
-        "jpg": "image/jpeg",
-        "bin": "application/octet-stream",
-    }
-    for ext, value in defaults.items():
-        node = ET.SubElement(root, "{%s}Default" % CT_NS)
-        node.set("Extension", ext)
-        node.set("ContentType", value)
-    overrides = {
-        "/word/document.xml": "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml",
-        "/word/styles.xml": "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
-        "/word/settings.xml": "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
-    }
-    for name in parts:
+    defaults = (
+        ("rels", "application/vnd.openxmlformats-package.relationships+xml"),
+        ("xml", "application/xml"),
+        ("png", "image/png"),
+        ("jpeg", "image/jpeg"),
+        ("jpg", "image/jpeg"),
+        ("bin", "application/octet-stream"),
+    )
+    overrides = [
+        ("/word/document.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"),
+        ("/word/styles.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"),
+        ("/word/settings.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"),
+    ]
+    for name in sorted(parts):
         if re.match(r"word/header\d+\.xml$", name):
-            overrides["/" + name] = "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
+            overrides.append(("/" + name, "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"))
         if re.match(r"word/footer\d+\.xml$", name):
-            overrides["/" + name] = "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
-    for part, value in overrides.items():
-        node = ET.SubElement(root, "{%s}Override" % CT_NS)
-        node.set("PartName", part)
-        node.set("ContentType", value)
-    return _xml(root)
+            overrides.append(("/" + name, "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"))
+    lines = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', '<Types xmlns="%s">' % CT_NS]
+    for ext, value in defaults:
+        lines.append('<Default Extension="%s" ContentType="%s"/>' % (ext, value))
+    for part, value in overrides:
+        lines.append('<Override PartName="%s" ContentType="%s"/>' % (part, value))
+    lines.append("</Types>")
+    return "\n".join(lines).encode("utf-8")
 
 
 def _xml(element):

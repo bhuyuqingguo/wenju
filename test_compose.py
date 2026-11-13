@@ -128,6 +128,9 @@ def main():
             assert archive.testzip() is None
             package = {name: archive.read(name) for name in archive.namelist()}
         blob = b"\n".join(package.values())
+        assert b"ns0" not in package["[Content_Types].xml"]
+        assert b'xmlns="http://schemas.openxmlformats.org/package/2006/content-types"' in package["[Content_Types].xml"]
+        assert b"ns0" not in package["word/_rels/document.xml.rels"]
         assert b"TOC \\o \"1-3\"" in blob
         assert b"updateFields" in blob
         assert b"\xe4\xbb\xbf\xe5\xae\x8b_GB2312" not in blob
@@ -258,6 +261,23 @@ def main():
         cell = root.find(".//{%s}tc" % W)
         assert [text_of(paragraph) for paragraph in cell.findall("{%s}p" % W)] == ["甲", "乙", "丙", "丁"]
 
+    def table_doc(count):
+        return WenjuDoc([
+            heading(1, "一、前"),
+            {"type": "table", "rows": [[{"runs": [{"text": "r%d" % i}]}] for i in range(count)]},
+            heading(1, "一、后"),
+        ], {}, {}, {"wenju": 1})
+
+    with tempfile.TemporaryDirectory(prefix="wenju-pages-") as tmp:
+        folder = Path(tmp)
+        for count, last in ((30, "1"), (100, "2")):
+            path = folder / ("%d.docx" % count)
+            to_docx(table_doc(count), str(path), template={"number": "多级数字"})
+            with zipfile.ZipFile(path) as archive:
+                entries = toc_entries({name: archive.read(name) for name in archive.namelist()})
+            pages = [texts[-1] for _sid, texts in entries]
+            assert pages == ["1", last], pages
+
     check_docx_roundtrip()
 
     broken = WenjuDoc([{"type": "heading", "level": 0, "runs": [{"text": "x"}]}], {}, {}, {"wenju": 1})
@@ -379,6 +399,21 @@ def check_docx_roundtrip():
         }, rels)
         loaded = from_docx(str(even))
         assert loaded.styles["sections"][0]["header"] == "默认页眉"
+
+        caption = folder / "caption.docx"
+        write_docx(caption, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s" xmlns:r="%s" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>
+  <w:p><w:r><w:t>图注文字</w:t></w:r><w:r><w:drawing><wp:inline><wp:extent cx="190500" cy="190500"/><wp:docPr id="1" name="Picture1"/>
+  <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rId2"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>
+  <w:sectPr/>
+</w:body></w:document>""" % (ns, rel), {"word/media/a.png": b"\x89PNG-caption"}, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/a.png"/>
+</Relationships>""")
+        loaded = from_docx(str(caption))
+        assert [block["type"] for block in loaded.blocks] == ["paragraph", "image"]
+        assert loaded.blocks[0]["runs"][0]["text"] == "图注文字"
+        assert loaded.assets["assets/image1.png"] == b"\x89PNG-caption"
 
         sections = folder / "sections.docx"
         write_docx(sections, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
