@@ -336,7 +336,11 @@ def from_docx(path):
             continue
         if child.tag != _w("p"):
             continue
+        if _style_of(child) == "TOCHeading":
+            continue
         if _paragraph_has_toc(child):
+            if blocks and blocks[-1].get("type") == "paragraph" and _run_text(blocks[-1].get("runs")).strip() == "目录":
+                blocks.pop()
             if not emitted_toc:
                 blocks.append({"type": "toc"})
                 emitted_toc = True

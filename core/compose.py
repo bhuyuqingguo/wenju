@@ -9,16 +9,24 @@ def merge(docs):
     sections = []
     assets = {}
     for index, doc in enumerate(docs):
-        if blocks and blocks[-1].get("type") != "pagebreak":
+        copied = _copy_blocks(doc, index, assets)
+        stripped = 0
+        if index and copied and copied[0].get("type") == "pagebreak":
+            copied = copied[1:]
+            stripped = 1
+        if index and (not blocks or blocks[-1].get("type") != "pagebreak"):
             blocks.append({"type": "pagebreak"})
         start = len(blocks)
-        blocks.extend(_copy_blocks(doc, index, assets))
+        blocks.extend(copied)
         for order, section in enumerate(doc.styles.get("sections") or [{"at": 0, "header": "", "footer": ""}]):
             brk = section.get("break") or "nextPage"
             if order == 0 and index > 0:
                 brk = "nextPage"
+            rel = _content_index(doc.blocks, int(section.get("at") or 0))
+            if stripped and rel:
+                rel -= 1
             sections.append({
-                "at": start + _content_index(doc.blocks, int(section.get("at") or 0)),
+                "at": start + rel,
                 "header": section.get("header") or "",
                 "footer": section.get("footer") or "",
                 "break": brk,

@@ -203,8 +203,30 @@ def main():
 
     ended = document([heading(1, "一、甲"), {"type": "pagebreak"}], "页眉甲")
     followed = document([heading(1, "一、乙")], "页眉乙")
+    leading = document([{"type": "pagebreak"}, heading(1, "一、乙")], "页眉乙")
     joined = merge([ended, followed])
     assert [block["type"] for block in joined.blocks].count("pagebreak") == 1
+    assert [block["type"] for block in merge([followed, leading]).blocks].count("pagebreak") == 1
+    with tempfile.TemporaryDirectory(prefix="wenju-once-") as tmp:
+        path = Path(tmp) / "once.docx"
+        to_docx(merge([
+            document([heading(1, "甲标题"), paragraph("甲正文")], "甲"),
+            document([{"type": "pagebreak"}, heading(1, "乙标题")], "乙"),
+        ]), str(path))
+        with zipfile.ZipFile(path) as archive:
+            body = ET.fromstring(archive.read("word/document.xml")).find("{%s}body" % W)
+        kinds = []
+        for block in body.findall("{%s}p" % W):
+            if any(el.get("{%s}type" % W) == "page" for el in block.iter("{%s}br" % W)):
+                kinds.append("page")
+            if block.find("w:pPr/w:sectPr", NS) is not None:
+                kinds.append("section")
+        assert kinds == ["section"]
+        again = Path(tmp) / "again.docx"
+        to_docx(from_docx(str(path)), str(again))
+        with zipfile.ZipFile(again) as archive:
+            titles = archive.read("word/document.xml").decode("utf-8").count("目录")
+        assert titles == 1
     with tempfile.TemporaryDirectory(prefix="wenju-break-") as tmp:
         folder = Path(tmp)
         save(document([heading(1, "一、甲"), paragraph("甲正文")], "页眉甲", footer="页脚甲"), str(folder / "甲.wenju"))
