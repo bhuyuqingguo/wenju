@@ -36,7 +36,7 @@
 
 ## Windows 便携运行
 
-从 Releases 下载完整 Windows 便携包，解压到当前用户可写的目录，双击 **文矩.exe**。
+从 Releases 下载完整 Windows 便携包，解压到当前用户可写的目录，双击 **文矩.exe**。该包面向 Windows 10/11。Windows 7 SP1 x64 使用单独的便携包，见 [Windows 7 兼容说明](docs/Windows7兼容.md)。
 
 EXE 是带文矩图标、无需管理员权限的启动入口。请保留旁边的 `runtime`、`core` 和应用文件，不要单独移动 EXE；不需要另装 Python。
 

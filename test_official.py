@@ -6,6 +6,7 @@ from templates import apply_official_photo
 from worker import execute
 sys.path.insert(0,str(Path(__file__).resolve().parent/'core'))
 from docx_fmt import q,NS,parse_keep_ns
+from fontfallback import choose
 r=normalize(apply_official_photo(BASE));r['字体嵌入']['启用']=False;r['页码']['起始位置']='全文'
 with tempfile.TemporaryDirectory(prefix='wenju-photo-') as d:
  store=PresetStore(Path(d)/'data')
@@ -31,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix='wenju-photo-') as d:
   ps=doc.findall('w:body/w:p',NS)
   assert ps[0].find('w:pPr/w:pStyle',NS).get(q('val'))=='SecurityMark'
   assert ps[1].find('w:pPr/w:pStyle',NS).get(q('val'))=='OfficialTitle'
-  for sid,font,size in [('OfficialTitle','方正小标宋简体','44'),('SecurityMark','黑体','32'),('Normal','仿宋','28')]:
+  for sid,font,size in [('OfficialTitle',choose('方正小标宋简体')[0],'44'),('SecurityMark',choose('黑体')[0],'32'),('Normal',choose('仿宋_GB2312')[0],'28')]:
    st=next(x for x in styles.findall('w:style',NS) if x.get(q('styleId'))==sid)
    assert st.find('w:rPr/w:rFonts',NS).get(q('eastAsia'))==font
    assert st.find('w:rPr/w:sz',NS).get(q('val'))==size
