@@ -62,6 +62,19 @@ def test_preview_keeps_font_and_marks_gaps():
     assert preview_model.paste_blocks("  ", display_font) == []
 
 
+def test_chart_block_is_a_placeholder_and_keeps_the_emf():
+    doc = Doc([
+        {"type": "chart", "asset": "chart1.xml", "preview": "preview.emf", "w": 200, "h": 80, "rels": []},
+    ], {"chart1.xml": b"<c:chartSpace/>", "preview.emf": b"\x01\x00\x00\x00 EMF"})
+    with tempfile.TemporaryDirectory(prefix="wenju-chart-block-") as tmp:
+        blocks, _note = preview_model.present(doc, tmp, display_font, charts=3)
+        assert len(blocks) == 1
+        assert blocks[0]["kind"] == "placeholder" and blocks[0]["title"] == "图表占位"
+        assert "图表数据留在文矩包里" in blocks[0]["note"]
+        assert doc.assets["preview.emf"].startswith(b"\x01\x00\x00\x00")
+        assert not list(Path(tmp).glob("img*"))
+
+
 def test_chart_count_reads_package_parts():
     with tempfile.TemporaryDirectory(prefix="wenju-chart-") as tmp:
         package = Path(tmp) / "book.xlsx"
@@ -77,5 +90,6 @@ def test_chart_count_reads_package_parts():
 
 if __name__ == "__main__":
     test_preview_keeps_font_and_marks_gaps()
+    test_chart_block_is_a_placeholder_and_keeps_the_emf()
     test_chart_count_reads_package_parts()
     print("PASS: preview keeps 仿宋_GB2312, shows table text, and placeholders for emf and charts")

@@ -134,9 +134,33 @@ def _copy_blocks(doc, index, assets):
             continue
         block = json.loads(json.dumps(block))
         if block.get("type") == "image":
-            block["asset"] = mapping[block["asset"]]
+            block["asset"] = mapping.get(block["asset"], block["asset"])
+        elif block.get("type") == "chart":
+            if block.get("asset") in mapping:
+                block["asset"] = mapping[block["asset"]]
+            if block.get("preview") in mapping:
+                block["preview"] = mapping[block["preview"]]
+            _remap_chart_rels(block.get("rels") or [], mapping)
+        elif block.get("type") == "table":
+            for row in block.get("rows") or []:
+                for cell in row or []:
+                    if not isinstance(cell, dict):
+                        continue
+                    for image in cell.get("images") or []:
+                        if isinstance(image, dict) and image.get("asset") in mapping:
+                            image["asset"] = mapping[image["asset"]]
         copied.append(block)
     return copied
+
+
+def _remap_chart_rels(rels, mapping):
+    for rel in rels or []:
+        if not isinstance(rel, dict):
+            continue
+        if rel.get("asset") in mapping:
+            rel["asset"] = mapping[rel["asset"]]
+        if rel.get("rels"):
+            _remap_chart_rels(rel.get("rels"), mapping)
 
 
 def merge_export(paths, out_wenju, out_docx, template=None, progress=None):
@@ -263,7 +287,7 @@ def _lines(block):
     if kind == "table":
         spans = _span_map(block)
         return max(1, sum(_row_span_lines(block, spans, r) for r in range(len(block.get("rows") or []))))
-    if kind == "image":
+    if kind in ("image", "chart"):
         return max(1, int(round(float(block.get("h") or 20) / 20.0)))
     if kind in ("heading", "paragraph"):
         count = len(_run_text(block.get("runs")))
@@ -394,16 +418,33 @@ def _build_docx(doc, pages):
         header_ids.append(add_rel("header", header_name))
         footer_ids.append(add_rel("footer", footer_name))
     drawing_seq = 1
+    chart_seq = 1
+    chart_plans = {}
+    chart_overrides = []
+    import wenju_format
     for block in doc.blocks:
-        if block.get("type") != "image":
-            continue
-        asset = block["asset"]
-        ext = os.path.splitext(asset)[1].lower() or ".png"
-        target = "media/%d%s" % (drawing_seq, ext)
-        parts["word/" + target] = doc.assets[asset]
-        media_ids[id(block)] = (add_rel("image", target), drawing_seq, ext)
-        drawing_seq += 1
-    document, overrides = _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids)
+        if block.get("type") == "image":
+            asset = block["asset"]
+            ext = os.path.splitext(asset)[1].lower() or ".png"
+            target = "media/%d%s" % (drawing_seq, ext)
+            parts["word/" + target] = doc.assets[asset]
+            media_ids[id(block)] = (add_rel("image", target), drawing_seq, ext)
+            drawing_seq += 1
+        elif block.get("type") == "chart":
+            plan = wenju_format.prepare_chart(block, doc.assets, chart_seq)
+            ids = []
+            for rel_kind, target in plan["doc_rels"]:
+                ids.append(add_rel(rel_kind, target))
+            plan["ids"] = ids
+            plan["seq"] = drawing_seq
+            for part_name, blob in plan["files"]:
+                parts[part_name] = blob
+            chart_overrides.extend(plan["overrides"])
+            chart_plans[id(block)] = plan
+            chart_seq += 1
+            drawing_seq += 1
+    document, overrides = _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids, chart_plans)
+    overrides = list(overrides) + chart_overrides
     parts["word/document.xml"] = document
     parts["word/styles.xml"] = _styles_xml(_first_font(_all_runs(doc)) or "仿宋")
     parts["word/settings.xml"] = _xml(_settings())
@@ -425,7 +466,7 @@ def _section_for(index, sections):
     return chosen
 
 
-def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids):
+def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids, chart_plans=None):
     body = ET.Element(_w("body"))
     last_p = None
     open_section = None
@@ -453,6 +494,13 @@ def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids):
             rel_id, seq, _ext = media_ids[id(block)]
             shown_w, shown_h = image_size.fit_points(block.get("w") or 40, block.get("h") or 20, image_size.content_width_pt())
             last_p = _emit_image(body, rel_id, seq, shown_w, shown_h)
+        elif kind == "chart":
+            plan = (chart_plans or {}).get(id(block))
+            if plan and plan.get("ids"):
+                import wenju_format
+                fitted = dict(block)
+                fitted["w"], fitted["h"] = image_size.fit_points(block.get("w") or 40, block.get("h") or 20, image_size.content_width_pt())
+                last_p = wenju_format.write_chart_paragraph(body, fitted, plan["ids"], plan.get("seq") or 1)
         elif kind == "table":
             _emit_table(body, block)
             last_p = None
@@ -874,6 +922,8 @@ def _rels_xml(rels):
         "header": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
         "footer": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer",
         "image": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "chart": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+        "chartex": "http://schemas.microsoft.com/office/2014/relationships/chartEx",
     }
     lines = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', '<Relationships xmlns="%s">' % REL_NS]
     for rel_id, kind, target in rels:
@@ -882,13 +932,18 @@ def _rels_xml(rels):
     return "\n".join(lines).encode("utf-8")
 
 
-def _content_types(parts, _overrides):
+def _content_types(parts, extra_overrides):
     defaults = (
         ("rels", "application/vnd.openxmlformats-package.relationships+xml"),
         ("xml", "application/xml"),
         ("png", "image/png"),
         ("jpeg", "image/jpeg"),
         ("jpg", "image/jpeg"),
+        ("gif", "image/gif"),
+        ("bmp", "image/bmp"),
+        ("emf", "image/x-emf"),
+        ("wmf", "image/x-wmf"),
+        ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         ("bin", "application/octet-stream"),
     )
     overrides = [
@@ -901,6 +956,8 @@ def _content_types(parts, _overrides):
             overrides.append(("/" + name, "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"))
         if re.match(r"word/footer\d+\.xml$", name):
             overrides.append(("/" + name, "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"))
+    for part, value in extra_overrides or []:
+        overrides.append((part, value))
     lines = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', '<Types xmlns="%s">' % CT_NS]
     for ext, value in defaults:
         lines.append('<Default Extension="%s" ContentType="%s"/>' % (ext, value))

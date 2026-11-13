@@ -58,15 +58,20 @@ def present(doc, asset_dir, display_font, charts=0, limit=40):
         elif kind == "image":
             image_seq += 1
             blocks.append(_image(block, assets, folder, image_seq))
+        elif kind == "chart":
+            image_seq += 1
+            blocks.append(_chart_block(block, assets, folder, image_seq))
         elif kind == "pagebreak":
             blocks.append(_placeholder("分页", "这里是分页，预览不按纸张切开。"))
         elif kind == "toc":
             blocks.append(_placeholder("目录", "目录域留在文件里。预览不展开目录条目。"))
-    for index in range(int(charts or 0)):
-        blocks.append(_placeholder(
-            "图表占位",
-            "第 %d 个图表。界面不能重绘图表，转换也不会补画。" % (index + 1),
-        ))
+    owned = any(isinstance(block, dict) and block.get("type") == "chart" for block in (getattr(doc, "blocks", None) or []))
+    if not owned:
+        for index in range(int(charts or 0)):
+            blocks.append(_placeholder(
+                "图表占位",
+                "第 %d 个图表。界面不能重绘图表，转换也不会补画。" % (index + 1),
+            ))
     for name in fallbacks:
         if name not in seen:
             seen.add(name)
@@ -202,7 +207,11 @@ def _table(block):
             if isinstance(cell, dict) and cell.get("covered") is True:
                 cells.append("（被合并）")
                 continue
-            text = _cell_text(cell) + marks.get((row_index, col_index), "")
+            pictures = [item for item in (cell.get("images") or []) if isinstance(item, dict)]
+            marker = ""
+            if pictures:
+                marker = "［图片］" if len(pictures) == 1 else "［图片×%d］" % len(pictures)
+            text = _cell_text(cell) + marker + marks.get((row_index, col_index), "")
             cells.append(text)
             if text:
                 texts.append(text)
@@ -258,6 +267,17 @@ def _image(block, assets, folder, seq):
         "note": "文矩记录约 %s × %s 磅。屏幕为了能看见会放大，不是纸面大小。" % (_num_text(width), _num_text(height)),
         "rows": [],
     }
+
+
+def _chart_block(block, assets, folder, seq):
+    preview = str(block.get("preview") or "")
+    blob = assets.get(preview) or b""
+    if isinstance(blob, (bytes, bytearray)) and _raster_ext(bytes(blob)):
+        shown = _image({"asset": preview, "w": block.get("w"), "h": block.get("h")}, assets, folder, seq)
+        shown["title"] = "图表"
+        shown["note"] = "这是图表自带的预览图。图表数据仍留在文矩包里，界面不重绘图表。"
+        return shown
+    return _placeholder("图表占位", "图表数据留在文矩包里。界面不能重绘图表，这里没有把它画出来。")
 
 
 def _placeholder(title, note):
