@@ -7,6 +7,9 @@ from templates import apply_template
 from preset_store import normalize
 
 def execute(job):
+    if job.get('action') in ('convert','export'):
+        import convert
+        return convert.execute(job)
     if job.get('action')=='infer':
         import infer
         source=job['source']
