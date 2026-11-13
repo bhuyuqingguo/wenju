@@ -8,6 +8,13 @@ faces are not redistributable; this module never ships those files.
 import os, sys, shutil, subprocess
 from pathlib import Path
 
+def resolve(name):
+    """Name stored in the docx. A missing face is substituted only when drawing."""
+    if not name:
+        return name
+    return str(name)
+
+
 # Each list is the order to try. The first entry is the preferred family.
 CHAINS = {
     '仿宋_GB2312': ['仿宋_GB2312', 'FangSong_GB2312', '仿宋', 'FangSong', 'STFangsong', '华文仿宋'],
