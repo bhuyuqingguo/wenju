@@ -72,7 +72,7 @@ def delete_qobject(obj):
 
 
 def set_color_scheme(app, dark):
-    scheme = getattr(Qt, 'ColorScheme', None)
+    scheme = getattr(globals().get('Qt'), 'ColorScheme', None)
     hints = app.styleHints()
     if scheme is None or not hasattr(hints, 'setColorScheme'):
         return
@@ -89,3 +89,10 @@ def process_failed(error):
         return True
     kind = getattr(QProcess, "ProcessError", None)
     return kind is not None and error == getattr(kind, "FailedToStart", None)
+
+
+def failed_to_start(qprocess):
+    nested = getattr(qprocess, "ProcessError", None)
+    if nested is not None and hasattr(nested, "FailedToStart"):
+        return nested.FailedToStart
+    return qprocess.FailedToStart

@@ -23,6 +23,9 @@ def execute(job):
             _progress(job, {'rows': rows, 'overall': overall})
         merged = compose.merge_export(job['sources'], job['wenju'], job['docx'], job.get('template'), progress)
         return {'ok': True, 'output': merged['docx'], 'wenju': merged['wenju'], 'report': ''}
+    if job.get('action') in ('convert','export'):
+        import convert
+        return convert.execute(job)
     if job.get('action')=='infer':
         import infer
         source=job['source']
