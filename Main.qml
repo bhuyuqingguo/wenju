@@ -34,6 +34,7 @@ ApplicationWindow {
     function settings() { return {prefix:prefix,suffix:suffix,font:pageFont,size:pageSize,spacing:spacing,alignment:alignment,start:startMode,template:templateId,enabled:pageEnabled,uniform:pageUniform}; }
     property bool pageEnabled: true
     property bool pageUniform: true
+    property bool dropHot: false
     property string pendingTemplate: ""
     property int pendingPage: 0
     function syncPage() {
@@ -231,20 +232,37 @@ ApplicationWindow {
             Action {visible:(page===1||page===3);text:"保存修改";primary:true;enabled:bridge.personal&&bridge.dirty;onClicked:{win.contentItem.forceActiveFocus();bridge.saveTemplate();}}
         }
         Rectangle {
+            objectName:"importDropZone"
             visible:page===0
-            Layout.fillWidth:true;Layout.preferredHeight:72*appearance.scale;radius:10
-            color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
-            RowLayout {anchors.fill:parent;anchors.leftMargin:16;anchors.rightMargin:12;spacing:12
-                Rectangle {width:36;height:36;radius:8;color:appearance.colors.surface
-                    Txt{anchors.centerIn:parent;text:"+";font.pixelSize:Math.round(22*appearance.scale);color:blue}
+            Layout.fillWidth:true;Layout.preferredHeight:56*appearance.scale;radius:10
+            color:(fileDrop.containsDrag||win.dropHot)?appearance.palette["#d7e6f5"]:appearance.palette["#eaf0f6"]
+            border.width:0
+            Canvas {
+                id:dropDash
+                anchors.fill:parent
+                property bool hot: fileDrop.containsDrag || win.dropHot
+                onHotChanged: requestPaint()
+                onPaint: {
+                    var ctx = getContext("2d")
+                    ctx.clearRect(0, 0, width, height)
+                    ctx.strokeStyle = hot ? win.blue : "#8aa0b5"
+                    ctx.lineWidth = 1.5
+                    ctx.setLineDash([7, 4])
+                    ctx.beginPath()
+                    ctx.roundedRect(2, 2, width - 4, height - 4, 10, 10)
+                    ctx.stroke()
                 }
-                ColumnLayout {Layout.fillWidth:true;spacing:2
-                    Txt {text:"把要整理的文档拖到这里";font.pixelSize:Math.round(15*appearance.scale);font.weight:Font.DemiBold;Layout.fillWidth:true;elide:Text.ElideRight}
+            }
+            RowLayout {anchors.fill:parent;anchors.leftMargin:16;anchors.rightMargin:12;spacing:12
+                Rectangle {width:32;height:32;radius:8;color:appearance.colors.surface
+                    Txt{anchors.centerIn:parent;text:"+";font.pixelSize:Math.round(20*appearance.scale);color:blue}
+                }
+                ColumnLayout {Layout.fillWidth:true;spacing:1
+                    Txt {text:"把文档拖到这里导入";font.pixelSize:Math.round(15*appearance.scale);font.weight:Font.DemiBold;Layout.fillWidth:true;elide:Text.ElideRight}
                     Txt {text:"DOCX / DOC / WPS / RTF / 文矩 · 先选模板再导入";color:muted;font.pixelSize:Math.round(12*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
                 }
                 Action {text:"选择文档";primary:true;onClicked:bridge.choose()}
             }
-            DropArea {anchors.fill:parent;onDropped:function(drop){if(drop.hasUrls)bridge.dropFiles(drop.urls);}}
         }
 
         RowLayout{visible:page===1||page===3||page===4;Layout.fillWidth:true;spacing:10
@@ -477,6 +495,21 @@ ApplicationWindow {
         }
         Rectangle {Layout.fillWidth:true;height:1;color:appearance.palette["#dfe5ed"]}
         RowLayout{Layout.fillWidth:true;Rectangle{width:6;height:6;radius:3;color:bridge.busy?appearance.palette["#c79a46"]:appearance.palette["#5a9684"]}Txt{text:bridge.status;color:muted;font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}Txt{text:"WENJU";color:appearance.palette["#a3adba"];font.pixelSize:Math.round(10*appearance.scale);font.letterSpacing:2}}
+    }
+    DropArea {
+        id: fileDrop
+        objectName: "windowDrop"
+        anchors.fill: parent
+        keys: ["text/uri-list"]
+        enabled: win.page===0 || win.page===5
+        onEntered: function(drag) { win.dropHot = drag.hasUrls }
+        onExited: win.dropHot = false
+        onDropped: function(drop) {
+            win.dropHot = false
+            if (!drop.hasUrls) return
+            if (win.page === 5) bridge.dropConvert(drop.urls)
+            else bridge.dropFiles(drop.urls)
+        }
     }
     Opening{id:opening;anchors.fill:parent;z:1000;onFinished:win.contentItem.forceActiveFocus()}
 }

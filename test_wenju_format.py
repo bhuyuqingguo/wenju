@@ -157,6 +157,7 @@ def main():
         assert result["ok"] and result["output"].lower().endswith(".docx"), result
         assert Path(result["output"]).is_file()
         _test_fidelity(tmp)
+        _test_exported_images_do_not_overlap(tmp, png)
     screen = (ROOT / "Main.qml").read_text(encoding="utf-8")
     bridge = (ROOT / "app.py").read_text(encoding="utf-8")
     assert "saveWenju" in screen and "exportDocx" in screen and "文矩" in screen
@@ -800,6 +801,123 @@ def _test_vector_and_chart(tmp):
     assert chart_xml in _media_bytes(tmp / "chart-compose.docx", ".xml")
     assert book in _media_bytes(tmp / "chart-compose.docx", ".xlsx")
     print("PASS: emf/wmf/ole and chart parts round-trip without becoming bitmaps")
+
+
+def _anchor(rid, name, cx, cy):
+    return """<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="251659264" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1">
+      <wp:simplePos x="0" y="0"/>
+      <wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH>
+      <wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>
+      <wp:extent cx="%d" cy="%d"/>
+      <wp:docPr id="1" name="%s"/>
+      <a:graphic><a:graphicData uri="%s"><pic:pic><pic:blipFill><a:blip r:embed="%s"/></pic:blipFill>
+        <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1" cy="1"/></a:xfrm></pic:spPr>
+      </pic:pic></a:graphicData></a:graphic>
+    </wp:anchor></w:drawing></w:r>""" % (cx, cy, name, PIC, rid)
+
+
+def _test_exported_images_do_not_overlap(tmp, png):
+    """Anchored pictures that share a position and a docPr id must export inline, one after another."""
+    import base64
+    import clipboard_import
+    import compose
+
+    cx, cy = 80 * 12700, 40 * 12700
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s" xmlns:r="%s" xmlns:wp="%s" xmlns:a="%s" xmlns:pic="%s">
+  <w:body>
+    <w:p>%s%s</w:p>
+    <w:tbl><w:tr><w:tc><w:p>%s%s</w:p></w:tc></w:tr></w:tbl>
+  </w:body>
+</w:document>""" % (W, R, WP, A, PIC, _anchor("rId4", "Picture 1", cx, cy), _anchor("rId5", "Picture 1", cx, cy), _anchor("rId6", "Picture 1", 60 * 12700, 30 * 12700), _anchor("rId7", "Picture 1", 50 * 12700, 25 * 12700))
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/a.png"/>
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/b.png"/>
+  <Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/c.png"/>
+  <Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/d.png"/>
+</Relationships>"""
+    src = tmp / "stacked-anchors.docx"
+    with zipfile.ZipFile(src, "w") as archive:
+        archive.writestr("word/document.xml", document.encode("utf-8"))
+        archive.writestr("word/_rels/document.xml.rels", rels.encode("utf-8"))
+        archive.writestr("word/media/a.png", png)
+        archive.writestr("word/media/b.png", png)
+        archive.writestr("word/media/c.png", png)
+        archive.writestr("word/media/d.png", png)
+    doc = wf.from_docx(src)
+    images = [block for block in doc.blocks if block["type"] == "image"]
+    cell_images = []
+    for block in doc.blocks:
+        if block["type"] != "table":
+            continue
+        for row in block["rows"]:
+            for cell in row:
+                cell_images.extend(cell.get("images") or [])
+    assert len(images) >= 2, [block["type"] for block in doc.blocks]
+    assert len(cell_images) >= 2, cell_images
+    wenju = tmp / "stacked.wenju"
+    wf.save(doc, wenju)
+    exported = tmp / "stacked-wenju.docx"
+    wf.to_docx(doc, exported)
+    composed = tmp / "stacked-compose.docx"
+    compose.to_docx(doc, str(composed))
+    merged = tmp / "stacked-merge.docx"
+    compose.merge_export([str(wenju)], str(tmp / "stacked-merge.wenju"), str(merged))
+    for path in (exported, composed, merged):
+        _assert_drawings_do_not_overlap(path, 4)
+    encoded = base64.b64encode(png).decode("ascii")
+    html = '<p><img src="data:image/png;base64,%s" width="80" height="40"><img src="data:image/png;base64,%s" width="100" height="50"></p>' % (encoded, encoded)
+    clip = clipboard_import.document_from_parts(html=html)
+    clip_out = tmp / "clipboard-images.docx"
+    wf.to_docx(clip, clip_out)
+    _assert_drawings_do_not_overlap(clip_out, 2)
+    print("PASS: exported images stay inline, with unique ids, and do not share a position")
+
+
+def _assert_drawings_do_not_overlap(path, minimum):
+    root = ET.fromstring(zipfile.ZipFile(path).read("word/document.xml"))
+    drawings = [node for node in root.iter(q(W, "drawing"))]
+    assert len(drawings) >= minimum, (path.name, len(drawings))
+    parents = {child: parent for parent in root.iter() for child in list(parent)}
+    ids = []
+    positions = []
+    paragraphs = []
+    for drawing in drawings:
+        anchor = next(drawing.iter(q(WP, "anchor")), None)
+        inline = next(drawing.iter(q(WP, "inline")), None)
+        if anchor is not None:
+            names = [local_name(child.tag) for child in list(anchor)]
+            assert any(name.startswith("wrap") for name in names), names
+            horizontal = next(anchor.iter(q(WP, "positionH")), None)
+            vertical = next(anchor.iter(q(WP, "positionV")), None)
+            assert horizontal is not None and vertical is not None
+            positions.append((ET.tostring(horizontal), ET.tostring(vertical)))
+        else:
+            assert inline is not None, path.name
+        doc_pr = next(drawing.iter(q(WP, "docPr")))
+        ids.append(doc_pr.get("id"))
+        extent = next(drawing.iter(q(WP, "extent")), None)
+        shape = next(drawing.iter(q(A, "ext")), None)
+        if extent is not None and shape is not None:
+            assert extent.get("cx") == shape.get("cx") and extent.get("cy") == shape.get("cy")
+            assert int(extent.get("cx") or 0) > 0 and int(extent.get("cy") or 0) > 0
+        node = drawing
+        paragraph = None
+        while node is not None:
+            if node.tag == q(W, "p"):
+                paragraph = node
+                break
+            node = parents.get(node)
+        assert paragraph is not None
+        paragraphs.append(paragraph)
+    assert len(ids) == len(set(ids)), (path.name, ids)
+    assert len(positions) == len(set(positions))
+    assert len(paragraphs) == len({id(item) for item in paragraphs}), path.name
+
+
+def local_name(tag):
+    return tag.rsplit("}", 1)[-1]
 
 
 if __name__ == "__main__":

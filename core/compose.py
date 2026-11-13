@@ -430,6 +430,20 @@ def _build_docx(doc, pages):
             parts["word/" + target] = doc.assets[asset]
             media_ids[id(block)] = (add_rel("image", target), drawing_seq, ext)
             drawing_seq += 1
+        elif block.get("type") == "table":
+            for row in block.get("rows") or []:
+                for cell in row:
+                    if not isinstance(cell, dict):
+                        continue
+                    for image in cell.get("images") or []:
+                        asset = image.get("asset") if isinstance(image, dict) else None
+                        if not asset or asset not in doc.assets:
+                            continue
+                        ext = os.path.splitext(asset)[1].lower() or ".png"
+                        target = "media/%d%s" % (drawing_seq, ext)
+                        parts["word/" + target] = doc.assets[asset]
+                        media_ids[id(image)] = (add_rel("image", target), drawing_seq, ext)
+                        drawing_seq += 1
         elif block.get("type") == "chart":
             plan = wenju_format.prepare_chart(block, doc.assets, chart_seq)
             ids = []
@@ -502,7 +516,7 @@ def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids, chart
                 fitted["w"], fitted["h"] = image_size.fit_points(block.get("w") or 40, block.get("h") or 20, image_size.content_width_pt())
                 last_p = wenju_format.write_chart_paragraph(body, fitted, plan["ids"], plan.get("seq") or 1)
         elif kind == "table":
-            _emit_table(body, block)
+            _emit_table(body, block, media_ids)
             last_p = None
     if open_section is None:
         open_section = sections[0]
@@ -674,23 +688,48 @@ def _pt_to_emu(value):
 
 def _emit_image(parent, rel_id, seq, width, height):
     paragraph = ET.SubElement(parent, _w("p"))
+    _emit_inline(paragraph, rel_id, seq, width, height)
+    return paragraph
+
+
+def _emit_inline(paragraph, rel_id, seq, width, height):
+    """One inline drawing. wp:extent and a:ext use the same size, and docPr ids stay unique."""
     run = ET.SubElement(paragraph, _w("r"))
     drawing = ET.SubElement(run, _w("drawing"))
     inline = ET.SubElement(drawing, "{%s}inline" % WP)
+    cx = str(_pt_to_emu(width))
+    cy = str(_pt_to_emu(height))
     extent = ET.SubElement(inline, "{%s}extent" % WP)
-    extent.set("cx", str(_pt_to_emu(width)))
-    extent.set("cy", str(_pt_to_emu(height)))
+    extent.set("cx", cx)
+    extent.set("cy", cy)
     doc_pr = ET.SubElement(inline, "{%s}docPr" % WP)
     doc_pr.set("id", str(seq))
-    doc_pr.set("name", "Picture%d" % seq)
+    doc_pr.set("name", "Picture %d" % seq)
     graphic = ET.SubElement(inline, "{%s}graphic" % A)
     data = ET.SubElement(graphic, "{%s}graphicData" % A)
     data.set("uri", PIC)
     pic = ET.SubElement(data, "{%s}pic" % PIC)
+    nv = ET.SubElement(pic, "{%s}nvPicPr" % PIC)
+    cnv = ET.SubElement(nv, "{%s}cNvPr" % PIC)
+    cnv.set("id", str(seq))
+    cnv.set("name", "Picture %d" % seq)
+    ET.SubElement(nv, "{%s}cNvPicPr" % PIC)
     fill = ET.SubElement(pic, "{%s}blipFill" % PIC)
     blip = ET.SubElement(fill, "{%s}blip" % A)
     blip.set(_r("embed"), rel_id)
-    return paragraph
+    stretch = ET.SubElement(fill, "{%s}stretch" % A)
+    ET.SubElement(stretch, "{%s}fillRect" % A)
+    sp = ET.SubElement(pic, "{%s}spPr" % PIC)
+    xfrm = ET.SubElement(sp, "{%s}xfrm" % A)
+    off = ET.SubElement(xfrm, "{%s}off" % A)
+    off.set("x", "0")
+    off.set("y", "0")
+    ext = ET.SubElement(xfrm, "{%s}ext" % A)
+    ext.set("cx", cx)
+    ext.set("cy", cy)
+    geom = ET.SubElement(sp, "{%s}prstGeom" % A)
+    geom.set("prst", "rect")
+    ET.SubElement(geom, "{%s}avLst" % A)
 
 
 def _span_map(block):
@@ -732,7 +771,7 @@ def _row_span_lines(block, spans, r_i):
     return lines
 
 
-def _emit_table(parent, block):
+def _emit_table(parent, block, media_ids=None):
     tbl = ET.SubElement(parent, _w("tbl"))
     props = ET.SubElement(tbl, _w("tblPr"))
     margins = ET.SubElement(props, _w("tblCellMar"))
@@ -746,8 +785,9 @@ def _emit_table(parent, block):
     for r_i, row in enumerate(block["rows"]):
         tr = ET.SubElement(tbl, _w("tr"))
         height = ET.SubElement(ET.SubElement(tr, _w("trPr")), _w("trHeight"))
-        height.set(_w("val"), str(LINE_TWIP * _row_span_lines(block, spans, r_i)))
-        height.set(_w("hRule"), "exact")
+        image_twips = _row_image_twips(row)
+        height.set(_w("val"), str(LINE_TWIP * _row_span_lines(block, spans, r_i) + image_twips))
+        height.set(_w("hRule"), "atLeast" if image_twips else "exact")
         c_i = 0
         while c_i < len(row):
             found = _merge_at(spans, r_i, c_i)
@@ -767,10 +807,11 @@ def _emit_table(parent, block):
                 if _rowspan(merge) > 1:
                     vm = ET.SubElement(tcpr, _w("vMerge"))
                     vm.set(_w("val"), "restart")
-                _emit_rectangle(tc, block, merge)
+                _emit_rectangle(tc, block, merge, media_ids)
                 c_i += _colspan(merge)
             else:
                 _emit_cell_runs(tc, row[c_i].get("runs"))
+                _emit_cell_images(tc, row[c_i], media_ids)
                 c_i += 1
     return tbl
 
@@ -800,7 +841,31 @@ def _emit_continue(tr, merge):
     _emit_paragraph(tc, "")
 
 
-def _emit_rectangle(parent, block, merge):
+def _row_image_twips(row):
+    total = 0
+    for cell in row:
+        if not isinstance(cell, dict):
+            continue
+        for image in cell.get("images") or []:
+            if isinstance(image, dict) and image.get("h"):
+                total += int(round(float(image["h"]) * 20))
+    return total
+
+
+def _emit_cell_images(parent, cell, media_ids):
+    if not media_ids or not isinstance(cell, dict):
+        return
+    for image in cell.get("images") or []:
+        packed = media_ids.get(id(image))
+        if not packed:
+            continue
+        rel_id, seq, _ext = packed
+        shown_w, shown_h = image_size.fit_points(image.get("w") or 40, image.get("h") or 20, image_size.content_width_pt())
+        paragraph = ET.SubElement(parent, _w("p"))
+        _emit_inline(paragraph, rel_id, seq, shown_w, shown_h)
+
+
+def _emit_rectangle(parent, block, merge, media_ids=None):
     runs = []
     for r in range(merge["row"], merge["row"] + _rowspan(merge)):
         for c in range(merge["col"], merge["col"] + _colspan(merge)):
@@ -815,6 +880,9 @@ def _emit_rectangle(parent, block, merge):
         _emit_cell_runs(parent, runs)
     else:
         _emit_paragraph(parent, "")
+    for r in range(merge["row"], merge["row"] + _rowspan(merge)):
+        for c in range(merge["col"], merge["col"] + _colspan(merge)):
+            _emit_cell_images(parent, block["rows"][r][c], media_ids)
 
 
 def _emit_cell_runs(parent, runs):

@@ -18,6 +18,7 @@ DATA = data_directory(ROOT)
 sys.path.insert(0, str(ROOT / 'core'))
 import fontfallback
 import preview_model
+import import_drop
 
 CONVERT_TARGETS = {
     'keep': {
@@ -124,6 +125,7 @@ class Bridge(QObject):
         try: self.settings = json.loads((DATA/'page.json').read_text('utf-8'))
         except (OSError, ValueError): pass
         self.store=PresetStore(DATA)
+        self.template_ready=(DATA/'current.json').exists()
         self.font_notice=fontfallback.guidance(self.store.rules)
         self.section='页面'
         self.task_kind='process'
@@ -297,7 +299,10 @@ class Bridge(QObject):
         except Exception as exc:self.error(exc)
     @Slot(str)
     def selectTemplate(self,id):
-        try:self.store.select(id);self.rulesChanged.emit();self.changed.emit()
+        try:
+            self.store.select(id)
+            self.template_ready=True
+            self.rulesChanged.emit();self.changed.emit()
         except Exception as exc:self.error(exc)
     @Slot(str,result=bool)
     def saveAs(self,name):
@@ -458,7 +463,12 @@ class Bridge(QObject):
         self.changed.emit()
 
     @Slot('QVariantList')
-    def dropFiles(self, urls): self.add([QUrl(u).toLocalFile() for u in urls])
+    def dropFiles(self, urls):
+        before=len(self.rows)
+        self.add([QUrl(u).toLocalFile() for u in urls])
+        if len(self.rows)>before and not self.template_ready:
+            self.message=import_drop.TEMPLATE_PROMPT
+            self.changed.emit()
 
     @Slot()
     def sample(self): self.add([ROOT/'core/样例/样例_整理前.docx'])
@@ -1191,6 +1201,22 @@ if not engine.rootObjects(): sys.exit(1)
 window = engine.rootObjects()[0]
 if hasattr(window, 'setIcon'):
     window.setIcon(app.windowIcon())
+
+def _window_drop(paths):
+    page = window.property('page')
+    if page == 5:
+        bridge.addConvert(paths)
+        return
+    before = len(bridge.rows)
+    bridge.add(paths)
+    if len(bridge.rows) > before and not bridge.template_ready:
+        bridge.message = import_drop.TEMPLATE_PROMPT
+        bridge.changed.emit()
+
+def _window_hover(hot):
+    window.setProperty('dropHot', bool(hot))
+
+import_drop.install_window_drop(window, _window_drop, _window_hover, import_drop.CONVERT_SUFFIXES)
 incoming=[arg for arg in sys.argv[1:] if not arg.startswith('--') and Path(arg).is_file()]
 if incoming:bridge.add(incoming)
 if '--test-opening' in sys.argv:
