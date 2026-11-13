@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import shutil
+import struct
 import tempfile
 import unittest
 import zipfile
@@ -627,6 +628,87 @@ class ClipboardTests(unittest.TestCase):
         self.assertEqual(grid['rows'][0][0]['runs'][0]['text'], '表头')
         self.assertEqual(grid['merges'][0]['colspan'], 2)
         self.assertIn('结尾', text_of(drawn))
+
+    def test_rtf_emf_wmf_roundtrip_and_clipboard_metafile(self):
+        emf = bytearray(88)
+        struct.pack_into('<I', emf, 0, 1)
+        struct.pack_into('<I', emf, 4, 88)
+        struct.pack_into('<I', emf, 40, 0x464D4520)
+        struct.pack_into('<I', emf, 48, 88)
+        emf[80:84] = b'EMF1'
+        emf = bytes(emf)
+        wmf = struct.pack('<IH', 0x9AC6CDD7, 0) + struct.pack('<hhhhH', 0, 0, 100, 80, 1440) + struct.pack('<IH', 0, 0)
+        wmf += struct.pack('<HHHIHIH', 1, 9, 0x0300, 9, 0, 0, 0)
+        png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==')
+        rtf = (
+            r'{\rtf1\ansi\pard before\par'
+            r'{\*\shppict{\pict\emfblip\picwgoal2880\pichgoal1440 ' + emf.hex() + r'}}'
+            r'{\nonshppict{\pict\pngblip\picwgoal100\pichgoal100 ' + png.hex() + r'}}'
+            r'\par{\pict\wmetafile8\picwgoal1440\pichgoal720 ' + wmf.hex() + r'}\par after\par}'
+        )
+        doc = clip.document_from_parts(rtf=rtf.encode('ascii'))
+        self.assertEqual(fmt.validate(doc), [])
+        images = [block for block in doc.blocks if block['type'] == 'image']
+        self.assertEqual(len(images), 2, [block['asset'] for block in images])
+        self.assertEqual(doc.assets[images[0]['asset']], emf)
+        self.assertEqual((images[0]['w'], images[0]['h']), (144, 72))
+        self.assertTrue(images[0]['asset'].endswith('.emf'))
+        self.assertEqual(doc.assets[images[1]['asset']], wmf)
+        self.assertEqual((images[1]['w'], images[1]['h']), (72, 36))
+        self.assertIn('before', text_of(doc))
+        self.assertIn('after', text_of(doc))
+        folder = Path(tempfile.mkdtemp())
+        try:
+            docx = folder / 'meta.docx'
+            fmt.to_docx(doc, docx)
+            with zipfile.ZipFile(str(docx)) as archive:
+                blobs = [archive.read(name) for name in archive.namelist() if name.startswith('word/media/')]
+                types = archive.read('[Content_Types].xml')
+            self.assertIn(emf, blobs)
+            self.assertIn(wmf, blobs)
+            self.assertIn(b'image/x-emf', types)
+            self.assertIn(b'image/x-wmf', types)
+            back = fmt.from_docx(docx)
+            restored = [back.assets[block['asset']] for block in back.blocks if block['type'] == 'image']
+            self.assertIn(emf, restored)
+            self.assertIn(wmf, restored)
+        finally:
+            shutil.rmtree(str(folder))
+        wrapped = (
+            r'{\rtf1\ansi{\object\objemb{\*\objclass PowerPoint.Slide.12}'
+            r'{\result{\pard pasted\par{\pict\emfblip\picwgoal720\pichgoal720 ' + emf.hex() + r'}}}}'
+        )
+        drawn = clip.document_from_parts(rtf=wrapped.encode('ascii'))
+        found = next(block for block in drawn.blocks if block['type'] == 'image')
+        self.assertEqual(drawn.assets[found['asset']], emf)
+        self.assertIn('pasted', text_of(drawn))
+        html = '<p>说明</p><img src="data:image/x-emf;base64,%s" width="96" height="48">' % base64.b64encode(emf).decode('ascii')
+        html_doc = clip.document_from_parts(html=html)
+        html_image = next(block for block in html_doc.blocks if block['type'] == 'image')
+        self.assertEqual(html_doc.assets[html_image['asset']], emf)
+        self.assertEqual((html_image['w'], html_image['h']), (72, 36))
+        linked = '<p>图</p><img src="file:///C:/Temp/slide.wmf" width="80" height="40">'
+        linked_rtf = r'{\rtf1\ansi{\pict\wmetafile8\picwgoal1600\pichgoal800 ' + wmf.hex() + r'}}'
+        merged = clip.document_from_parts(html=linked, rtf=linked_rtf.encode('ascii'))
+        merged_image = next(block for block in merged.blocks if block['type'] == 'image')
+        self.assertEqual(merged.assets[merged_image['asset']], wmf)
+        mime = FakeMime({
+            'text/plain': '只要元文件'.encode('utf-8'),
+            'image/png': png,
+            'image/x-emf': emf,
+        })
+        preferred = clip.document_from_mime(mime)
+        kept = next(block for block in preferred.blocks if block['type'] == 'image')
+        self.assertEqual(preferred.assets[kept['asset']], emf)
+        self.assertNotIn(png, preferred.assets.values())
+        prefixed = b'\x00' * 16 + wmf
+        qt = FakeMime({
+            'application/x-qt-windows-mime;value="MetaFilePict"': prefixed,
+            'image/png': png,
+        })
+        qt_doc = clip.document_from_mime(qt)
+        qt_image = next(block for block in qt_doc.blocks if block['type'] == 'image')
+        self.assertEqual(qt_doc.assets[qt_image['asset']], wmf)
 
     def test_validate_rejects_a_bad_block(self):
         doc = fmt.WenjuDoc([{'type': 'heading', 'level': 0, 'runs': []}, {'type': 'image', 'asset': 'missing.png', 'w': 1, 'h': 1}], {}, {})

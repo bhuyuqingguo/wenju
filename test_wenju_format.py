@@ -1,4 +1,5 @@
 import json
+import struct
 import sys
 import tempfile
 import zipfile
@@ -408,6 +409,7 @@ def _test_fidelity(tmp):
     anchor_doc = wf.from_docx(anchor)
     anchor_images = [block for block in anchor_doc.blocks if block["type"] == "image"]
     assert len(anchor_images) == 1 and anchor_images[0]["w"] == 80 and anchor_images[0]["h"] == 40
+    _test_vector_and_chart(tmp)
 
 
 def _assert_fidelity(doc, png):
@@ -551,6 +553,253 @@ def _build_anchor_image(path, png):
         archive.writestr("word/document.xml", document.encode("utf-8"))
         archive.writestr("word/_rels/document.xml.rels", rels.encode("utf-8"))
         archive.writestr("word/media/anchor.png", png)
+
+
+def _emf(marker):
+    data = bytearray(88)
+    struct.pack_into("<I", data, 0, 1)
+    struct.pack_into("<I", data, 4, 88)
+    struct.pack_into("<I", data, 40, 0x464D4520)
+    struct.pack_into("<I", data, 44, 0x00010000)
+    struct.pack_into("<I", data, 48, 88)
+    struct.pack_into("<I", data, 52, 1)
+    data[80:84] = marker
+    return bytes(data)
+
+
+def _wmf():
+    placeable = struct.pack("<IH", 0x9AC6CDD7, 0) + struct.pack("<hhhhH", 0, 0, 100, 80, 1440) + struct.pack("<IH", 0, 0)
+    meta = struct.pack("<HHHIHIH", 1, 9, 0x0300, 9, 0, 0, 0)
+    return placeable + meta
+
+
+def _cfb(payload):
+    sector = 512
+    fat = bytearray(sector)
+    for index in range(sector // 4):
+        struct.pack_into("<I", fat, index * 4, 0xFFFFFFFF)
+    struct.pack_into("<I", fat, 0, 0xFFFFFFFD)
+    struct.pack_into("<I", fat, 4, 0xFFFFFFFE)
+    struct.pack_into("<I", fat, 8, 0xFFFFFFFE)
+    struct.pack_into("<I", fat, 12, 0xFFFFFFFE)
+    mini = bytearray(sector)
+    for index in range(sector // 4):
+        struct.pack_into("<I", mini, index * 4, 0xFFFFFFFF)
+    struct.pack_into("<I", mini, 0, 1)
+    struct.pack_into("<I", mini, 4, 0xFFFFFFFE)
+    directory = bytearray(sector)
+
+    def entry(index, name, kind, start, size, child=0xFFFFFFFF):
+        off = index * 128
+        encoded = name.encode("utf-16le")
+        directory[off:off + len(encoded)] = encoded
+        struct.pack_into("<H", directory, off + 64, len(encoded) + 2)
+        directory[off + 66] = kind
+        struct.pack_into("<I", directory, off + 68, 0xFFFFFFFF)
+        struct.pack_into("<I", directory, off + 72, 0xFFFFFFFF)
+        struct.pack_into("<I", directory, off + 76, child)
+        struct.pack_into("<I", directory, off + 116, start)
+        struct.pack_into("<I", directory, off + 120, size)
+
+    entry(0, "Root Entry", 5, 3, 128, child=1)
+    entry(1, "CONTENTS", 2, 0, len(payload))
+    stream = payload + b"\x00" * (128 - len(payload))
+    stream = stream + b"\x00" * (sector - len(stream))
+    header = bytearray(sector)
+    header[0:8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    struct.pack_into("<H", header, 0x18, 0x003E)
+    struct.pack_into("<H", header, 0x1A, 3)
+    struct.pack_into("<H", header, 0x1C, 0xFFFE)
+    struct.pack_into("<H", header, 0x1E, 9)
+    struct.pack_into("<H", header, 0x20, 6)
+    struct.pack_into("<I", header, 0x2C, 1)
+    struct.pack_into("<I", header, 0x30, 1)
+    struct.pack_into("<I", header, 0x38, 4096)
+    struct.pack_into("<I", header, 0x3C, 2)
+    struct.pack_into("<I", header, 0x40, 1)
+    struct.pack_into("<I", header, 0x44, 0xFFFFFFFE)
+    for index in range(109):
+        struct.pack_into("<I", header, 0x4C + 4 * index, 0xFFFFFFFF)
+    struct.pack_into("<I", header, 0x4C, 0)
+    return bytes(header) + bytes(fat) + bytes(directory) + bytes(mini) + stream
+
+
+def _zip_docx(path, document, rels, parts):
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("word/document.xml", document.encode("utf-8"))
+        archive.writestr("word/_rels/document.xml.rels", rels.encode("utf-8"))
+        for name, data in parts.items():
+            archive.writestr(name, data)
+
+
+def _media_bytes(package, suffix):
+    with zipfile.ZipFile(package) as archive:
+        found = [archive.read(name) for name in archive.namelist() if name.replace("\\", "/").lower().endswith(suffix)]
+    return found
+
+
+def _content_type_map(package):
+    with zipfile.ZipFile(package) as archive:
+        root = ET.fromstring(archive.read("[Content_Types].xml"))
+    ns = "{http://schemas.openxmlformats.org/package/2006/content-types}"
+    defaults = {}
+    overrides = {}
+    for node in root:
+        if node.tag == ns + "Default":
+            defaults[node.get("Extension")] = node.get("ContentType")
+        elif node.tag == ns + "Override":
+            overrides[node.get("PartName")] = node.get("ContentType")
+    return defaults, overrides
+
+
+def _test_vector_and_chart(tmp):
+    emf = _emf(b"EMF1")
+    wmf = _wmf()
+    pasted = _emf(b"PPT1")
+    packed = _emf(b"OLE1")
+    src = tmp / "vectors.docx"
+    document = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s" xmlns:r="%s" xmlns:wp="%s" xmlns:a="%s" xmlns:pic="%s" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+  <w:body>
+    <w:p><w:r><w:rPr><w:rFonts w:ascii="仿宋_GB2312" w:hAnsi="仿宋_GB2312"/><w:sz w:val="32"/></w:rPr><w:t>正文甲</w:t></w:r></w:p>
+    <w:p><w:r><w:drawing><wp:inline><wp:extent cx="%d" cy="%d"/>
+      <a:graphic><a:graphicData uri="%s"><pic:pic><pic:blipFill><a:blip r:embed="rId2"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>
+    </wp:inline></w:drawing></w:r></w:p>
+    <w:p><w:r><w:pict>
+      <v:shape style="width:90pt;height:40pt"><v:imagedata o:relid="rId3"/></v:shape>
+      <o:OLEObject ProgID="PowerPoint.Slide.12" r:id="rId8"/>
+    </w:pict></w:r></w:p>
+    <w:p><w:r><w:object w:dxaOrig="2880" w:dyaOrig="1440">
+      <o:OLEObject ProgID="PowerPoint.Slide.8" r:id="rId5"/>
+    </w:object></w:r></w:p>
+    <w:p><w:r><w:object w:dxaOrig="2160" w:dyaOrig="1080">
+      <o:OLEObject ProgID="Package" r:id="rId6"/>
+    </w:object></w:r></w:p>
+    <w:p><w:r><w:object><o:OLEObject ProgID="Package" r:id="rId7"/></w:object></w:r></w:p>
+  </w:body>
+</w:document>""" % (W, R, WP, A, PIC, 200 * 12700, 80 * 12700, PIC)
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/slide.emf"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/slide.wmf"/>
+  <Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/junk.bin"/>
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/raw.emf"/>
+  <Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/packed.bin"/>
+  <Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject" Target="embeddings/note.bin"/>
+</Relationships>"""
+    _zip_docx(src, document, rels, {
+        "word/media/slide.emf": emf,
+        "word/media/slide.wmf": wmf,
+        "word/embeddings/junk.bin": b"this-is-not-a-picture",
+        "word/embeddings/raw.emf": pasted,
+        "word/embeddings/packed.bin": _cfb(packed),
+        "word/embeddings/note.bin": b"hello-not-a-picture",
+    })
+    doc = wf.from_docx(src)
+    assert wf.validate(doc) == [], wf.validate(doc)
+    run = doc.blocks[0]["runs"][0]
+    assert run["text"] == "正文甲" and run["ascii"] == "仿宋_GB2312" and run["eastAsia"] == "仿宋_GB2312"
+    images = [block for block in doc.blocks if block["type"] == "image"]
+    assert len(images) == 4, [block.get("asset") for block in images]
+    blobs = [doc.assets[block["asset"]] for block in images]
+    assert emf in blobs and wmf in blobs and pasted in blobs and packed in blobs
+    assert images[0]["w"] == 200 and images[0]["h"] == 80
+    assert images[1]["w"] == 90 and images[1]["h"] == 40
+    assert images[2]["w"] == 144 and images[2]["h"] == 72
+    assert images[3]["w"] == 108 and images[3]["h"] == 54
+    assert all(not blob.startswith(b"\x89PNG") for blob in blobs)
+    package = tmp / "vectors.wenju"
+    wf.save(doc, package)
+    loaded = wf.load(package)
+    out = tmp / "vectors-out.docx"
+    wf.to_docx(loaded, out)
+    defaults, _overrides = _content_type_map(out)
+    assert defaults.get("emf") == "image/x-emf"
+    assert defaults.get("wmf") == "image/x-wmf"
+    assert _media_bytes(out, ".emf") 
+    assert emf in _media_bytes(out, ".emf")
+    assert wmf in _media_bytes(out, ".wmf")
+    again = wf.from_docx(out)
+    again_blobs = [again.assets[block["asset"]] for block in again.blocks if block["type"] == "image"]
+    for blob in (emf, wmf, pasted, packed):
+        assert blob in again_blobs
+    assert again.blocks[0]["runs"][0]["ascii"] == "仿宋_GB2312"
+    chart_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<c:chart><c:title><c:tx><c:v>销量</c:v></c:tx></c:title></c:chart>'
+        '<c:externalData r:id="rId1"/></c:chartSpace>'
+    ).encode("utf-8")
+    book = b"PK\x03\x04wenju-chart-book"
+    preview = _emf(b"PREV")
+    chart_src = tmp / "chart.docx"
+    chart_doc = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="%s" xmlns:r="%s" xmlns:wp="%s" xmlns:a="%s" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml">
+  <w:body>
+    <w:p><w:r><mc:AlternateContent>
+      <mc:Choice Requires="c">
+        <w:drawing><wp:inline><wp:extent cx="%d" cy="%d"/>
+          <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:chart r:id="rId4"/>
+          </a:graphicData></a:graphic>
+        </wp:inline></w:drawing>
+      </mc:Choice>
+      <mc:Fallback>
+        <w:pict><v:shape style="width:360pt;height:180pt"><v:imagedata r:id="rId5"/></v:shape></w:pict>
+      </mc:Fallback>
+    </mc:AlternateContent></w:r></w:p>
+  </w:body>
+</w:document>""" % (W, R, WP, A, 360 * 12700, 180 * 12700)
+    chart_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/>
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/chart-preview.emf"/>
+</Relationships>"""
+    chart_part_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="../embeddings/book.xlsx"/>
+</Relationships>"""
+    _zip_docx(chart_src, chart_doc, chart_rels, {
+        "word/charts/chart1.xml": chart_xml,
+        "word/charts/_rels/chart1.xml.rels": chart_part_rels.encode("utf-8"),
+        "word/embeddings/book.xlsx": book,
+        "word/media/chart-preview.emf": preview,
+    })
+    charted = wf.from_docx(chart_src)
+    assert wf.validate(charted) == [], wf.validate(charted)
+    charts = [block for block in charted.blocks if block["type"] == "chart"]
+    assert len(charts) == 1, [block["type"] for block in charted.blocks]
+    assert not any(block["type"] == "image" for block in charted.blocks)
+    assert charts[0]["w"] == 360 and charts[0]["h"] == 180
+    assert charted.assets[charts[0]["asset"]] == chart_xml
+    assert charted.assets[charts[0]["preview"]] == preview
+    assert book in charted.assets.values()
+    saved = tmp / "chart.wenju"
+    wf.save(charted, saved)
+    wf.to_docx(wf.load(saved), tmp / "chart-out.docx")
+    _defaults, overrides = _content_type_map(tmp / "chart-out.docx")
+    assert overrides.get("/word/charts/chart1.xml") == "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+    assert _defaults.get("xlsx") == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    assert chart_xml in _media_bytes(tmp / "chart-out.docx", ".xml")
+    assert book in _media_bytes(tmp / "chart-out.docx", ".xlsx")
+    assert preview in _media_bytes(tmp / "chart-out.docx", ".emf")
+    document_xml = zipfile.ZipFile(tmp / "chart-out.docx").read("word/document.xml").decode("utf-8")
+    requires = document_xml.find('Requires="c"')
+    assert requires > 0
+    tag = document_xml[document_xml.rfind("<", 0, requires):document_xml.find(">", requires)]
+    assert "xmlns:c=" in tag or "xmlns:c=" in document_xml[:requires]
+    restored = wf.from_docx(tmp / "chart-out.docx")
+    restored_chart = next(block for block in restored.blocks if block["type"] == "chart")
+    assert restored.assets[restored_chart["asset"]] == chart_xml
+    assert preview in restored.assets.values()
+    assert book in restored.assets.values()
+    assert restored_chart["w"] == 360 and restored_chart["h"] == 180
+    import compose
+    compose.to_docx(charted, str(tmp / "chart-compose.docx"))
+    assert chart_xml in _media_bytes(tmp / "chart-compose.docx", ".xml")
+    assert book in _media_bytes(tmp / "chart-compose.docx", ".xlsx")
+    print("PASS: emf/wmf/ole and chart parts round-trip without becoming bitmaps")
 
 
 if __name__ == "__main__":
