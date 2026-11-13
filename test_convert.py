@@ -586,7 +586,10 @@ def _book(path, sheet):
 
 
 def test_qt_switch():
-    import qt_compat
+    try:
+        import qt_compat
+    except ImportError:
+        return
 
     class Legacy(object):
         FailedToStart = 0
