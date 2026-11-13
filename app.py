@@ -3,7 +3,7 @@ from pathlib import Path
 from platform_support import data_directory, configure_rendering
 configure_rendering()
 from qt_compat import (
-    QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt, QMimeData, QMetaObject,
+    QObject, Signal, Slot, Property, QUrl, QProcess, QThread, QTimer, qInstallMessageHandler, Qt, QMimeData, QMetaObject,
     QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont,
     QQmlApplicationEngine, QQuickWindow, QQuickStyle, QApplication, QFileDialog,
     QTest, QPoint, QPointF, exec_app, delete_qobject, set_color_scheme, quick_style,
@@ -76,6 +76,32 @@ def qt_log(kind, context, message):
     with (DATA/'界面日志.txt').open('a',encoding='utf-8') as log: log.write(message+'\n')
 qInstallMessageHandler(qt_log)
 
+class _ClipboardParse(QThread):
+    progressed = Signal(int)
+    parsed = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, html, rtf, plain, images):
+        super().__init__()
+        self._html = html
+        self._rtf = rtf
+        self._plain = plain
+        self._images = images
+
+    def run(self):
+        try:
+            clip, _wenju = wenju_modules()
+            doc = clip.document_from_parts(self._html, self._rtf, self._plain, self._images, self.progressed.emit)
+            self.parsed.emit(doc)
+        except Exception as exc:
+            try:
+                clip, _wenju = wenju_modules()
+                message = clip.clip_failure_text(exc)
+            except Exception:
+                message = '无法读取剪贴板'
+            self.failed.emit(message or '无法读取剪贴板')
+
+
 class Bridge(QObject):
     changed = Signal()
     reportReady = Signal(str)
@@ -138,6 +164,14 @@ class Bridge(QObject):
         self.clipboard_wenju = ''
         self.clipboard_brush = False
         self._importing = False
+        self._clip_thread = None
+        self._clip_read = None
+        self._clip_token = None
+        self._preview_doc = None
+        self._preview_charts = 0
+        self._preview_limit = 40
+        self._preview_folder = None
+        self._more_scheduled = False
         if not (DATA/'current.json').exists() and self.settings:
             if self.store.find(self.settings.get('template','unit')):self.store.select(self.settings.get('template','unit'))
             self.updatePage(self.settings)
@@ -337,19 +371,11 @@ class Bridge(QObject):
         self.add(paths)
 
     def _set_import_progress(self, value):
-        self.import_progress = int(value)
+        value = int(value)
+        if value == self.import_progress:
+            return
+        self.import_progress = value
         self.importProgressChanged.emit()
-        app = QGuiApplication.instance()
-        if app is not None:
-            app.processEvents()
-
-    def _write_clipboard(self, doc, brush, wenju_path, docx_path):
-        clip, wenju = wenju_modules()
-        wenju.save(doc, wenju_path)
-        self._set_import_progress(90)
-        rules = clip.brush_styles(copy.deepcopy(self.store.rules)) if brush else None
-        wenju.to_docx(doc, docx_path, template=rules)
-        self._set_import_progress(100)
 
     @Slot(bool)
     def importClipboard(self, brush):
@@ -358,54 +384,77 @@ class Bridge(QObject):
         clip, _wenju = wenju_modules()
         self._importing = True
         self.running = True
+        if self._clip_read is None:
+            self._clip_read = clip.ClipRead()
+        self._clip_read.start()
         self.clipboard_brush = bool(brush)
         self.import_progress = 0
         self.importProgressChanged.emit()
-        self.message = '正在从剪贴板导入…'
+        self.message = '正在从剪贴板读入…'
         self.changed.emit()
         self.clipboardStarted.emit()
-        QGuiApplication.processEvents()
         try:
-            doc = clip.document_from_mime(QGuiApplication.clipboard().mimeData(), lambda value: self._set_import_progress(min(80, int(value * 0.8))))
-            import convert
-            taken=set()
-            wenju_path = convert.place_output(convert.clipboard_dir(), convert.clipboard_stem(), '.wenju', taken)
-            docx_path = convert.place_output(wenju_path.parent, wenju_path.stem, '.docx', taken)
-            self._write_clipboard(doc, brush, wenju_path, docx_path)
-            report_path = wenju_path.with_suffix('.txt')
-            report_path.write_text('已从剪贴板导入\n%s\n%s\n' % (wenju_path, docx_path), encoding='utf-8')
-            self.clipboard_doc = doc
-            self.clipboard_docx = str(docx_path)
-            self.clipboard_wenju = str(wenju_path)
-            self.rows.append(dict(path=str(docx_path), name=docx_path.name, state='已从剪贴板导入', output=str(docx_path), report=str(report_path), wenju=str(wenju_path)))
-            self._set_preview_doc(doc)
-            self.message = '已从剪贴板导入'
-            self.clipboardFinished.emit('已导入 %d 个块，并保存两份文件。\n%s\n%s' % (len(doc.blocks), wenju_path, docx_path))
-        except clip.ClipboardEmpty as exc:
-            self.error(exc)
+            html, rtf, plain, images = clip.parts_from_mime(QGuiApplication.clipboard().mimeData())
         except Exception as exc:
-            self.error(exc)
-        finally:
             self.running = False
             self._importing = False
-            self.changed.emit()
+            self.error(exc)
+            return
+        worker = _ClipboardParse(html, rtf, plain, images)
+        self._clip_token = object()
+        worker._clip_token = self._clip_token
+        worker.progressed.connect(self._set_import_progress)
+        worker.parsed.connect(self._clip_ready)
+        worker.failed.connect(self._clip_failed)
+        worker.finished.connect(self._clip_thread_done)
+        self._clip_thread = worker
+        worker.start()
+
+    def _clip_ready(self, doc):
+        if self._clip_read is None or not self._clip_read.accept():
+            return
+        self.clipboard_doc = doc
+        self.clipboard_docx = ''
+        self.clipboard_wenju = ''
+        self._set_preview_doc(doc)
+        self._set_import_progress(100)
+        self.running = False
+        self._importing = False
+        self.message = '已读入剪贴板，确认预览后再转换'
+        self.clipboardFinished.emit('已读入 %d 个块。还没有写文件。确认预览后，点「开始转换」。' % len(doc.blocks))
+        self.changed.emit()
+
+    def _clip_failed(self, message):
+        if self._clip_read is None or not self._clip_read.accept():
+            return
+        self.running = False
+        self._importing = False
+        self._set_import_progress(0)
+        self.error(message or '无法读取剪贴板')
+
+    def _stop_background(self):
+        thread = self._clip_thread
+        if thread is not None and thread.isRunning():
+            thread.wait()
+        if self.running and self.proc:
+            self.proc.waitForFinished(30000)
+
+    def _clip_thread_done(self):
+        worker = self.sender()
+        if worker is not None and getattr(worker, '_clip_token', None) is not self._clip_token:
+            return
+        if self._clip_read is None or not self._clip_read.thread_finished():
+            return
+        self.running = False
+        self._importing = False
+        self._set_import_progress(0)
+        self.message = '已取消读入'
+        self.changed.emit()
 
     @Slot(bool)
     def setClipboardBrush(self, brush):
-        brush = bool(brush)
-        if brush == self.clipboard_brush and self.clipboard_doc is None:
-            return
-        self.clipboard_brush = brush
-        if self.clipboard_doc is None or not self.clipboard_docx:
-            self.message = '按模板刷格式' if brush else '保留原格式'
-            self.changed.emit()
-            return
-        try:
-            self._write_clipboard(self.clipboard_doc, brush, self.clipboard_wenju, self.clipboard_docx)
-            self.message = '已按模板重新导出' if brush else '已按原格式重新导出'
-            self.clipboardFinished.emit(self.message + '\n' + self.clipboard_docx)
-        except Exception as exc:
-            self.error(exc)
+        self.clipboard_brush = bool(brush)
+        self.message = '按模板刷格式' if self.clipboard_brush else '保留原格式'
         self.changed.emit()
 
     @Slot('QVariantList')
@@ -515,6 +564,8 @@ class Bridge(QObject):
         if self.running: return
         self.convert_rows=[]
         self.convert_overall=0
+        self.clipboard_doc=None
+        self._preview_doc=None
         self._base_blocks=[]
         self._base_note='拖入文件或读取剪贴板后，这里显示标题、段落、表格和图片。'
         self._publish_preview()
@@ -531,11 +582,7 @@ class Bridge(QObject):
         if not spec: return
         self.convert_target=target
         self.convert_mode=spec['mode']
-        brush=spec['brush']
-        if self.clipboard_doc is not None and self.clipboard_docx and brush!=self.clipboard_brush:
-            self.setClipboardBrush(brush)
-            return
-        self.clipboard_brush=brush
+        self.clipboard_brush=spec['brush']
         self.message=spec['hint']
         self.changed.emit()
 
@@ -562,6 +609,8 @@ class Bridge(QObject):
         if action=='convert':
             text=(self.convert_paste or '').strip()
             if text: items.append({'name':'粘贴的内容','text':text,'source':'剪贴板'})
+            clip_item=self._clipboard_item()
+            if clip_item: items.insert(0, clip_item)
             for row in list(self.convert_rows):
                 if row.get('path'): items.append({'name':row['name'],'path':row['path'],'source':row.get('source') or row['path']})
             self._convert_title=title or '转换完成'
@@ -781,18 +830,62 @@ class Bridge(QObject):
         self.preview_note=self._base_note
         self.changed.emit()
 
+    def _clipboard_item(self):
+        if self.clipboard_doc is None:
+            return None
+        _clip, wenju = wenju_modules()
+        folder = DATA/'输出'
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+        path = folder / ('剪贴板-%s.wenju' % stamp)
+        wenju.save(self.clipboard_doc, path)
+        return {'name':'剪贴板','path':str(path),'source':'剪贴板'}
+
     def _set_preview_doc(self, doc, charts=0):
+        self._preview_doc = doc
+        self._preview_charts = int(charts or 0)
+        self._preview_limit = 40
+        self._preview_folder = DATA/'预览'/uuid.uuid4().hex[:8]
+        self._render_preview()
+
+    def _render_preview(self):
+        doc = self._preview_doc
+        if doc is None:
+            return
         try:
-            folder=DATA/'预览'/uuid.uuid4().hex[:8]
-            folder.mkdir(parents=True, exist_ok=True)
-            blocks, note=preview_model.present(doc, folder, self._display_font, charts)
-            self._base_blocks=blocks
-            self._base_note=note
+            self._preview_folder.mkdir(parents=True, exist_ok=True)
+            blocks, note = preview_model.present(doc, self._preview_folder, self._display_font, self._preview_charts, self._preview_limit)
+            total = len(getattr(doc, 'blocks', None) or [])
+            if total > len(blocks):
+                note += ' 已显示前 %d 块，共 %d 块。继续往下滚动可再加载。' % (self._preview_limit, total)
+            self._base_blocks = blocks
+            self._base_note = note
         except Exception as exc:
-            message=str(exc).splitlines()[-1][:180] or '无法预览'
-            self._base_blocks=[preview_model.hold('还不能预览', message)]
-            self._base_note=message
+            message = str(exc).splitlines()[-1][:180] or '无法预览'
+            self._base_blocks = [preview_model.hold('还不能预览', message)]
+            self._base_note = message
         self._publish_preview()
+
+    @Slot()
+    def morePreview(self):
+        if self._more_scheduled or self._preview_doc is None:
+            return
+        total = len(self._preview_doc.blocks)
+        if self._preview_limit >= total:
+            return
+        self._more_scheduled = True
+        QTimer.singleShot(0, self._more_preview_now)
+
+    def _more_preview_now(self):
+        self._more_scheduled = False
+        doc = self._preview_doc
+        if doc is None:
+            return
+        total = len(doc.blocks)
+        if self._preview_limit >= total:
+            return
+        self._preview_limit = min(total, self._preview_limit + 40)
+        self._render_preview()
 
     def preview_file(self, path):
         try:
@@ -875,6 +968,11 @@ class Bridge(QObject):
 
     @Slot()
     def cancel(self):
+        if self._importing and self._clip_read is not None and self._clip_read.running:
+            self._clip_read.cancel()
+            self.message = '正在取消读入…'
+            self.changed.emit()
+            return
         self.queue = []
         self.convert_queue = []
         self.convert_stopped = True
@@ -1305,7 +1403,7 @@ if '--test-convert-ui' in sys.argv:
             traceback.print_exc(); app.exit(1)
     QTimer.singleShot(800, convert_ui)
     QTimer.singleShot(20000, lambda: app.exit(2))
-app.aboutToQuit.connect(lambda: bridge.proc.waitForFinished(30000) if bridge.running and bridge.proc else None)
+app.aboutToQuit.connect(bridge._stop_background)
 if '--smoke' in sys.argv:
     # Integration test runs with an isolated WENJU_DATA_DIR, never user presets.
     import traceback
@@ -1445,21 +1543,40 @@ if '--test-clipboard' in sys.argv:
         mime.setData('text/html', (ROOT/'core/样例/clipboard/wps.html').read_bytes())
         mime.setText('plain should lose')
         QGuiApplication.clipboard().setMimeData(mime)
+        import time
+        out_dir=DATA/'输出'
+        def snapshot():
+            if not out_dir.exists():
+                return set()
+            return {path.relative_to(out_dir).as_posix() for path in out_dir.rglob('*') if path.is_file()}
+        def wait_idle(limit):
+            deadline=time.time()+limit
+            while time.time()<deadline:
+                app.processEvents()
+                if not bridge.busy and not bridge._importing:
+                    return
+                time.sleep(0.02)
+            raise AssertionError('still busy: %s' % bridge.status)
+        def visible_text():
+            found=[]
+            todo=[window.contentItem()]
+            while todo:
+                item=todo.pop()
+                value=item.property('text')
+                if value:
+                    found.append(str(value))
+                todo += item.childItems()
+            return '\n'.join(found)
+        before=snapshot()
         click_item('importClipboard')
-        app.processEvents()
+        wait_idle(20)
         assert bridge.importProgress==100, bridge.importProgress
-        assert bridge.files and bridge.files[-1]['state']=='已从剪贴板导入', bridge.files
-        row=bridge.files[-1]
-        wenju_path, docx_path=Path(row['wenju']), Path(row['output'])
-        assert wenju_path.is_file() and docx_path.is_file() and Path(row['report']).is_file()
-        _clip, wenju=wenju_modules()
-        kept=wenju.load(wenju_path)
-        heading=next(block for block in kept.blocks if block['type']=='heading')
-        assert heading['runs'][0]['text']=='通知标题' and heading['runs'][0]['size_pt']==22
-        original=wenju.from_docx(docx_path)
-        assert next(block for block in original.blocks if block['type']=='heading')['runs'][0]['size_pt']==22
+        assert snapshot()==before, snapshot()-before
+        assert not bridge.files, bridge.files
         done=find_item('clipDone')
-        assert done is not None and done.property('visible')
+        assert done is not None and done.property('visible') and done.property('title')=='已读入剪贴板'
+        body=visible_text()
+        assert '还没有写文件' in body, body
         QMetaObject.invokeMethod(done, 'close')
         app.processEvents()
         shown='\n'.join(str(block.get('text') or '') for block in bridge.previewBlocks)
@@ -1470,30 +1587,38 @@ if '--test-clipboard' in sys.argv:
         app.processEvents()
         assert bridge.convertTarget=='wenju'
         assert bridge.clipboard_brush is True
-        brushed=wenju.from_docx(docx_path)
-        assert next(block for block in brushed.blocks if block['type']=='heading')['runs'][0]['size_pt']==16
-        assert wenju.load(wenju_path).blocks[0]['runs'][0]['size_pt']==22
+        assert snapshot()==before
+        assert bridge.clipboard_doc.blocks[0]['runs'][0]['size_pt']==22
         shot=Path('/tmp/clipboard-import.png')
         assert window.grabWindow().save(str(shot)), shot
-        first=Path(bridge.files[-1]['wenju'])
+        click_item('startConvert')
+        wait_idle(40)
+        written=snapshot()-before
+        wenju_names=[name for name in written if name.startswith('剪贴板-') and name.endswith('.wenju')]
+        assert len(wenju_names)==1, written
+        _clip, wenju=wenju_modules()
+        kept=wenju.load(out_dir/wenju_names[0])
+        heading=next(block for block in kept.blocks if block['type']=='heading')
+        assert heading['runs'][0]['text']=='通知标题' and heading['runs'][0]['size_pt']==22
         mime2=QMimeData()
         mime2.setHtml('<html><body><p>第二份完全不同</p></body></html>')
         QGuiApplication.clipboard().setMimeData(mime2)
+        held=snapshot()
         bridge.importClipboard(False)
-        second=Path(bridge.files[-1]['wenju'])
-        assert str(first)!=str(second) and first.is_file() and second.is_file()
-        assert '通知标题' in ''.join(run.get('text','') for block in wenju.load(first).blocks if block.get('type')=='heading' for run in block.get('runs') or [])
-        assert '第二份完全不同' in ''.join(run.get('text','') for block in wenju.load(second).blocks for run in block.get('runs') or [])
+        wait_idle(20)
+        assert snapshot()==held
+        shown2='\n'.join(str(block.get('text') or '') for block in bridge.previewBlocks)
+        assert '第二份完全不同' in shown2, shown2
         QGuiApplication.clipboard().clear()
         app.processEvents()
-        before=len(bridge.files)
         bridge.importClipboard(False)
-        assert len(bridge.files)==before
+        wait_idle(20)
         assert '没有可导入' in bridge.status, bridge.status
-        print('PASS: clipboard button imports HTML, saves wenju and docx, brushes on toggle, rejects an empty clipboard')
+        assert snapshot()==held
+        print('PASS: clipboard read previews without writing; convert writes the wenju; empty clipboard adds nothing')
         app.quit()
     QTimer.singleShot(800, guarded_clip(begin_clipboard))
-    QTimer.singleShot(20000, lambda: app.exit(2))
+    QTimer.singleShot(60000, lambda: app.exit(2))
 if '--capture-layout' in sys.argv:
     import traceback
     shot_dir=Path(os.environ.get('WENJU_SHOT_DIR','/tmp/wenju-shots'))

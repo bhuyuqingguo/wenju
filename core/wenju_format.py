@@ -317,15 +317,12 @@ def to_docx(doc, path, template=None):
             _write_paragraph(body, block, styles, style_ids, brush)
             last_p = body[-1]
         elif kind == "table":
-            _write_table(body, block, styles, style_ids, brush)
+            picture_id = _write_table(body, block, styles, style_ids, brush, doc.assets, image_rels, extra_files, image_start, picture_id)
             last_p = None
         elif kind == "image":
-            rel_id = "rId%d" % (image_start + len(image_rels))
-            asset = block["asset"]
-            image_rels.append((rel_id, "media/" + asset, IMAGE_REL))
-            extra_files["word/media/" + asset] = bytes(doc.assets[asset])
-            _write_image(body, block, rel_id, picture_id)
-            picture_id += 1
+            rel_id, used = _place_media(block, doc.assets, image_rels, extra_files, image_start, picture_id)
+            _write_image(body, block, rel_id, used)
+            picture_id = used + 1
             last_p = body[-1]
         elif kind == "chart":
             plan = prepare_chart(block, doc.assets, chart_seq)
@@ -464,6 +461,12 @@ def _check_block(block, index, assets, errors):
                 else:
                     for run in cell["runs"]:
                         _check_run(run, where, errors)
+                for image in cell.get("images") or []:
+                    if not isinstance(image, dict):
+                        errors.append("%s 单元格里的图片无法识别" % where)
+                        continue
+                    _check_asset_ref(image.get("asset"), assets, where, "图片", errors)
+                    _check_extent(image, where, "图片", errors)
         occupied = set()
         for merge in block.get("merges") or []:
             span = _check_merge(merge, len(rows), width, where, errors)
@@ -2035,23 +2038,36 @@ def _read_table(table, ctx):
                 if horizontal is not None:
                     hmerge = horizontal.get(q(W, "val")) or "continue"
             runs = []
+            cell_images = []
+
+            def keep_media(block):
+                if block.get("type") == "image":
+                    cell_images.append(block)
+                elif block:
+                    loose.append(block)
+
             for paragraph in tc.findall(q(W, "p")):
                 if runs and _paragraph_text(paragraph):
                     runs.append({"text": "\n"})
                 inherited = _inherited_props("", ctx)
                 for kind, node in _walk_paragraph(paragraph):
                     if kind == "alt":
-                        loose.extend(block for block in _alternate_media(node, ctx) if block)
+                        for block in _alternate_media(node, ctx):
+                            keep_media(block)
                         continue
                     if kind == "media":
-                        loose.extend(block for block in _media_in(node, ctx) if block)
+                        for block in _media_in(node, ctx):
+                            keep_media(block)
                         continue
                     for image in _run_images(node, ctx):
-                        loose.append(image)
+                        keep_media(image)
                     run = _inherit_run(_read_run(node, theme=ctx.get("theme")), inherited)
                     if run.get("text"):
                         runs.append(run)
-            row.append({"span": max(span, 1), "vmerge": vmerge, "hmerge": hmerge, "runs": runs})
+            item = {"span": max(span, 1), "vmerge": vmerge, "hmerge": hmerge, "runs": runs}
+            if cell_images:
+                item["images"] = cell_images
+            row.append(item)
         parsed.append(row)
     grid, merges = _expand_table(parsed, befores)
     return {"type": "table", "rows": grid, "merges": merges}, loose
@@ -2089,6 +2105,8 @@ def _expand_table(parsed, befores=None):
                 col += span
                 continue
             entry = {"runs": cell["runs"]}
+            if cell.get("images"):
+                entry["images"] = cell["images"]
             row.append(entry)
             h_anchor = None
             if cell.get("hmerge") == "restart":
@@ -2164,6 +2182,24 @@ def _store_images(blocks):
         if block.get("type") == "image":
             blob = bytes(block.pop("_bytes", b"") or b"")
             block["asset"] = put(block.get("asset") or "image.bin", blob)
+        elif block.get("type") == "table":
+            for row in block.get("rows") or []:
+                for cell in row or []:
+                    if not isinstance(cell, dict):
+                        continue
+                    kept = []
+                    for image in cell.get("images") or []:
+                        if not isinstance(image, dict):
+                            continue
+                        blob = bytes(image.pop("_bytes", b"") or b"")
+                        if not blob:
+                            continue
+                        image["asset"] = put(image.get("asset") or "image.bin", blob)
+                        kept.append(image)
+                    if kept:
+                        cell["images"] = kept
+                    elif "images" in cell:
+                        cell.pop("images", None)
         elif block.get("type") == "chart":
             files = block.pop("_files", {}) or {}
             mapping = {}
@@ -2365,7 +2401,16 @@ def _write_run(paragraph, run):
     text.text = run.get("text") or ""
 
 
-def _write_table(body, block, styles, style_ids, brush):
+def _place_media(block, assets, image_rels, extra_files, image_start, picture_id):
+    rel_id = "rId%d" % (image_start + len(image_rels))
+    asset = block["asset"]
+    image_rels.append((rel_id, "media/" + asset, IMAGE_REL))
+    blob = assets[asset]
+    extra_files["word/media/" + asset] = blob if isinstance(blob, bytes) else bytes(blob)
+    return rel_id, picture_id
+
+
+def _write_table(body, block, styles, style_ids, brush, assets=None, image_rels=None, extra_files=None, image_start=1, picture_id=1):
     table = ET.SubElement(body, q(W, "tbl"))
     grid_pr = ET.SubElement(table, q(W, "tblGrid"))
     width = len(block["rows"][0])
@@ -2407,10 +2452,22 @@ def _write_table(body, block, styles, style_ids, brush):
                 for run in runs:
                     cell_overlay = _brush_style({"type": "paragraph", "style": "正文"}, brush, True) if brush else {}
                     _write_run(paragraph, _effective_run(run, cell_overlay, bool(cell_overlay)))
+            if not cover and assets is not None and image_rels is not None:
+                for image in cell.get("images") or []:
+                    if not isinstance(image, dict) or not image.get("asset"):
+                        continue
+                    rel_id, picture_id = _place_media(image, assets, image_rels, extra_files, image_start, picture_id)
+                    _write_drawing(paragraph, image, rel_id, picture_id)
+                    picture_id += 1
+    return picture_id
 
 
 def _write_image(body, block, rel_id, picture_id):
     paragraph = ET.SubElement(body, q(W, "p"))
+    _write_drawing(paragraph, block, rel_id, picture_id)
+
+
+def _write_drawing(paragraph, block, rel_id, picture_id):
     run = ET.SubElement(paragraph, q(W, "r"))
     drawing = ET.SubElement(run, q(W, "drawing"))
     inline = ET.SubElement(drawing, q(WP, "inline"))

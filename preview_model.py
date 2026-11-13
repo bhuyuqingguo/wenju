@@ -207,7 +207,11 @@ def _table(block):
             if isinstance(cell, dict) and cell.get("covered") is True:
                 cells.append("（被合并）")
                 continue
-            text = _cell_text(cell) + marks.get((row_index, col_index), "")
+            pictures = [item for item in (cell.get("images") or []) if isinstance(item, dict)]
+            marker = ""
+            if pictures:
+                marker = "［图片］" if len(pictures) == 1 else "［图片×%d］" % len(pictures)
+            text = _cell_text(cell) + marker + marks.get((row_index, col_index), "")
             cells.append(text)
             if text:
                 texts.append(text)

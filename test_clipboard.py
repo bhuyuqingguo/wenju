@@ -243,8 +243,9 @@ class ClipboardTests(unittest.TestCase):
         cell = ''.join(run.get('text', '') for run in table['rows'][0][0]['runs'])
         self.assertIn('before', cell)
         self.assertIn('after', cell)
-        image = next(block for block in doc.blocks if block['type'] == 'image')
+        image = table['rows'][0][0]['images'][0]
         self.assertEqual(doc.assets[image['asset']], png)
+        self.assertFalse(any(block['type'] == 'image' for block in doc.blocks))
 
     def test_utf8_rtf_and_unicode_font_names(self):
         raw = '{\\rtf1\\ansi\\ansicpg65001\\deff0{\\fonttbl{\\f0\\fnil\\fcharset134 黑体;}}\\pard\\f0\\fs44 通知\\par}'.encode('utf-8')
@@ -295,11 +296,11 @@ class ClipboardTests(unittest.TestCase):
             '<td style="font-family:楷体;font-size:16pt">丁</td></tr></table>'
         )
         doc = clip.document_from_parts(html=html)
-        self.assertEqual(doc.blocks[0]['runs'][0], {'text': '甲', 'eastAsia': '宋体', 'ascii': '宋体', 'size_pt': 16})
+        self.assertEqual(doc.blocks[0]['runs'][0], {'text': '甲', 'eastAsia': '宋体', 'ascii': '宋体', 'hAnsi': '宋体', 'size_pt': 16})
         self.assertEqual(doc.blocks[1]['runs'][0]['size_pt'], 16)
         table = next(block for block in doc.blocks if block['type'] == 'table')
-        self.assertEqual(table['rows'][0][0]['runs'][0], {'text': '丙', 'eastAsia': '黑体', 'ascii': '黑体', 'size_pt': 14})
-        self.assertEqual(table['rows'][0][1]['runs'][0], {'text': '丁', 'eastAsia': '楷体', 'ascii': '楷体', 'size_pt': 16})
+        self.assertEqual(table['rows'][0][0]['runs'][0], {'text': '丙', 'eastAsia': '黑体', 'ascii': '黑体', 'hAnsi': '黑体', 'size_pt': 14})
+        self.assertEqual(table['rows'][0][1]['runs'][0], {'text': '丁', 'eastAsia': '楷体', 'ascii': '楷体', 'hAnsi': '楷体', 'size_pt': 16})
 
     def test_file_image_in_html_keeps_the_rtf_pict(self):
         png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==')
@@ -709,6 +710,271 @@ class ClipboardTests(unittest.TestCase):
         qt_doc = clip.document_from_mime(qt)
         qt_image = next(block for block in qt_doc.blocks if block['type'] == 'image')
         self.assertEqual(qt_doc.assets[qt_image['asset']], wmf)
+
+    def _png(self, mark):
+        base = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==')
+        return base + struct.pack('>I', mark)
+
+    def _cell_blobs(self, doc):
+        table = next(block for block in doc.blocks if block['type'] == 'table')
+        found = []
+        for row in table['rows']:
+            row_blobs = []
+            for cell in row:
+                if cell.get('covered'):
+                    continue
+                row_blobs.append([doc.assets[image['asset']] for image in cell.get('images') or [] if image.get('asset')])
+            found.append(row_blobs)
+        return table, found
+
+    def test_missing_left_image_does_not_move_the_right_cell(self):
+        right = self._png(1)
+        folder = Path(tempfile.mkdtemp())
+        try:
+            path = folder / 'right.png'
+            path.write_bytes(right)
+            html = (
+                '<table><tr><td>左<img src="file:///C:/missing/left.png"></td>'
+                '<td>右<img src="%s"></td></tr></table>'
+            ) % path.as_uri()
+            rtf = r'{\rtf1\ansi\trowd\cellx3000\cellx6000\intbl 左\cell 右{\pict\pngblip ' + right.hex() + r'}\cell\row}'
+            doc = clip.document_from_parts(html=html.encode('utf-8'), rtf=rtf)
+        finally:
+            shutil.rmtree(str(folder))
+        _table, cells = self._cell_blobs(doc)
+        self.assertEqual(cells[0][0], [])
+        self.assertEqual(cells[0][1], [right])
+        self.assertFalse(any(block['type'] == 'image' for block in doc.blocks))
+
+    def test_swapped_order_keeps_both_pictures_when_one_file_was_read(self):
+        first = self._png(2)
+        second = self._png(3)
+        folder = Path(tempfile.mkdtemp())
+        try:
+            path = folder / 'first.png'
+            path.write_bytes(first)
+            html = '<p>前文</p><img src="%s"><img src="file:///C:/missing/second.png"><p>后文</p>' % path.as_uri()
+            rtf = r'{\rtf1\ansi {\pict\pngblip ' + second.hex() + r'}{\pict\pngblip ' + first.hex() + r'}}'
+            doc = clip.document_from_parts(html=html.encode('utf-8'), rtf=rtf)
+        finally:
+            shutil.rmtree(str(folder))
+        blobs = list(doc.assets.values())
+        self.assertIn(first, blobs)
+        self.assertIn(second, blobs)
+        self.assertIn('前文', text_of(doc))
+        self.assertIn('后文', text_of(doc))
+
+    def test_rtf_cell_image_stays_in_the_cell_without_an_html_img(self):
+        png = self._png(4)
+        html = '<table><tr><td>左</td><td>右</td></tr></table>'
+        rtf = r'{\rtf1\ansi\trowd\cellx3000\cellx6000\intbl 左\cell 右{\pict\pngblip ' + png.hex() + r'}\cell\row}'
+        doc = clip.document_from_parts(html=html.encode('utf-8'), rtf=rtf)
+        _table, cells = self._cell_blobs(doc)
+        self.assertEqual(cells[0][0], [])
+        self.assertEqual(cells[0][1], [png])
+        self.assertFalse(any(block['type'] == 'image' for block in doc.blocks))
+
+    def test_windows_file_url_strips_drive_slash_reads_backslash_and_gbk(self):
+        self.assertEqual(clip.file_url_candidates('file:///C:/Users/a%20b.png', True)[0], 'C:/Users/a b.png')
+        self.assertEqual(clip.file_url_candidates('file:///C:\\Users\\a.png', True)[0], 'C:/Users/a.png')
+        self.assertEqual(clip.file_url_candidates('file://localhost/C:/Users/a.png', True)[0], 'C:/Users/a.png')
+        utf8_name = '图.png'
+        encoded = ''.join('%%%02X' % byte for byte in utf8_name.encode('utf-8'))
+        self.assertTrue(clip.file_url_candidates('file:///C:/Users/' + encoded, True)[0].endswith('图.png'))
+        folder = Path(tempfile.mkdtemp())
+        previous = os.getcwd()
+        try:
+            drive = folder / 'C:' / 'Users'
+            drive.mkdir(parents=True)
+            png = self._png(5)
+            spaced = drive / 'a b.png'
+            spaced.write_bytes(png)
+            named = drive / '剪贴.png'
+            other = self._png(6)
+            named.write_bytes(other)
+            os.chdir(str(folder))
+            real_name = clip.os.name
+            clip.os.name = 'nt'
+            try:
+                payload, kind = clip._file_image(r'file:///C:\Users\a%20b.png')
+                self.assertEqual(payload, png)
+                self.assertEqual(kind, 'png')
+                gbk = ''.join('%%%02X' % byte for byte in '剪贴.png'.encode('gbk'))
+                payload, kind = clip._file_image('file:///C:/Users/' + gbk)
+                self.assertEqual(payload, other)
+                local = clip._file_image('file://localhost/C:/Users/a%20b.png')
+                self.assertEqual(local[0], png)
+            finally:
+                clip.os.name = real_name
+            utf8_file = folder / '图.png'
+            utf8_file.write_bytes(png)
+            payload, _kind = clip._file_image(utf8_file.as_uri())
+            self.assertEqual(payload, png)
+            wrapped = cf_html('<p>头</p><img src="%s">' % utf8_file.as_uri())
+            doc = clip.document_from_parts(html=wrapped)
+            self.assertIn('头', text_of(doc))
+            self.assertIn(png, doc.assets.values())
+        finally:
+            os.chdir(previous)
+            shutil.rmtree(str(folder))
+
+    def test_qt_windows_mime_html_and_rtf(self):
+        html = FakeMime({
+            'application/x-qt-windows-mime;value="HTML Format"': cf_html('<p>来自 HTML Format</p>'),
+        })
+        doc = clip.document_from_mime(html)
+        self.assertIn('来自 HTML Format', text_of(doc))
+        rtf = FakeMime({
+            'application/x-qt-windows-mime;value="Rich Text Format"': br'{\rtf1\ansi from rich text\par}',
+        })
+        drawn = clip.document_from_mime(rtf)
+        self.assertIn('from rich text', text_of(drawn))
+
+    def test_cancel_ignores_parse_until_the_thread_finishes(self):
+        state = clip.ClipRead()
+        state.start()
+        state.cancel()
+        self.assertTrue(state.running)
+        self.assertFalse(state.accept())
+        self.assertTrue(state.running)
+        self.assertTrue(state.thread_finished())
+        self.assertFalse(state.running)
+        state.start()
+        self.assertTrue(state.accept())
+        self.assertFalse(state.thread_finished())
+        source = (ROOT / 'app.py').read_text(encoding='utf-8')
+        self.assertIn('self._clip_read.cancel()', source)
+        self.assertIn('self._clip_read.accept()', source)
+        self.assertIn('self._clip_read.thread_finished()', source)
+
+    def test_stylesheet_mso_style_name_sets_heading_level(self):
+        html = (
+            '<html><head><style>'
+            'p.WenjuTitle, li.WenjuTitle { mso-style-name: "标题 1"; }'
+            'p.WenjuSub { mso-style-name: heading 2; mso-outline-level: 2; }'
+            '</style></head><body>'
+            '<p class="WenjuTitle">大标题</p>'
+            '<p class="WenjuSub">小标题</p>'
+            '</body></html>'
+        )
+        doc = clip.document_from_parts(html=html.encode('utf-8'))
+        self.assertEqual(doc.blocks[0]['type'], 'heading')
+        self.assertEqual(doc.blocks[0]['level'], 1)
+        self.assertEqual(doc.blocks[0]['runs'][0]['text'], '大标题')
+        self.assertEqual(doc.blocks[1]['type'], 'heading')
+        self.assertEqual(doc.blocks[1]['level'], 2)
+        self.assertEqual(doc.blocks[1]['runs'][0]['text'], '小标题')
+
+    def test_pict_skips_star_groups_and_matches_the_source_file(self):
+        emf = bytearray(88)
+        struct.pack_into('<I', emf, 0, 1)
+        struct.pack_into('<I', emf, 4, 88)
+        struct.pack_into('<I', emf, 40, 0x464D4520)
+        struct.pack_into('<I', emf, 48, 88)
+        emf[80:84] = b'EMF1'
+        emf = bytes(emf)
+        folded = emf.hex()
+        wrapped = '\r\n'.join(folded[index:index + 64] for index in range(0, len(folded), 64))
+        rtf = (
+            r'{\rtf1\ansi{\pict\emfblip\picwgoal1440\pichgoal720 '
+            r'{\*\blipuid 0123456789abcdef0123456789abcdef}'
+            r'{\*\picprop{\sn pibName}{\sv 00112233445566778899abcdef}}'
+            + wrapped + r'}}'
+        )
+        folder = Path(tempfile.mkdtemp())
+        try:
+            source = folder / 'chart.emf'
+            source.write_bytes(emf)
+            blocks, assets = clip.parse_rtf(rtf.encode('ascii'))
+            images = [block for block in blocks if block['type'] == 'image']
+            self.assertEqual(len(images), 1)
+            self.assertEqual(assets[images[0]['asset']], source.read_bytes())
+            png = self._png(7)
+            html = '<html><body><img src="data:image/png;base64,%s"></body></html>' % base64.b64encode(png).decode('ascii')
+            doc = clip.document_from_parts(html=html.encode('ascii'), rtf=rtf.encode('ascii'))
+            kept = [block for block in doc.blocks if block['type'] == 'image']
+            self.assertEqual(len(kept), 1)
+            self.assertEqual(doc.assets[kept[0]['asset']], source.read_bytes())
+            self.assertNotIn(png, doc.assets.values())
+        finally:
+            shutil.rmtree(str(folder))
+
+    def test_shppict_ignores_the_following_nonshppict(self):
+        png_a = self._png(1)
+        png_b = self._png(2)
+        wmf = struct.pack('<IH', 0x9AC6CDD7, 0) + struct.pack('<hhhhH', 0, 0, 100, 80, 1440)
+        wmf += struct.pack('<IH', 0, 0) + struct.pack('<HHHIHIH', 1, 9, 0x0300, 9, 0, 0, 0)
+
+        def pair(blob):
+            return (
+                r'{\*\shppict{\pict\pngblip ' + blob.hex() + r'}}'
+                r'{\nonshppict{\pict\wmetafile8 ' + wmf.hex() + r'}}'
+            )
+
+        rtf = r'{\rtf1\ansi ' + pair(png_a) + pair(png_b) + '}'
+        blocks, assets = clip.parse_rtf(rtf.encode('ascii'))
+        images = [block for block in blocks if block['type'] == 'image']
+        self.assertEqual([assets[image['asset']] for image in images], [png_a, png_b])
+        alone = r'{\rtf1{\nonshppict{\pict\pngblip ' + png_a.hex() + r'}}}'
+        alone_blocks, alone_assets = clip.parse_rtf(alone.encode('ascii'))
+        alone_images = [block for block in alone_blocks if block['type'] == 'image']
+        self.assertEqual([alone_assets[image['asset']] for image in alone_images], [png_a])
+        table = (
+            r'{\rtf1\ansi\trowd\cellx2000\cellx4000\intbl '
+            + pair(png_a) + r'\cell ' + pair(png_b) + r'\cell\row}'
+        )
+        doc = clip.document_from_parts(rtf=table.encode('ascii'))
+        _grid, cells = self._cell_blobs(doc)
+        self.assertEqual(cells, [[[png_a], [png_b]]])
+
+    def test_v_imagedata_and_the_following_img_are_one_picture(self):
+        first = self._png(1)
+        second = self._png(2)
+        folder = Path(tempfile.mkdtemp())
+        try:
+            left = folder / 'a.png'
+            right = folder / 'b.png'
+            left.write_bytes(first)
+            right.write_bytes(second)
+            html = '<html><body><v:imagedata src="%s"/><img src="%s"></body></html>' % (left.as_uri(), right.as_uri())
+            doc = clip.document_from_parts(html=html.encode('utf-8'))
+            images = [block for block in doc.blocks if block['type'] == 'image']
+            self.assertEqual(len(images), 1)
+            self.assertEqual(doc.assets[images[0]['asset']], first)
+            split = '<html><body><v:imagedata src="%s"/>字<img src="%s"></body></html>' % (left.as_uri(), right.as_uri())
+            both = clip.document_from_parts(html=split.encode('utf-8'))
+            blobs = [both.assets[block['asset']] for block in both.blocks if block['type'] == 'image']
+            self.assertEqual(blobs, [first, second])
+        finally:
+            shutil.rmtree(str(folder))
+
+    def test_empty_clipboard_error_clears_the_read(self):
+        self.assertEqual(clip.clip_failure_text(MemoryError()), '无法读取剪贴板')
+        self.assertEqual(clip.clip_failure_text(RuntimeError('')), '无法读取剪贴板')
+        self.assertEqual(clip.clip_failure_text(RuntimeError('磁盘满了')), '磁盘满了')
+        source = (ROOT / 'app.py').read_text(encoding='utf-8')
+        tree = ast.parse(source)
+        run_src = failed_src = stop_src = ''
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for item in node.body:
+                if not isinstance(item, ast.FunctionDef):
+                    continue
+                if node.name == '_ClipboardParse' and item.name == 'run':
+                    run_src = ast.get_source_segment(source, item)
+                if node.name == 'Bridge' and item.name == '_clip_failed':
+                    failed_src = ast.get_source_segment(source, item)
+                if node.name == 'Bridge' and item.name == '_stop_background':
+                    stop_src = ast.get_source_segment(source, item)
+        self.assertIn('clip_failure_text', run_src)
+        self.assertIn('self.failed.emit', run_src)
+        self.assertNotIn('splitlines()', run_src)
+        self.assertIn('self.running = False', failed_src)
+        self.assertIn('self._importing = False', failed_src)
+        self.assertIn('self._clip_thread', stop_src)
+        self.assertIn('.wait()', stop_src)
+        self.assertIn('aboutToQuit.connect(bridge._stop_background)', source)
 
     def test_validate_rejects_a_bad_block(self):
         doc = fmt.WenjuDoc([{'type': 'heading', 'level': 0, 'runs': []}, {'type': 'image', 'asset': 'missing.png', 'w': 1, 'h': 1}], {}, {})
