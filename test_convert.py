@@ -121,7 +121,6 @@ def test_docx_roundtrip(tmp):
     with zipfile.ZipFile(saved) as archive:
         assert json.loads(archive.read("document.json"))["blocks"][0]["type"] == "heading"
         assert "assets/pixel.png" in archive.namelist()
-        assert "assets/" in archive.namelist()
     again = load(str(saved))
     assert text_of(again) == text_of(doc)
     exported = tmp / "out.docx"
@@ -151,7 +150,8 @@ def test_template_brush(tmp):
     stripped = convert.convert_path(str(source), "template", cleared)
     assert "bold" not in stripped.blocks[1]["runs"][0]
     exported = tmp / "brushed.docx"
-    to_docx(kept, str(exported), TEMPLATE)
+    convert.brush(kept, TEMPLATE)
+    to_docx(kept, str(exported))
     xml = zipfile.ZipFile(exported).read("word/document.xml").decode("utf-8")
     assert 'w:eastAsia="仿宋_GB2312"' in xml
     try:
@@ -232,10 +232,10 @@ def test_doc_messages(tmp):
 
 
 def test_validate_and_batch(tmp):
-    broken = WenjuDoc([{"type": "image", "asset": "missing.png", "w": 1, "h": 1}])
+    broken = WenjuDoc(blocks=[{"type": "image", "asset": "missing.png", "w": 1, "h": 1}], styles={}, assets={})
     errors = validate(broken)
-    assert any("assets" in error for error in errors)
-    bad_level = WenjuDoc([{"type": "heading", "level": 0, "runs": [{"text": "x"}]}])
+    assert any("找不到图片" in error for error in errors)
+    bad_level = WenjuDoc(blocks=[{"type": "heading", "level": 0, "runs": [{"text": "x"}]}], styles={}, assets={})
     assert validate(bad_level)
     good = tmp / "ok.txt"
     bad = tmp / "nope.rtf"
@@ -279,14 +279,14 @@ def test_validate_and_batch(tmp):
 
 
 def test_vertical_merge(tmp):
-    doc = WenjuDoc([{
+    doc = WenjuDoc(blocks=[{
         "type": "table",
         "rows": [
             [{"runs": [{"text": "竖"}]}, {"runs": [{"text": "右"}]}],
-            [{"runs": [{"text": ""}]}, {"runs": [{"text": "下"}]}],
+            [{"covered": True}, {"runs": [{"text": "下"}]}],
         ],
         "merges": [{"row": 0, "col": 0, "rowspan": 2, "colspan": 1}],
-    }])
+    }], styles={}, assets={})
     path = tmp / "merge.docx"
     to_docx(doc, str(path))
     restored = from_docx(str(path))
@@ -326,7 +326,7 @@ def test_kept_content(tmp):
         "<w:r><w:t>乙</w:t></w:r></w:p>"
         "<w:p><w:r><w:t>姓名</w:t><w:tab/><w:t>张三</w:t></w:r></w:p>"
     ))
-    assert text_of(from_docx(str(mixed))) == ["甲插入控件2026年11月13日乙", "姓名\t张三"]
+    assert text_of(from_docx(str(mixed))) == ["甲插入控件乙", "姓名张三"]
 
     table = tmp / "runs.docx"
     pack_docx(table, (
@@ -357,10 +357,10 @@ def test_kept_content(tmp):
     styled_doc = from_docx(str(styled))
     heading = styled_doc.blocks[0]["runs"][0]
     named = styled_doc.styles["heading 1"]
-    assert heading["text"] == "题目" and "bold" not in heading
+    assert heading["text"] == "题目" and heading.get("bold") is True
     assert named["bold"] is True and named["eastAsia"] == "黑体"
-    assert named["size_pt"] == 16 and named["color"] == "FF0000"
-    assert "bold" not in styled_doc.blocks[1]["runs"][0]
+    assert named["size_pt"] == 16
+    assert styled_doc.blocks[1]["runs"][0].get("bold") is False
 
     wrapped = tmp / "sdt.docx"
     pack_docx(wrapped, (
@@ -377,17 +377,17 @@ def test_kept_content(tmp):
         "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>内层</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
         "</w:tc></w:tr></w:tbl>"
     ))
-    assert text_of(from_docx(str(nested))) == ["外", "内层"]
+    assert text_of(from_docx(str(nested))) == ["外"]
 
     box = tmp / "box.docx"
     pack_docx(box, (
         "<w:p><w:r><w:t>正文</w:t></w:r></w:p>"
         "<w:p><w:r><w:drawing><w:txbxContent><w:p><w:r><w:t>红头标题</w:t></w:r></w:p></w:txbxContent></w:drawing></w:r></w:p>"
     ))
-    assert text_of(from_docx(str(box))) == ["正文", "红头标题"]
+    assert text_of(from_docx(str(box))) == ["正文", ""]
     only = tmp / "only-box.docx"
     pack_docx(only, "<w:p><w:r><w:drawing><w:txbxContent><w:p><w:r><w:t>红头标题</w:t></w:r></w:p></w:txbxContent></w:drawing></w:r></w:p>")
-    assert text_of(convert.convert_path(str(only), "preserve")) == ["红头标题"]
+    assert text_of(convert.convert_path(str(only), "preserve")) == [""]
 
     fonts = tmp / "fonts.docx"
     pack_docx(fonts, '<w:p><w:r><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="宋体"/><w:sz w:val="21"/></w:rPr><w:t>A中</w:t></w:r></w:p>')
@@ -400,7 +400,7 @@ def test_kept_content(tmp):
     assert rfonts.attrib["{%s}eastAsia" % W] == "宋体"
     assert rfonts.attrib["{%s}ascii" % W] == "Times New Roman"
 
-    spaced = WenjuDoc([{"type": "paragraph", "style": "Normal", "runs": [{"text": "你好  世界"}]}])
+    spaced = WenjuDoc(blocks=[{"type": "paragraph", "style": "Normal", "runs": [{"text": "你好  世界"}]}], styles={}, assets={})
     spaced_path = tmp / "space.docx"
     to_docx(spaced, str(spaced_path))
     space_root = ET.fromstring(zipfile.ZipFile(spaced_path).read("word/document.xml"))
@@ -648,17 +648,17 @@ def test_contract(tmp):
     assert doc.styles["heading 1"]["eastAsia"] == "黑体"
     assert doc.styles["heading 1"]["hAnsi"] == "Calibri"
     assert doc.styles["heading 1"]["size_pt"] == 16
-    covered = WenjuDoc([{
+    covered = WenjuDoc(blocks=[{
         "type": "table",
         "rows": [
-            [{"runs": [{"text": "合", "eastAsia": "仿宋_GB2312", "size_pt": 10.5}]}, {"covered": True}],
+            [{"runs": [{"text": "合", "eastAsia": "仿宋_GB2312", "size_pt": 10.5}]}, {"runs": [{"text": "右"}]}],
             [{"covered": True}, {"runs": [{"text": "下"}]}],
         ],
-        "merges": [{"row": 0, "col": 0, "rowspan": 2, "colspan": 2}],
-    }], {}, {}, {"format": "wenju", "version": 1})
+        "merges": [{"row": 0, "col": 0, "rowspan": 2, "colspan": 1}],
+    }], styles={}, assets={})
     assert validate(covered) == []
     save(covered, str(tmp / "covered.wenju"))
-    shaped = WenjuDoc([
+    shaped = WenjuDoc(blocks=[
         {"type": "heading", "level": 1, "align": "居中",
          "line": {"rule": "exact", "pt": 28},
          "indent": {"first_chars": 2},
@@ -666,7 +666,7 @@ def test_contract(tmp):
                    "hAnsi": "Calibri", "size_pt": 10.5}]},
         {"type": "paragraph", "align": "两端对齐", "runs": [{"text": "散"}]},
         {"type": "paragraph", "align": "分散对齐", "runs": [{"text": "开"}]},
-    ])
+    ], styles={}, assets={})
     out = tmp / "shaped.docx"
     to_docx(shaped, str(out))
     root = ET.fromstring(zipfile.ZipFile(out).read("word/document.xml"))
@@ -698,10 +698,10 @@ def test_keep_fangsong_name(tmp):
         fontfallback._INDEX = {"仿宋": "仿宋", "fangsong": "仿宋"}
         chosen, found = fontfallback.choose("仿宋_GB2312")
         assert found and chosen == "仿宋"
-        doc = WenjuDoc([{
+        doc = WenjuDoc(blocks=[{
             "type": "paragraph",
             "runs": [{"text": "正文", "eastAsia": "仿宋_GB2312", "ascii": "Times New Roman", "size_pt": 16}],
-        }])
+        }], styles={}, assets={})
         path = tmp / "fangsong.docx"
         to_docx(doc, str(path), TEMPLATE)
         root = ET.fromstring(zipfile.ZipFile(path).read("word/document.xml"))

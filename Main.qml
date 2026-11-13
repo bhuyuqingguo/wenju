@@ -60,8 +60,10 @@ ApplicationWindow {
     Connections {target:bridge
         function onReportReady(text){reportText.text=text;reportDialog.open();}
         function onRulesChanged(){win.syncPage();}
-        function onErrorRaised(text){errorText.text=text;errorDialog.open();}
+        function onErrorRaised(text){clipProgress.close();errorText.text=text;errorDialog.open();}
         function onConvertFinished(text){convertResult.text=text;convertDialog.open();}
+        function onClipboardStarted(){clipProgress.open();}
+        function onClipboardFinished(text){clipProgress.close();clipDoneText.text=text;clipDone.open();}
     }
     Dialog{id:errorDialog;anchors.centerIn:parent;width:560;title:"请检查设置";modal:true;standardButtons:Dialog.Ok
         Text{id:errorText;width:520;wrapMode:Text.Wrap;color:win.ink}}
@@ -93,6 +95,15 @@ ApplicationWindow {
     Dialog{id:inferConfirm;anchors.centerIn:parent;width:560;title:"识别模板";modal:true;standardButtons:Dialog.Ok|Dialog.Cancel
         Txt{text:"识别结果将替换当前工作方案。\n如需保留修改，请先另存为模板。"}
         onAccepted:bridge.inferTemplate()
+    }
+    Dialog{id:clipProgress;objectName:"clipProgress";anchors.centerIn:parent;width:420;title:"正在从剪贴板导入";modal:true;closePolicy:Popup.NoAutoClose
+        ColumnLayout{width:380;spacing:12
+            ProgressBar{from:0;to:100;value:bridge.importProgress;Layout.fillWidth:true}
+            Txt{text:bridge.importProgress+"%";color:win.muted}
+        }
+    }
+    Dialog{id:clipDone;objectName:"clipDone";anchors.centerIn:parent;width:520;title:"剪贴板导入完成";modal:true;standardButtons:Dialog.Ok
+        Text{id:clipDoneText;width:480;wrapMode:Text.Wrap;color:win.ink}
     }
 
     Dialog{id:manageDialog;anchors.centerIn:parent;width:560;title:"管理模板";modal:true;standardButtons:Dialog.Close
@@ -200,12 +211,19 @@ ApplicationWindow {
             ColumnLayout {
                 anchors.fill:parent;spacing:18;visible:page===0
                 Rectangle {
-                    Layout.fillWidth:true;Layout.preferredHeight:190;radius:12;color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
-                    Column {anchors.centerIn:parent;spacing:12
+                    Layout.fillWidth:true;Layout.preferredHeight:268;radius:12;color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
+                    Column {anchors.centerIn:parent;spacing:10
                         Rectangle {anchors.horizontalCenter:parent.horizontalCenter;width:46;height:46;radius:12;color:appearance.colors.surface;Txt{anchors.centerIn:parent;text:"+";font.pixelSize:Math.round(30*appearance.scale);color:blue}}
                         Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"把 Word 文档拖到这里";font.pixelSize:Math.round(19*appearance.scale);font.weight:Font.DemiBold}
-                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"DOCX / DOC / WPS / RTF · 可批量添加 · 原文件保持不变";color:muted;font.pixelSize:Math.round(12*appearance.scale)}
-                        Action {anchors.horizontalCenter:parent.horizontalCenter;text:"选择文档";primary:true;onClicked:bridge.choose()}
+                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"DOCX / DOC / WPS / RTF / 文矩 · 可批量添加 · 原文件保持不变";color:muted;font.pixelSize:Math.round(12*appearance.scale)}
+                        Row {anchors.horizontalCenter:parent.horizontalCenter;spacing:10
+                            Action {text:"选择文档";primary:true;onClicked:bridge.choose()}
+                            Action {objectName:"importClipboard";text:"从剪贴板导入";implicitWidth:168;enabled:!bridge.busy;onClicked:bridge.importClipboard(clipboardBrush.checked)}
+                        }
+                        CheckBox {id:clipboardBrush;objectName:"clipboardBrush";anchors.horizontalCenter:parent.horizontalCenter;text:"按模板刷格式";checked:false;onToggled:bridge.setClipboardBrush(checked)
+                            palette.text:win.ink;palette.windowText:win.ink;palette.buttonText:win.ink
+                        }
+                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"默认保留复制时的标题、表格、图片、字体和字号";color:muted;font.pixelSize:Math.round(11*appearance.scale)}
                     }
                     DropArea {anchors.fill:parent;onDropped:function(drop){if(drop.hasUrls)bridge.dropFiles(drop.urls);}}
                 }
@@ -230,13 +248,17 @@ ApplicationWindow {
                                 Txt {text:"也可以点击右上角「体验样例」，看看整理效果。";color:appearance.palette["#a0aab7"];font.pixelSize:Math.round(12*appearance.scale)}
                             }
                             ListView {anchors.fill:parent;clip:true;spacing:8;model:bridge.files
-                                delegate:Rectangle {required property var modelData;required property int index;width:ListView.view.width;height:64;radius:8;color:appearance.palette["#f7f9fc"]
+                                delegate:Rectangle {required property var modelData;required property int index;width:ListView.view.width;height:72;radius:8;color:appearance.palette["#f7f9fc"]
                                     RowLayout {anchors.fill:parent;anchors.margins:12;spacing:12
-                                        Rectangle{width:32;height:36;radius:5;color:appearance.palette["#e3edf6"];Txt{anchors.centerIn:parent;text:"W";color:blue;font.weight:Font.Bold}}
+                                        Rectangle{width:32;height:36;radius:5;color:appearance.palette["#e3edf6"];Txt{anchors.centerIn:parent;text:modelData.name.toLowerCase().endsWith(".wenju")?"文":"W";color:blue;font.weight:Font.Bold}}
                                         ColumnLayout{Layout.fillWidth:true;spacing:4;Txt{text:modelData.name;Layout.fillWidth:true;elide:Text.ElideMiddle;font.pixelSize:Math.round(13*appearance.scale)}Txt{text:modelData.state;color:modelData.output?appearance.palette["#35806c"]:muted;font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}}
                                     }
-                                    MouseArea{anchors.fill:parent;anchors.rightMargin:95;onClicked:bridge.openFile(index)}
-                                    Action {anchors.right:parent.right;anchors.rightMargin:10;anchors.verticalCenter:parent.verticalCenter;text:"查看报告";implicitWidth:88;implicitHeight:32;visible:!!modelData.output||!!modelData.error;onClicked:bridge.showReport(index)}
+                                    MouseArea{anchors.fill:parent;anchors.rightMargin:300;onClicked:bridge.openFile(index)}
+                                    Row {anchors.right:parent.right;anchors.rightMargin:8;anchors.verticalCenter:parent.verticalCenter;spacing:6
+                                        Action {text:"存为文矩";implicitWidth:96;implicitHeight:32;enabled:!bridge.busy;onClicked:bridge.saveWenju(index)}
+                                        Action {text:"导出DOCX";implicitWidth:108;implicitHeight:32;enabled:!bridge.busy;onClicked:bridge.exportDocx(index)}
+                                        Action {text:"报告";implicitWidth:64;implicitHeight:32;visible:!!modelData.output||!!modelData.error;onClicked:bridge.showReport(index)}
+                                    }
                                 }
                             }
                         }

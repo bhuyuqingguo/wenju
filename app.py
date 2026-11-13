@@ -1,9 +1,9 @@
-import sys, json, shutil, uuid, os, copy, re
+import sys, json, shutil, uuid, os, copy, re, datetime
 from pathlib import Path
 from platform_support import data_directory, configure_rendering
 configure_rendering()
 from qt_compat import (
-    QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt,
+    QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt, QMimeData, QMetaObject,
     QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont,
     QQmlApplicationEngine, QQuickWindow, QQuickStyle, QApplication, QFileDialog,
     QTest, QPoint, QPointF, exec_app, delete_qobject, set_color_scheme, quick_style,
@@ -17,6 +17,26 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'core'))
 import fontfallback
 DATA = data_directory(ROOT)
+
+def wenju_modules():
+    core = str(ROOT / 'core')
+    if core not in sys.path:
+        sys.path.insert(0, core)
+    import clipboard_import
+    import wenju_format
+    return clipboard_import, wenju_format
+
+def wenju_api():
+    return wenju_modules()[1]
+
+def source_document(path):
+    wenju_api()
+    path = str(path)
+    if path.lower().endswith(('.docx', '.wenju')): return path
+    import docx_fmt
+    converted = docx_fmt.convert_to_docx(path)
+    if not converted: raise ValueError('无法读取 %s，请先另存为 .docx' % Path(path).name)
+    return converted
 def qt_log(kind, context, message):
     with (DATA/'界面日志.txt').open('a',encoding='utf-8') as log: log.write(message+'\n')
 qInstallMessageHandler(qt_log)
@@ -28,6 +48,9 @@ class Bridge(QObject):
     libraryChanged = Signal()
     errorRaised = Signal(str)
     convertFinished = Signal(str)
+    importProgressChanged = Signal()
+    clipboardStarted = Signal()
+    clipboardFinished = Signal(str)
     def __init__(self):
         super().__init__()
         self.rows = []
@@ -58,6 +81,12 @@ class Bridge(QObject):
         self._convert_dir=None
         self._progress_path=None
         self._poll=None
+        self.import_progress = 0
+        self.clipboard_doc = None
+        self.clipboard_docx = ''
+        self.clipboard_wenju = ''
+        self.clipboard_brush = False
+        self._importing = False
         if not (DATA/'current.json').exists() and self.settings:
             if self.store.find(self.settings.get('template','unit')):self.store.select(self.settings.get('template','unit'))
             self.updatePage(self.settings)
@@ -74,6 +103,8 @@ class Bridge(QObject):
     def status(self): return self.message
     @Property(bool, notify=changed)
     def busy(self): return self.running
+    @Property(int, notify=importProgressChanged)
+    def importProgress(self): return self.import_progress
     @Property('QVariantMap', constant=True)
     def saved(self): return self.settings
     @Property('QVariantList', notify=libraryChanged)
@@ -227,21 +258,122 @@ class Bridge(QObject):
         known = {r['path'] for r in self.rows}
         for p in paths:
             p = str(Path(p).resolve())
-            if p not in known and Path(p).suffix.lower() in ('.docx','.doc','.wps','.rtf') and Path(p).is_file():
+            if p not in known and Path(p).suffix.lower() in ('.docx','.doc','.wps','.rtf','.wenju') and Path(p).is_file():
                 self.rows.append(dict(path=p, name=Path(p).name, state='等待整理', output='',report=''))
                 known.add(p)
         self.changed.emit()
 
     @Slot()
     def choose(self):
-        paths, _ = QFileDialog.getOpenFileNames(None, '选择文档', '', '文档 (*.docx *.doc *.wps *.rtf)')
+        paths, _ = QFileDialog.getOpenFileNames(None, '选择文档', '', '文档 (*.docx *.doc *.wps *.rtf *.wenju)')
         self.add(paths)
+
+    def _set_import_progress(self, value):
+        self.import_progress = int(value)
+        self.importProgressChanged.emit()
+        app = QGuiApplication.instance()
+        if app is not None:
+            app.processEvents()
+
+    def _write_clipboard(self, doc, brush, wenju_path, docx_path):
+        clip, wenju = wenju_modules()
+        wenju.save(doc, wenju_path)
+        self._set_import_progress(90)
+        rules = clip.brush_styles(copy.deepcopy(self.store.rules)) if brush else None
+        wenju.to_docx(doc, docx_path, template=rules)
+        self._set_import_progress(100)
+
+    @Slot(bool)
+    def importClipboard(self, brush):
+        if self.running or self._importing:
+            return
+        clip, _wenju = wenju_modules()
+        self._importing = True
+        self.running = True
+        self.clipboard_brush = bool(brush)
+        self.import_progress = 0
+        self.importProgressChanged.emit()
+        self.message = '正在从剪贴板导入…'
+        self.changed.emit()
+        self.clipboardStarted.emit()
+        QGuiApplication.processEvents()
+        try:
+            doc = clip.document_from_mime(QGuiApplication.clipboard().mimeData(), lambda value: self._set_import_progress(min(80, int(value * 0.8))))
+            out = DATA / '输出'
+            out.mkdir(parents=True, exist_ok=True)
+            stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
+            wenju_path = out / ('剪贴板-%s.wenju' % stamp)
+            docx_path = out / ('剪贴板-%s.docx' % stamp)
+            self._write_clipboard(doc, brush, wenju_path, docx_path)
+            report_path = out / ('剪贴板-%s.txt' % stamp)
+            report_path.write_text('已从剪贴板导入\n%s\n%s\n' % (wenju_path, docx_path), encoding='utf-8')
+            self.clipboard_doc = doc
+            self.clipboard_docx = str(docx_path)
+            self.clipboard_wenju = str(wenju_path)
+            self.rows.append(dict(path=str(docx_path), name=docx_path.name, state='已从剪贴板导入', output=str(docx_path), report=str(report_path), wenju=str(wenju_path)))
+            self.message = '已从剪贴板导入'
+            self.clipboardFinished.emit('已导入 %d 个块，并保存两份文件。\n%s\n%s' % (len(doc.blocks), wenju_path, docx_path))
+        except clip.ClipboardEmpty as exc:
+            self.error(exc)
+        except Exception as exc:
+            self.error(exc)
+        finally:
+            self.running = False
+            self._importing = False
+            self.changed.emit()
+
+    @Slot(bool)
+    def setClipboardBrush(self, brush):
+        brush = bool(brush)
+        if brush == self.clipboard_brush and self.clipboard_doc is None:
+            return
+        self.clipboard_brush = brush
+        if self.clipboard_doc is None or not self.clipboard_docx:
+            self.message = '按模板刷格式' if brush else '保留原格式'
+            self.changed.emit()
+            return
+        try:
+            self._write_clipboard(self.clipboard_doc, brush, self.clipboard_wenju, self.clipboard_docx)
+            self.message = '已按模板重新导出' if brush else '已按原格式重新导出'
+            self.clipboardFinished.emit(self.message + '\n' + self.clipboard_docx)
+        except Exception as exc:
+            self.error(exc)
+        self.changed.emit()
 
     @Slot('QVariantList')
     def dropFiles(self, urls): self.add([QUrl(u).toLocalFile() for u in urls])
 
     @Slot()
     def sample(self): self.add([ROOT/'core/样例/样例_整理前.docx'])
+
+    def _write_row(self, index, dest):
+        if not 0 <= index < len(self.rows): raise IndexError('没有这份文档')
+        wenju_api().convert_file(source_document(self.rows[index]['path']), dest)
+        self.rows[index]['output'] = dest
+        self.rows[index]['state'] = '已保存 · 点击打开'
+        self.message = '已保存 ' + Path(dest).name
+        self.changed.emit()
+
+    def _ask_save(self, index, suffix, title, label):
+        try:
+            if self.running or not 0 <= index < len(self.rows): return
+            stem = Path(self.rows[index]['name']).stem
+            folder = DATA/'输出'
+            folder.mkdir(parents=True, exist_ok=True)
+            path, _ = QFileDialog.getSaveFileName(None, title, str(folder/(stem+suffix)), label)
+            if not path: return
+            if not path.lower().endswith(suffix): path += suffix
+            self._write_row(index, path)
+        except Exception as exc:
+            self.error(exc)
+
+    @Slot(int)
+    def saveWenju(self, index):
+        self._ask_save(index, '.wenju', '保存为文矩', '文矩文档 (*.wenju)')
+
+    @Slot(int)
+    def exportDocx(self, index):
+        self._ask_save(index, '.docx', '导出 DOCX', 'Word 文档 (*.docx)')
 
     @Slot()
     def clear(self):
@@ -591,7 +723,7 @@ bridge = Bridge()
 engine = QQmlApplicationEngine()
 engine.rootContext().setContextProperty('bridge',bridge)
 engine.rootContext().setContextProperty('appearance',appearance)
-engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro and os.environ.get('WENJU_LOW_POWER')!='1' and not any(a in sys.argv for a in ('--smoke','--capture','--capture-themes','--test-convert-ui')))
+engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro and os.environ.get('WENJU_LOW_POWER')!='1' and not any(a in sys.argv for a in ('--smoke','--capture','--capture-themes','--test-convert-ui','--test-clipboard')))
 engine.load(QUrl.fromLocalFile(str(ROOT/'Main.qml')))
 if not engine.rootObjects(): sys.exit(1)
 window = engine.rootObjects()[0]
@@ -850,6 +982,91 @@ if '--smoke' in sys.argv:
         app.quit()
     later(begin_test,700)
     QTimer.singleShot(60000,lambda:app.exit(2))
+if '--test-clipboard' in sys.argv:
+    import traceback
+    def guarded_clip(fn):
+        def run():
+            try: fn()
+            except Exception:
+                traceback.print_exc(); app.exit(1)
+        return run
+    def find_item(name):
+        todo=[window.contentItem()]
+        while todo:
+            item=todo.pop()
+            if item.objectName()==name: return item
+            todo += item.childItems()
+        return window.findChild(QObject, name)
+    def click_item(name):
+        item=find_item(name)
+        assert item is not None, name
+        point=item.mapToScene(QPointF(item.width()/2, item.height()/2)).toPoint()
+        QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, point)
+        return item
+    def begin_clipboard():
+        window.setProperty('page', 0)
+        app.processEvents()
+        ok=None
+        todo=[window.contentItem()]
+        while todo:
+            item=todo.pop()
+            if str(item.metaObject().className()).startswith('Button') and item.property('text') in ('OK', '确定') and item.property('visible'):
+                ok=item
+            todo += item.childItems()
+        if ok is not None:
+            point=ok.mapToScene(QPointF(ok.width()/2, ok.height()/2)).toPoint()
+            QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, point)
+            app.processEvents()
+        assert find_item('importClipboard').property('text')=='从剪贴板导入'
+        assert find_item('clipboardBrush').property('checked') is False
+        mime=QMimeData()
+        mime.setData('text/html', (ROOT/'core/样例/clipboard/wps.html').read_bytes())
+        mime.setText('plain should lose')
+        QGuiApplication.clipboard().setMimeData(mime)
+        click_item('importClipboard')
+        app.processEvents()
+        assert bridge.importProgress==100, bridge.importProgress
+        assert bridge.files and bridge.files[-1]['state']=='已从剪贴板导入', bridge.files
+        row=bridge.files[-1]
+        wenju_path, docx_path=Path(row['wenju']), Path(row['output'])
+        assert wenju_path.is_file() and docx_path.is_file() and Path(row['report']).is_file()
+        _clip, wenju=wenju_modules()
+        kept=wenju.load(wenju_path)
+        heading=next(block for block in kept.blocks if block['type']=='heading')
+        assert heading['runs'][0]['text']=='通知标题' and heading['runs'][0]['size_pt']==22
+        original=wenju.from_docx(docx_path)
+        assert next(block for block in original.blocks if block['type']=='heading')['runs'][0]['size_pt']==22
+        done=find_item('clipDone')
+        assert done is not None and done.property('visible')
+        QMetaObject.invokeMethod(done, 'close')
+        app.processEvents()
+        click_item('clipboardBrush')
+        app.processEvents()
+        assert bridge.clipboard_brush is True
+        brushed=wenju.from_docx(docx_path)
+        assert next(block for block in brushed.blocks if block['type']=='heading')['runs'][0]['size_pt']==16
+        assert wenju.load(wenju_path).blocks[0]['runs'][0]['size_pt']==22
+        shot=Path('/tmp/clipboard-import.png')
+        assert window.grabWindow().save(str(shot)), shot
+        first=Path(bridge.files[-1]['wenju'])
+        mime2=QMimeData()
+        mime2.setHtml('<html><body><p>第二份完全不同</p></body></html>')
+        QGuiApplication.clipboard().setMimeData(mime2)
+        bridge.importClipboard(False)
+        second=Path(bridge.files[-1]['wenju'])
+        assert str(first)!=str(second) and first.is_file() and second.is_file()
+        assert '通知标题' in ''.join(run.get('text','') for block in wenju.load(first).blocks if block.get('type')=='heading' for run in block.get('runs') or [])
+        assert '第二份完全不同' in ''.join(run.get('text','') for block in wenju.load(second).blocks for run in block.get('runs') or [])
+        QGuiApplication.clipboard().clear()
+        app.processEvents()
+        before=len(bridge.files)
+        bridge.importClipboard(False)
+        assert len(bridge.files)==before
+        assert '没有可导入' in bridge.status, bridge.status
+        print('PASS: clipboard button imports HTML, saves wenju and docx, brushes on toggle, rejects an empty clipboard')
+        app.quit()
+    QTimer.singleShot(800, guarded_clip(begin_clipboard))
+    QTimer.singleShot(20000, lambda: app.exit(2))
 exit_code=exec_app(app)
 delete_qobject(engine)
 sys.exit(exit_code)

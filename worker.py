@@ -46,6 +46,12 @@ def execute(job):
             except OSError:lines.append('Microsoft Word：未检测到')
         lines.append('DOCX 整理不依赖 Office；旧 DOC 转换需要本机转换组件。')
         return {'ok':True,'reportText':'\n'.join(lines)}
+    source=job.get('source')
+    if source and str(source).lower().endswith('.wenju'):
+        import wenju_format
+        converted=str(Path(source).with_suffix('.docx'))
+        wenju_format.to_docx(wenju_format.load(source), converted)
+        job=dict(job, source=converted)
     rules=json.loads((ROOT/'core/rules.json').read_text('utf-8-sig'))
     if 'rules' in job:rules=normalize(job['rules'])
     else:

@@ -5,9 +5,10 @@ import os
 import re
 import zipfile
 import xml.etree.ElementTree as ET
+from copy import deepcopy
 from pathlib import Path
 
-from wenju_format import WenjuDoc, brush, from_docx, load, save, to_docx
+from wenju_format import WenjuDoc, from_docx, load, save, to_docx
 
 SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 OFFICE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -235,7 +236,198 @@ def _unsupported(suffix):
 
 
 def _document_from_blocks(blocks, source):
-    return WenjuDoc(blocks, {}, {}, {"format": "wenju", "version": 1, "source": source})
+    name = source if isinstance(source, str) else ""
+    return WenjuDoc(
+        blocks=blocks,
+        styles={},
+        assets={},
+        title=Path(name).stem if name else "",
+        source={"kind": "convert", "name": name},
+    )
+
+
+_CN = "一二三四五六七八九"
+_SIZE_NAMES = {
+    "初号": 42, "小初": 36, "一号": 26, "小一": 24, "二号": 22, "小二": 18,
+    "三号": 16, "小三": 15, "四号": 14, "小四": 12, "五号": 10.5, "小五": 9,
+    "六号": 7.5, "小六": 6.5, "七号": 5.5, "八号": 5,
+}
+
+
+def brush(doc, template):
+    loaded = _load_template(template)
+    if loaded["kind"] == "styles":
+        if not loaded["styles"]:
+            raise ValueError("按模板刷需要模板规则")
+        _apply_styles(doc, loaded["styles"])
+        return doc
+    rules = loaded["rules"]
+    fonts = rules.get("字体") or {}
+    body = rules.get("正文") or {}
+    heads = rules.get("标题") or {}
+    keep_marks = body.get("保留加粗斜体下划线", True)
+    western = fonts.get("西文") or ""
+    body_font = fonts.get("正文") or ""
+    body_size = _size_pt(body.get("字号"), 16)
+    body_bold = bool(body.get("加粗"))
+    table_font = fonts.get("表格") or body_font
+    for block in doc.blocks:
+        kind = block.get("type")
+        if kind == "heading":
+            key = _level_key(block.get("level"))
+            spec = heads.get(key) or {} if key else {}
+            font = (fonts.get(key + "标题") if key else None) or body_font
+            size = _size_pt(spec.get("字号"), body_size)
+            bold = bool(spec.get("加粗"))
+            for run in block.get("runs") or []:
+                _paint(run, font, size, bold, keep_marks, western)
+        elif kind == "paragraph":
+            block["style"] = "正文"
+            for run in block.get("runs") or []:
+                _paint(run, body_font, body_size, body_bold, keep_marks, western)
+        elif kind == "table":
+            for row in block.get("rows") or []:
+                for cell in row:
+                    if not isinstance(cell, dict) or cell.get("covered") is True:
+                        continue
+                    for run in cell.get("runs") or []:
+                        _paint(run, table_font, body_size, False, keep_marks, western)
+    return doc
+
+
+def _size_pt(value, default=12):
+    try:
+        import docx_fmt
+        return float(docx_fmt.size_pt(value, default))
+    except Exception:
+        if value is None or value == "":
+            return float(default)
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip().replace("磅", "").replace("pt", "").replace("號", "号")
+        if text in _SIZE_NAMES:
+            return float(_SIZE_NAMES[text])
+        try:
+            return float(text)
+        except ValueError:
+            return float(default)
+
+
+def _level_key(level):
+    if isinstance(level, int) and 1 <= level <= 9:
+        return _CN[level - 1] + "级"
+    return None
+
+
+def _paint(run, font, size, bold, keep_marks, western=""):
+    if not isinstance(run, dict):
+        return
+    run.pop("font", None)
+    run.pop("size", None)
+    if font:
+        run["eastAsia"] = font
+    if western:
+        run["ascii"] = western
+    if size:
+        run["size_pt"] = float(size)
+    if keep_marks:
+        if bold:
+            run["bold"] = True
+        return
+    if bold:
+        run["bold"] = True
+    else:
+        run.pop("bold", None)
+    for key in ("italic", "underline", "color"):
+        run.pop(key, None)
+
+
+def _is_rules(data):
+    if not isinstance(data, dict):
+        return False
+    if "字体" in data or "标题" in data:
+        return True
+    body = data.get("正文")
+    return isinstance(body, dict) and "字号" in body
+
+
+def _load_template(template):
+    if template is None or template == "":
+        raise ValueError("按模板刷需要模板规则")
+    if isinstance(template, WenjuDoc):
+        data = template.styles if isinstance(template.styles, dict) else {}
+    elif isinstance(template, dict):
+        data = template
+    elif isinstance(template, str) and os.path.isfile(template):
+        if template.lower().endswith(".wenju"):
+            data = load(template).styles
+        else:
+            with open(template, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        if not isinstance(data, dict):
+            raise ValueError("模板必须是规则对象、JSON 文件或文矩文件")
+    else:
+        raise ValueError("模板必须是规则对象、JSON 文件或文矩文件")
+    if _is_rules(data):
+        return {"kind": "rules", "rules": data}
+    return {"kind": "styles", "styles": data}
+
+
+def _apply_styles(doc, styles):
+    for block in doc.blocks:
+        if not isinstance(block, dict):
+            continue
+        style = _style_for_block(block, styles)
+        if not style:
+            continue
+        for key in ("align", "indent", "line"):
+            if style.get(key) not in (None, {}, ""):
+                block[key] = deepcopy(style[key])
+        for run in _block_runs(block):
+            if style.get("eastAsia"):
+                run["eastAsia"] = style["eastAsia"]
+                run.pop("font", None)
+            if style.get("ascii"):
+                run["ascii"] = style["ascii"]
+            if style.get("hAnsi"):
+                run["hAnsi"] = style["hAnsi"]
+            if style.get("size_pt") is not None:
+                run["size_pt"] = style["size_pt"]
+                run.pop("size", None)
+            if "bold" in style:
+                if style["bold"]:
+                    run["bold"] = True
+                else:
+                    run.pop("bold", None)
+
+
+def _style_for_block(block, styles):
+    name = block.get("style")
+    if isinstance(name, str) and isinstance(styles.get(name), dict):
+        return styles[name]
+    if block.get("type") == "heading":
+        level = block.get("level")
+        for key in ("标题%d" % level, "标题 %d" % level, "heading %d" % level, "Heading %d" % level, "Heading%d" % level):
+            if isinstance(styles.get(key), dict):
+                return styles[key]
+    for key in ("正文", "Normal"):
+        if isinstance(styles.get(key), dict):
+            return styles[key]
+    return {}
+
+
+def _block_runs(block):
+    kind = block.get("type")
+    if kind in ("heading", "paragraph"):
+        return [run for run in block.get("runs") or [] if isinstance(run, dict)]
+    if kind == "table":
+        found = []
+        for row in block.get("rows") or []:
+            for cell in row:
+                if isinstance(cell, dict) and cell.get("covered") is not True:
+                    found.extend(run for run in cell.get("runs") or [] if isinstance(run, dict))
+        return found
+    return []
 
 
 def _plain_blocks(text):

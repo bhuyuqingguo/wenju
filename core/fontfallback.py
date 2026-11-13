@@ -1,12 +1,19 @@
 """Pick a font the machine actually has, and say so when it does not.
 
 Templates name the preferred family (仿宋_GB2312, 方正小标宋简体, …).
-The docx writer must store the family that was really selected, not a name
-this computer will only substitute later. Chinese system fonts and Founder
-faces are not redistributable; this module never ships those files.
+The docx writer stores that requested family. A missing face is substituted
+only when drawing. Chinese system fonts and Founder faces are not
+redistributable; this module never ships those files.
 """
 import os, sys, shutil, subprocess
 from pathlib import Path
+
+def resolve(name):
+    """Name stored in the docx. A missing face is substituted only when drawing."""
+    if not name:
+        return name
+    return str(name)
+
 
 # Each list is the order to try. The first entry is the preferred family.
 CHAINS = {
@@ -38,11 +45,6 @@ LICENSE = {
 }
 
 _INDEX = None
-
-
-def resolve(name):
-    """Keep the requested family in the docx. Painting uses choose()."""
-    return name
 
 
 def chain_for(name):
