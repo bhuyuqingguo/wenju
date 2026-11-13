@@ -1998,7 +1998,7 @@ def _chart_drawing(parent, block, rel_id, picture_id):
     extent.set("cy", cy)
     doc_pr = ET.SubElement(inline, q(WP, "docPr"))
     doc_pr.set("id", str(picture_id))
-    doc_pr.set("name", block.get("asset") or "Chart")
+    doc_pr.set("name", "Chart %d" % picture_id)
     graphic = ET.SubElement(inline, q(A, "graphic"))
     data = ET.SubElement(graphic, q(A, "graphicData"))
     uri = block.get("uri") or C
@@ -2445,9 +2445,21 @@ def _write_run(paragraph, run):
 def _place_media(block, assets, image_rels, extra_files, image_start, picture_id):
     rel_id = "rId%d" % (image_start + len(image_rels))
     asset = block["asset"]
-    image_rels.append((rel_id, "media/" + asset, IMAGE_REL))
     blob = assets[asset]
-    extra_files["word/media/" + asset] = blob if isinstance(blob, bytes) else bytes(blob)
+    blob = blob if isinstance(blob, bytes) else bytes(blob)
+    key = "word/media/" + asset
+    if key in extra_files and extra_files[key] != blob:
+        stem, dot, ext = asset.rpartition(".")
+        serial = 2
+        while True:
+            renamed = ("%s-%d.%s" % (stem, serial, ext)) if dot else "%s-%d" % (asset, serial)
+            key = "word/media/" + renamed
+            if key not in extra_files or extra_files[key] == blob:
+                asset = renamed
+                break
+            serial += 1
+    extra_files[key] = blob
+    image_rels.append((rel_id, "media/" + asset, IMAGE_REL))
     return rel_id, picture_id
 
 
@@ -2498,7 +2510,8 @@ def _write_table(body, block, styles, style_ids, brush, assets=None, image_rels=
                     if not isinstance(image, dict) or not image.get("asset"):
                         continue
                     rel_id, picture_id = _place_media(image, assets, image_rels, extra_files, image_start, picture_id)
-                    _write_drawing(paragraph, image, rel_id, picture_id)
+                    own = ET.SubElement(tc, q(W, "p"))
+                    _write_drawing(own, image, rel_id, picture_id)
                     picture_id += 1
     return picture_id
 
@@ -2519,7 +2532,7 @@ def _write_drawing(paragraph, block, rel_id, picture_id):
     extent.set("cy", cy)
     doc_pr = ET.SubElement(inline, q(WP, "docPr"))
     doc_pr.set("id", str(picture_id))
-    doc_pr.set("name", block["asset"])
+    doc_pr.set("name", "Picture %d" % picture_id)
     graphic = ET.SubElement(inline, q(A, "graphic"))
     data = ET.SubElement(graphic, q(A, "graphicData"))
     data.set("uri", PIC)
@@ -2527,7 +2540,7 @@ def _write_drawing(paragraph, block, rel_id, picture_id):
     nv = ET.SubElement(pic, q(PIC, "nvPicPr"))
     c_nv = ET.SubElement(nv, q(PIC, "cNvPr"))
     c_nv.set("id", str(picture_id))
-    c_nv.set("name", block["asset"])
+    c_nv.set("name", "Picture %d" % picture_id)
     ET.SubElement(nv, q(PIC, "cNvPicPr"))
     fill = ET.SubElement(pic, q(PIC, "blipFill"))
     ET.SubElement(fill, q(A, "blip")).set(q(R, "embed"), rel_id)
