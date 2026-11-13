@@ -18,7 +18,7 @@ def merge(docs):
             blocks.append({"type": "pagebreak"})
         start = len(blocks)
         blocks.extend(copied)
-        for order, section in enumerate(doc.styles.get("sections") or [{"at": 0, "header": "", "footer": ""}]):
+        for order, section in enumerate(doc.sections or [{"at": 0, "header": "", "footer": ""}]):
             brk = section.get("break") or "nextPage"
             if order == 0 and index > 0:
                 brk = "nextPage"
@@ -36,7 +36,7 @@ def merge(docs):
         for section in sections:
             if section["at"] > 0:
                 section["at"] += 1
-    return WenjuDoc(blocks, {"sections": sections}, assets, {"wenju": 1})
+    return WenjuDoc(blocks, {}, assets, {"format": "wenju", "version": 1, "source": {"kind": "merge", "name": ""}}, sections)
 
 
 def _content_index(blocks, at):
@@ -54,10 +54,10 @@ def _copy_blocks(doc, index, assets):
     mapping = {}
     for name in sorted(doc.assets):
         base = name.split("/")[-1]
-        target = "assets/%d_%s" % (index, base)
+        target = "%d_%s" % (index, base)
         serial = 1
         while target in assets:
-            target = "assets/%d_%d_%s" % (index, serial, base)
+            target = "%d_%d_%s" % (index, serial, base)
             serial += 1
         assets[target] = doc.assets[name]
         mapping[name] = target

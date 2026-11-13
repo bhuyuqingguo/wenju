@@ -23,14 +23,14 @@ def text_of(node):
 def heading(level, text, font=None):
     run = {"text": text}
     if font:
-        run["font"] = font
+        run["eastAsia"] = font
     return {"type": "heading", "level": level, "runs": [run]}
 
 
 def paragraph(text, font=None):
     run = {"text": text}
     if font:
-        run["font"] = font
+        run["eastAsia"] = font
     return {"type": "paragraph", "style": "Normal", "runs": [run]}
 
 
@@ -80,15 +80,15 @@ def main():
     second = document([
         heading(1, "一、附则"),
         {"type": "table", "rows": [
-            [{"runs": [{"text": "左"}]}, {"runs": [{"text": "右"}]}],
+            [{"runs": [{"text": "左"}, {"text": "右"}]}, {"covered": True}],
             [{"runs": [{"text": "下"}]}, {"runs": [{"text": ""}]}],
-        ], "merges": [{"row": 0, "col": 0, "rows": 1, "cols": 2}]},
-        {"type": "image", "asset": "assets/a.png", "w": 20, "h": 20},
-    ], "乙", {"assets/a.png": picture_b})
+        ], "merges": [{"row": 0, "col": 0, "rowspan": 1, "colspan": 2}]},
+        {"type": "image", "asset": "a.png", "w": 20, "h": 20},
+    ], "乙", {"a.png": picture_b})
     third = document([
         heading(1, "二、附图"),
-        {"type": "image", "asset": "assets/a.png", "w": 20, "h": 20},
-    ], "丙", {"assets/a.png": picture_c})
+        {"type": "image", "asset": "a.png", "w": 20, "h": 20},
+    ], "丙", {"a.png": picture_c})
 
     with tempfile.TemporaryDirectory(prefix="wenju-merge-") as tmp:
         folder = Path(tmp)
@@ -101,7 +101,7 @@ def main():
         assert ["".join(run["text"] for run in block["runs"]) for block in headings] == ["一、总则", "（一）范围", "一、附则", "二、附图"]
         assert [block["level"] for block in headings] == [1, 2, 1, 1]
         assert list(merged.assets.values()) == [picture_b, picture_c]
-        assert [section["header"] for section in merged.styles["sections"]] == ["甲", "乙", "丙"]
+        assert [section["header"] for section in merged.sections] == ["甲", "乙", "丙"]
 
         seen = []
 
@@ -119,7 +119,16 @@ def main():
         assert [item[1] for item in seen] == sorted(item[1] for item in seen)
         assert all(item[1] <= 100 for item in seen)
 
+        with zipfile.ZipFile(exported["wenju"]) as archive:
+            packed = json.loads(archive.read("document.json").decode("utf-8"))
+            manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            assert isinstance(packed["blocks"], list) and packed["sections"]
+            assert manifest["format"] == "wenju" and manifest["version"] == 1
+            assert all(not name.startswith("assets/assets/") for name in archive.namelist())
+            assert any(name.startswith("assets/") and name.count("/") == 1 for name in archive.namelist())
         stored = load(exported["wenju"])
+        body_run = next(block["runs"][0] for block in stored.blocks if block["type"] == "paragraph")
+        assert body_run["eastAsia"] == "仿宋" and body_run["size_pt"] == 12 and "font" not in body_run
         stored_headings = [block for block in stored.blocks if block["type"] == "heading"]
         assert ["".join(run["text"] for run in block["runs"]) for block in stored_headings] == ["1. 总则", "1.1 范围", "2. 附则", "3. 附图"]
         assert [block["level"] for block in stored_headings] == [1, 2, 1, 1]
@@ -165,7 +174,7 @@ def main():
         reread_headings = [block for block in reread.blocks if block["type"] == "heading"]
         assert [block["level"] for block in reread_headings] == [1, 2, 1, 1]
         assert [block["runs"][0]["text"] for block in reread_headings] == ["1. 总则", "1.1 范围", "2. 附则", "3. 附图"]
-        assert [section["header"] for section in reread.styles["sections"]] == ["甲", "乙", "丙"]
+        assert [section["header"] for section in reread.sections] == ["甲", "乙", "丙"]
 
         plain = folder / "plain.docx"
         to_docx(merge([load(str(user_order[0]))]), str(plain), template=None)
@@ -199,7 +208,7 @@ def main():
     combined = merge(many)
     combined_heads = [block for block in combined.blocks if block["type"] == "heading"]
     assert [block["runs"][0]["text"] for block in combined_heads] == ["一、第%d篇" % (n + 1) for n in range(12)]
-    assert [section["header"] for section in combined.styles["sections"]] == ["页眉%d" % n for n in range(12)]
+    assert [section["header"] for section in combined.sections] == ["页眉%d" % n for n in range(12)]
 
     ended = document([heading(1, "一、甲"), {"type": "pagebreak"}], "页眉甲")
     followed = document([heading(1, "一、乙")], "页眉乙")
@@ -237,8 +246,8 @@ def main():
         stored = load(twice["wenju"])
         active = []
         for index, block in enumerate(stored.blocks):
-            section = stored.styles["sections"][0]
-            for item in stored.styles["sections"]:
+            section = stored.sections[0]
+            for item in stored.sections:
                 if item["at"] <= index:
                     section = item
             if block["type"] == "heading":
@@ -268,10 +277,10 @@ def main():
     square = WenjuDoc([{
         "type": "table",
         "rows": [
-            [{"runs": [{"text": "甲"}]}, {"runs": [{"text": "乙"}]}],
-            [{"runs": [{"text": "丙"}]}, {"runs": [{"text": "丁"}]}],
+            [{"runs": [{"text": "甲"}, {"text": "\n"}, {"text": "乙"}, {"text": "\n"}, {"text": "丙"}, {"text": "\n"}, {"text": "丁"}]}, {"covered": True}],
+            [{"covered": True}, {"covered": True}],
         ],
-        "merges": [{"row": 0, "col": 0, "rows": 2, "cols": 2}],
+        "merges": [{"row": 0, "col": 0, "rowspan": 2, "colspan": 2}],
     }], {}, {}, {"wenju": 1})
     with tempfile.TemporaryDirectory(prefix="wenju-cell-") as tmp:
         path = Path(tmp) / "out.docx"
@@ -351,7 +360,7 @@ def check_docx_roundtrip():
   <w:sectPr/>
 </w:body></w:document>""" % ns)
         loaded = from_docx(str(cells))
-        assert loaded.blocks[0]["rows"][0][0]["runs"][0]["text"] == "10\n20"
+        assert "".join(run["text"] for run in loaded.blocks[0]["rows"][0][0]["runs"]) == "10\n20"
         cell_out = folder / "cells-out.docx"
         to_docx(loaded, str(cell_out))
         with zipfile.ZipFile(cell_out) as archive:
@@ -399,7 +408,7 @@ def check_docx_roundtrip():
             "word/header2.xml": header % "连续乙",
         }, rels)
         loaded = from_docx(str(continuous))
-        assert loaded.styles["sections"][1]["break"] == "continuous"
+        assert loaded.sections[1]["break"] == "continuous"
         out = folder / "continuous-out.docx"
         to_docx(loaded, str(out))
         with zipfile.ZipFile(out) as archive:
@@ -420,7 +429,7 @@ def check_docx_roundtrip():
             "word/header2.xml": header % "默认页眉",
         }, rels)
         loaded = from_docx(str(even))
-        assert loaded.styles["sections"][0]["header"] == "默认页眉"
+        assert loaded.sections[0]["header"] == "默认页眉"
 
         caption = folder / "caption.docx"
         write_docx(caption, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -435,7 +444,8 @@ def check_docx_roundtrip():
         loaded = from_docx(str(caption))
         assert [block["type"] for block in loaded.blocks] == ["paragraph", "image"]
         assert loaded.blocks[0]["runs"][0]["text"] == "图注文字"
-        assert loaded.assets["assets/image1.png"] == b"\x89PNG-caption"
+        assert loaded.assets["image1.png"] == b"\x89PNG-caption"
+        assert loaded.blocks[1]["w"] > 0 and loaded.blocks[1]["h"] > 0
 
         sections = folder / "sections.docx"
         write_docx(sections, """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>

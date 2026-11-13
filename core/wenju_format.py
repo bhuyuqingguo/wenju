@@ -22,6 +22,7 @@ ET.register_namespace("a", A)
 ET.register_namespace("pic", PIC)
 
 BLOCK_TYPES = ("heading", "paragraph", "table", "image", "pagebreak", "toc")
+EMU_PER_PT = 12700
 PAGE_HEIGHT = 16838
 PAGE_MARGIN = 1440
 LINE_TWIP = 240
@@ -46,11 +47,13 @@ def _r(tag):
 
 
 class WenjuDoc(object):
-    def __init__(self, blocks, styles=None, assets=None, manifest=None):
+    def __init__(self, blocks, styles=None, assets=None, manifest=None, sections=None):
         self.blocks = blocks
-        self.styles = styles or {}
+        self.styles = dict(styles or {})
+        inherited = self.styles.pop("sections", None)
+        self.sections = sections if sections is not None else (inherited if isinstance(inherited, list) else [])
         self.assets = assets or {}
-        self.manifest = manifest or {"wenju": 1}
+        self.manifest = manifest or {"format": "wenju", "version": 1, "source": {"kind": "new", "name": ""}}
 
 
 def validate(doc):
@@ -93,12 +96,18 @@ def validate(doc):
                     for c_i, cell in enumerate(row):
                         if not isinstance(cell, dict):
                             errors.append("table %d cell %d,%d is not an object" % (index, r_i, c_i))
+                        elif cell.get("covered") is True:
+                            continue
                         else:
                             _check_runs(cell.get("runs"), "table %d cell %d,%d" % (index, r_i, c_i), errors)
         elif kind == "image":
             asset = block.get("asset")
-            if not asset or asset not in doc.assets:
-                errors.append("image %d asset is missing" % index)
+            if not isinstance(asset, str) or not asset or "/" in asset or "\\" in asset or asset not in doc.assets:
+                errors.append("image %d asset must be a file name under assets" % index)
+            for key in ("w", "h"):
+                value = block.get(key)
+                if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                    errors.append("image %d %s must be a positive point size" % (index, key))
     return errors
 
 
@@ -119,17 +128,27 @@ def save(doc, path):
     if directory:
         os.makedirs(directory, exist_ok=True)
     with zipfile.ZipFile(path, "w") as archive:
-        _put(archive, "manifest.json", _dump(doc.manifest))
-        _put(archive, "document.json", _dump(doc.blocks))
+        manifest = _manifest(doc)
+        document = {"blocks": doc.blocks}
+        if doc.sections:
+            document["sections"] = doc.sections
+        _put(archive, "manifest.json", _dump(manifest))
+        _put(archive, "document.json", _dump(document))
         _put(archive, "styles.json", _dump(doc.styles))
         for name in sorted(doc.assets):
-            _put(archive, name, doc.assets[name])
+            _put(archive, "assets/" + name.split("/")[-1], doc.assets[name])
 
 
 def load(path):
     with zipfile.ZipFile(path) as archive:
         manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-        blocks = json.loads(archive.read("document.json").decode("utf-8"))
+        raw = json.loads(archive.read("document.json").decode("utf-8"))
+        if isinstance(raw, dict):
+            blocks = raw.get("blocks") or []
+            sections = raw.get("sections") or []
+        else:
+            blocks = raw
+            sections = []
         try:
             styles = json.loads(archive.read("styles.json").decode("utf-8"))
         except KeyError:
@@ -137,12 +156,21 @@ def load(path):
         assets = {}
         for info in archive.infolist():
             if info.filename.startswith("assets/") and not info.is_dir():
-                assets[info.filename] = archive.read(info.filename)
-    doc = WenjuDoc(blocks, styles, assets, manifest)
+                assets[info.filename.split("/", 1)[1]] = archive.read(info.filename)
+    doc = WenjuDoc(blocks, styles, assets, manifest, sections)
     errors = validate(doc)
     if errors:
         raise ValueError("；".join(errors))
     return doc
+
+
+def _manifest(doc):
+    manifest = dict(doc.manifest or {})
+    manifest["format"] = "wenju"
+    manifest["version"] = 1
+    source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    manifest["source"] = {"kind": source.get("kind") or "new", "name": source.get("name") or ""}
+    return manifest
 
 
 def _dump(value):
@@ -184,8 +212,6 @@ def apply_template(doc, template):
             default = template.get("font")
             renumber = template.get("number", "多级数字") == "多级数字"
     _walk_runs(doc, default)
-    if isinstance(doc.styles, dict) and default:
-        doc.styles["font"] = fontfallback.resolve(default)
     if not renumber:
         return doc
     counters = []
@@ -206,26 +232,36 @@ def apply_template(doc, template):
 
 def _first_font(runs):
     for run in runs or []:
+        if run.get("eastAsia"):
+            return run["eastAsia"]
         if run.get("font"):
             return run["font"]
     return None
 
 
 def _styled(text, font, default):
-    run = {"text": text}
+    run = {"text": text, "size_pt": 12}
     chosen = font or default
     if chosen:
-        run["font"] = fontfallback.resolve(chosen)
+        run["eastAsia"] = fontfallback.resolve(chosen)
     return run
 
 
 def _walk_runs(doc, default):
     def fix(runs):
         for run in runs or []:
-            if run.get("font"):
-                run["font"] = fontfallback.resolve(run["font"])
+            if run.get("font") and not run.get("eastAsia"):
+                run["eastAsia"] = run.pop("font")
+            elif "font" in run:
+                run.pop("font", None)
+            if run.get("eastAsia"):
+                run["eastAsia"] = fontfallback.resolve(run["eastAsia"])
             elif default:
-                run["font"] = fontfallback.resolve(default)
+                run["eastAsia"] = fontfallback.resolve(default)
+            if run.get("ascii"):
+                run["ascii"] = fontfallback.resolve(run["ascii"])
+            if not run.get("size_pt"):
+                run["size_pt"] = 12
     for block in doc.blocks:
         fix(block.get("runs"))
         if block.get("type") == "table":
@@ -309,7 +345,7 @@ def _toc_lines(blocks):
 def _ensure_toc(doc):
     if any(block.get("type") == "heading" for block in doc.blocks) and not any(block.get("type") == "toc" for block in doc.blocks):
         doc.blocks.insert(0, {"type": "toc"})
-        for section in doc.styles.get("sections") or []:
+        for section in doc.sections or []:
             if section.get("at", 0) > 0:
                 section["at"] = section["at"] + 1
 
@@ -364,8 +400,7 @@ def from_docx(path):
         final = body.find(_w("sectPr"))
         if final is not None:
             _finish_section(current, final, rels, package, sections)
-    styles = {"sections": sections} if sections else {}
-    return WenjuDoc(blocks, styles, assets, {"wenju": 1})
+    return WenjuDoc(blocks, {}, assets, {"format": "wenju", "version": 1, "source": {"kind": "docx", "name": os.path.basename(path)}}, sections)
 
 
 def _finish_section(current, sect, rels, package, sections):
@@ -442,18 +477,31 @@ def _read_table(tbl):
             if grid is not None:
                 span = int(grid.get(_w("val")) or 1)
             vm = tc.find("w:tcPr/w:vMerge", {"w": W})
-            text = _cell_text(tc)
-            row.append({"runs": [{"text": text}]})
-            if span > 1 or (vm is not None and vm.get(_w("val")) == "restart"):
-                merges.append({"row": r_i, "col": col, "rows": 1, "cols": span})
-            if vm is not None and vm.get(_w("val"), "continue") != "restart":
+            kind = vm.get(_w("val")) or "continue" if vm is not None else None
+            if kind == "continue":
                 anchor = vmerge_open.get(col)
                 if anchor is not None:
-                    anchor["rows"] += 1
-            elif vm is not None:
-                vmerge_open[col] = merges[-1]
-            for _extra in range(span - 1):
-                row.append({"runs": [{"text": ""}]})
+                    anchor["rowspan"] += 1
+                    extra = _cell_runs(tc)
+                    if _run_text(extra).strip():
+                        host = rows[anchor["row"]][anchor["col"]]
+                        if _run_text(host.get("runs")).strip():
+                            host["runs"].append({"text": "\n"})
+                        host["runs"].extend([run for run in extra if run.get("text") != ""])
+                row.extend({"covered": True} for _ in range(span))
+                col += span
+                continue
+            row.append({"runs": _cell_runs(tc)})
+            if span > 1 or kind == "restart":
+                item = {"row": r_i, "col": col, "rowspan": 1, "colspan": span}
+                merges.append(item)
+                if kind == "restart":
+                    for offset in range(span):
+                        vmerge_open[col + offset] = item
+            else:
+                for offset in range(span):
+                    vmerge_open.pop(col + offset, None)
+            row.extend({"covered": True} for _ in range(span - 1))
             col += span
         rows.append(row)
     block = {"type": "table", "rows": rows}
@@ -467,13 +515,12 @@ def _append_rich(blocks, paragraph, rels, package, assets, image_seq):
         blocks.append({"type": "pagebreak"})
     style = _style_of(paragraph)
     level = _heading_level(paragraph, style)
-    buf = []
+    runs = []
 
     def flush():
-        text = "".join(buf)
-        del buf[:]
-        if text:
-            blocks.append(_text_block(level, style, text))
+        if runs:
+            blocks.append(_text_block(level, style, None, runs[:]))
+            del runs[:]
 
     for child in list(paragraph):
         if child.tag != _w("r"):
@@ -484,18 +531,25 @@ def _append_rich(blocks, paragraph, rels, package, assets, image_seq):
             if image is None:
                 continue
             image_seq += 1
-            name = "assets/image%d%s" % (image_seq, image[0])
+            name = "image%d%s" % (image_seq, image[0])
             assets[name] = image[1]
             blocks.append({"type": "image", "asset": name, "w": image[2], "h": image[3]})
             continue
+        text = []
+        broke = False
         for el in list(child):
             if el.tag == _w("br") and el.get(_w("type")) == "page":
+                _push_run(runs, "".join(text), _run_props(child))
+                del text[:]
                 flush()
                 blocks.append({"type": "pagebreak"})
+                broke = True
             elif el.tag == _w("t"):
-                buf.append(el.text or "")
+                text.append(el.text or "")
             elif el.tag == _w("tab"):
-                buf.append("\t")
+                text.append("\t")
+        if not broke:
+            _push_run(runs, "".join(text), _run_props(child))
     flush()
     return image_seq
 
@@ -526,10 +580,25 @@ def _read_image(paragraph, rels, package):
         if el.tag == "{%s}extent" % WP:
             extent = el
             break
-    width = int(int(extent.get("cx") or 0) / 9525) if extent is not None else 0
-    height = int(int(extent.get("cy") or 0) / 9525) if extent is not None else 0
+    width = _emu_to_pt(extent.get("cx") or 0) if extent is not None else 100
+    height = _emu_to_pt(extent.get("cy") or 0) if extent is not None else 100
+    if not width or width <= 0:
+        width = 100
+    if not height or height <= 0:
+        height = 100
     ext = os.path.splitext(target)[1] or ".bin"
     return ext, package[name], width, height
+
+
+def _emu_to_pt(value):
+    number = float(value) / EMU_PER_PT
+    if number == int(number):
+        return int(number)
+    return round(number, 2)
+
+
+def _pt_to_emu(value):
+    return int(round(float(value) * EMU_PER_PT))
 
 
 def _style_of(paragraph):
@@ -553,11 +622,66 @@ def _plain_text(node):
     return "".join(el.text or "" for el in node.iter(_w("t")))
 
 
-def _cell_text(cell):
+def _cell_runs(cell):
     paragraphs = cell.findall(_w("p"))
     if not paragraphs:
-        return _plain_text(cell)
-    return "\n".join(_plain_text(paragraph) for paragraph in paragraphs)
+        return [{"text": _plain_text(cell)}]
+    runs = []
+    for paragraph in paragraphs:
+        piece = _paragraph_runs(paragraph)
+        if runs and piece:
+            runs.append({"text": "\n"})
+        runs.extend(piece)
+    return runs or [{"text": ""}]
+
+
+def _paragraph_runs(paragraph):
+    runs = []
+    for child in paragraph:
+        if child.tag != _w("r"):
+            continue
+        text = []
+        for el in child:
+            if el.tag == _w("t"):
+                text.append(el.text or "")
+            elif el.tag == _w("tab"):
+                text.append("\t")
+        _push_run(runs, "".join(text), _run_props(child))
+    return runs
+
+
+def _run_props(node):
+    props = {}
+    rpr = node.find(_w("rPr"))
+    if rpr is None:
+        return props
+    fonts = rpr.find(_w("rFonts"))
+    if fonts is not None:
+        for key in ("eastAsia", "ascii", "hAnsi"):
+            value = fonts.get(_w(key))
+            if value:
+                props[key] = value
+    size = rpr.find(_w("sz"))
+    if size is not None and str(size.get(_w("val")) or "").isdigit():
+        props["size_pt"] = _whole(int(size.get(_w("val"))) / 2.0)
+    return props
+
+
+def _push_run(runs, text, props):
+    if not text:
+        return
+    if runs and all(runs[-1].get(key) == props.get(key) for key in ("eastAsia", "ascii", "hAnsi", "size_pt")):
+        runs[-1]["text"] += text
+        return
+    item = {"text": text}
+    item.update(props)
+    runs.append(item)
+
+
+def _whole(number):
+    if number == int(number):
+        return int(number)
+    return round(number, 2)
 
 
 def _append_paragraph(blocks, paragraph):
@@ -591,10 +715,11 @@ def _append_paragraph(blocks, paragraph):
     flush()
 
 
-def _text_block(level, style, text):
+def _text_block(level, style, text, runs=None):
+    stored = runs if runs is not None else [{"text": text or ""}]
     if level:
-        return {"type": "heading", "level": level, "runs": [{"text": text}]}
-    return {"type": "paragraph", "style": style or "Normal", "runs": [{"text": text}]}
+        return {"type": "heading", "level": level, "runs": stored}
+    return {"type": "paragraph", "style": style or "Normal", "runs": stored}
 
 
 def _run_pieces(paragraph):
@@ -630,10 +755,16 @@ def to_docx(doc, path, template=None):
     errors = validate(doc)
     if errors:
         raise ValueError("；".join(errors))
-    working = WenjuDoc(json.loads(json.dumps(doc.blocks)), json.loads(json.dumps(doc.styles)), dict(doc.assets), dict(doc.manifest))
+    working = WenjuDoc(
+        json.loads(json.dumps(doc.blocks)),
+        json.loads(json.dumps(doc.styles)),
+        dict(doc.assets),
+        dict(doc.manifest),
+        json.loads(json.dumps(doc.sections)),
+    )
     apply_template(working, template)
     _ensure_toc(working)
-    pages = dict((id(block), number) for block, number in heading_pages(working.blocks, working.styles.get("sections") or None))
+    pages = dict((id(block), number) for block, number in heading_pages(working.blocks, working.sections or None))
     directory = os.path.dirname(os.path.abspath(path))
     if directory:
         os.makedirs(directory, exist_ok=True)
@@ -659,7 +790,7 @@ def _build_docx(doc, pages):
 
     add_rel("styles", "styles.xml")
     add_rel("settings", "settings.xml")
-    sections = doc.styles.get("sections") or [{"at": 0, "header": "", "footer": ""}]
+    sections = doc.sections or [{"at": 0, "header": "", "footer": ""}]
     header_ids = []
     footer_ids = []
     for index, section in enumerate(sections):
@@ -681,7 +812,7 @@ def _build_docx(doc, pages):
         drawing_seq += 1
     document, overrides = _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids)
     parts["word/document.xml"] = document
-    parts["word/styles.xml"] = _styles_xml(doc.styles.get("font") or "仿宋")
+    parts["word/styles.xml"] = _styles_xml(_first_font(_all_runs(doc)) or "仿宋")
     parts["word/settings.xml"] = _xml(_settings())
     parts["word/_rels/document.xml.rels"] = _rels_xml(rels)
     parts["[Content_Types].xml"] = _content_types(parts, overrides)
@@ -722,9 +853,9 @@ def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids):
             last_p = _emit_paragraph(body, "", break_page=following is section)
         elif kind == "heading":
             heading_ordinal += 1
-            last_p = _emit_paragraph(body, _run_text(block.get("runs")), style="Heading%d" % block["level"], font=_run_font(block.get("runs")), outline=block["level"] - 1)
+            last_p = _emit_runs(body, block.get("runs"), style="Heading%d" % block["level"], outline=block["level"] - 1)
         elif kind == "paragraph":
-            last_p = _emit_paragraph(body, _run_text(block.get("runs")), style=block.get("style") or "Normal", font=_run_font(block.get("runs")))
+            last_p = _emit_runs(body, block.get("runs"), style=block.get("style") or "Normal")
         elif kind == "image":
             rel_id, seq, _ext = media_ids[id(block)]
             last_p = _emit_image(body, rel_id, seq, block.get("w") or 40, block.get("h") or 20)
@@ -810,13 +941,28 @@ def _instr(paragraph, text):
     el.text = text
 
 
-def _text_run(paragraph, text, font):
+def _emit_runs(parent, runs, style=None, outline=None):
+    paragraph = _emit_paragraph(parent, None, style=style, outline=outline)
+    for run in runs or []:
+        _text_run(paragraph, run.get("text") or "", run.get("eastAsia"), run.get("size_pt") or 12, run.get("ascii"))
+    if not runs:
+        _text_run(paragraph, "", "仿宋", 12, None)
+    return paragraph
+
+
+def _text_run(paragraph, text, font, size_pt=12, ascii_font=None):
     run = ET.SubElement(paragraph, _w("r"))
     rpr = ET.SubElement(run, _w("rPr"))
     fonts = ET.SubElement(rpr, _w("rFonts"))
     face = fontfallback.resolve(font or "仿宋")
-    for attr in ("ascii", "hAnsi", "cs", "eastAsia"):
-        fonts.set(_w(attr), face)
+    fonts.set(_w("eastAsia"), face)
+    western = ascii_font or face
+    for attr in ("ascii", "hAnsi", "cs"):
+        fonts.set(_w(attr), western)
+    if size_pt:
+        half = str(int(round(float(size_pt) * 2)))
+        ET.SubElement(rpr, _w("sz")).set(_w("val"), half)
+        ET.SubElement(rpr, _w("szCs")).set(_w("val"), half)
     node = ET.SubElement(run, _w("t"))
     if text.startswith(" ") or text.endswith(" "):
         node.set(XML_SPACE, "preserve")
@@ -841,10 +987,22 @@ def _emit_paragraph(parent, text, style=None, font=None, outline=None, break_pag
     return paragraph
 
 
+def _all_runs(doc):
+    found = []
+    for block in doc.blocks:
+        found.extend(block.get("runs") or [])
+        if block.get("type") == "table":
+            for row in block.get("rows") or []:
+                for cell in row:
+                    if isinstance(cell, dict):
+                        found.extend(cell.get("runs") or [])
+    return found
+
+
 def _run_font(runs):
     for run in runs or []:
-        if run.get("font"):
-            return run["font"]
+        if run.get("eastAsia"):
+            return run["eastAsia"]
     return "仿宋"
 
 
@@ -854,8 +1012,8 @@ def _emit_image(parent, rel_id, seq, width, height):
     drawing = ET.SubElement(run, _w("drawing"))
     inline = ET.SubElement(drawing, "{%s}inline" % WP)
     extent = ET.SubElement(inline, "{%s}extent" % WP)
-    extent.set("cx", str(int(width) * 9525))
-    extent.set("cy", str(int(height) * 9525))
+    extent.set("cx", str(_pt_to_emu(width)))
+    extent.set("cy", str(_pt_to_emu(height)))
     doc_pr = ET.SubElement(inline, "{%s}docPr" % WP)
     doc_pr.set("id", str(seq))
     doc_pr.set("name", "Picture%d" % seq)
@@ -890,18 +1048,18 @@ def _row_span_lines(block, spans, r_i):
         found = _merge_at(spans, r_i, c_i)
         if found is not None and (found[0], found[1]) != (r_i, c_i):
             _r0, c0, merge = found
-            c_i = c0 + merge.get("cols", 1) if r_i > found[0] and c_i == c0 else c_i + 1
+            c_i = c0 + _colspan(merge) if r_i > found[0] and c_i == c0 else c_i + 1
             continue
         if found is not None:
             merge = found[2]
             count = 0
-            for r in range(merge["row"], merge["row"] + merge.get("rows", 1)):
-                for c in range(merge["col"], merge["col"] + merge.get("cols", 1)):
+            for r in range(merge["row"], merge["row"] + _rowspan(merge)):
+                for c in range(merge["col"], merge["col"] + _colspan(merge)):
                     raw = _run_text(block["rows"][r][c].get("runs"))
                     if raw:
                         count += _text_lines(raw)
             lines = max(lines, count or 1)
-            c_i += merge.get("cols", 1)
+            c_i += _colspan(merge)
         else:
             lines = max(lines, _text_lines(_run_text(row[c_i].get("runs"))))
             c_i += 1
@@ -931,29 +1089,37 @@ def _emit_table(parent, block):
                 r0, c0, merge = found
                 if r_i > r0 and c_i == c0:
                     _emit_continue(tr, merge)
-                c_i = c0 + merge.get("cols", 1) if r_i > r0 and c_i == c0 else c_i + 1
+                c_i = c0 + _colspan(merge) if r_i > r0 and c_i == c0 else c_i + 1
                 continue
             tc = ET.SubElement(tr, _w("tc"))
             tcpr = ET.SubElement(tc, _w("tcPr"))
             if found is not None:
                 _r0, _c0, merge = found
-                if merge.get("cols", 1) > 1:
+                if _colspan(merge) > 1:
                     grid = ET.SubElement(tcpr, _w("gridSpan"))
-                    grid.set(_w("val"), str(merge["cols"]))
-                if merge.get("rows", 1) > 1:
+                    grid.set(_w("val"), str(_colspan(merge)))
+                if _rowspan(merge) > 1:
                     vm = ET.SubElement(tcpr, _w("vMerge"))
                     vm.set(_w("val"), "restart")
                 _emit_rectangle(tc, block, merge)
-                c_i += merge.get("cols", 1)
+                c_i += _colspan(merge)
             else:
                 _emit_cell_text(tc, _run_text(row[c_i].get("runs")), _run_font(row[c_i].get("runs")))
                 c_i += 1
     return tbl
 
 
+def _rowspan(merge):
+    return int(merge.get("rowspan", merge.get("rows", 1)) or 1)
+
+
+def _colspan(merge):
+    return int(merge.get("colspan", merge.get("cols", 1)) or 1)
+
+
 def _merge_at(spans, row, col):
     for (r0, c0), merge in spans.items():
-        if r0 <= row < r0 + merge.get("rows", 1) and c0 <= col < c0 + merge.get("cols", 1):
+        if r0 <= row < r0 + _rowspan(merge) and c0 <= col < c0 + _colspan(merge):
             return r0, c0, merge
     return None
 
@@ -961,17 +1127,17 @@ def _merge_at(spans, row, col):
 def _emit_continue(tr, merge):
     tc = ET.SubElement(tr, _w("tc"))
     tcpr = ET.SubElement(tc, _w("tcPr"))
-    if merge.get("cols", 1) > 1:
+    if _colspan(merge) > 1:
         grid = ET.SubElement(tcpr, _w("gridSpan"))
-        grid.set(_w("val"), str(merge["cols"]))
+        grid.set(_w("val"), str(_colspan(merge)))
     ET.SubElement(tcpr, _w("vMerge"))
     _emit_paragraph(tc, "")
 
 
 def _emit_rectangle(parent, block, merge):
     emitted = False
-    for r in range(merge["row"], merge["row"] + merge.get("rows", 1)):
-        for c in range(merge["col"], merge["col"] + merge.get("cols", 1)):
+    for r in range(merge["row"], merge["row"] + _rowspan(merge)):
+        for c in range(merge["col"], merge["col"] + _colspan(merge)):
             cell = block["rows"][r][c]
             raw = _run_text(cell.get("runs"))
             if not raw:
