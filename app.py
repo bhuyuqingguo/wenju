@@ -672,6 +672,17 @@ if '--test-clipboard' in sys.argv:
     def begin_clipboard():
         window.setProperty('page', 0)
         app.processEvents()
+        ok=None
+        todo=[window.contentItem()]
+        while todo:
+            item=todo.pop()
+            if str(item.metaObject().className()).startswith('Button') and item.property('text') in ('OK', '确定') and item.property('visible'):
+                ok=item
+            todo += item.childItems()
+        if ok is not None:
+            point=ok.mapToScene(QPointF(ok.width()/2, ok.height()/2)).toPoint()
+            QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, point)
+            app.processEvents()
         assert find_item('importClipboard').property('text')=='从剪贴板导入'
         assert find_item('clipboardBrush').property('checked') is False
         mime=QMimeData()
