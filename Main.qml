@@ -47,8 +47,10 @@ ApplicationWindow {
         else {bridge.selectTemplate(t.id);page=pendingPage;}
     }
     function preset(i) { let t=templates[i]; selectedPreset=i; prefix=t.prefix;suffix=t.suffix;pageFont=t.font;pageSize=t.size;spacing=t.spacing;alignment="底部居中";pageEnabled=true;pageUniform=true;commitPage(); }
-    Component.onCompleted: {syncPage();opening.playing=startupAnimation;}
+    Component.onCompleted: {syncPage();opening.playing=startupAnimation;if(bridge.fontNotice) fontNotice.open();}
     onClosing: function(close) { if(bridge.busy) {close.accepted=false; closeNotice.open();} }
+    Dialog {id:fontNotice;anchors.centerIn:parent;width:640;title:"需要安装字体";modal:true;standardButtons:Dialog.Ok
+        Text {width:600;wrapMode:Text.Wrap;text:bridge.fontNotice;color:win.ink}}
     Dialog {id:closeNotice; anchors.centerIn:parent;width:620;title:"文档正在整理";modal:true;standardButtons:Dialog.Ok
         Label {text:"请等待当前文档完成后再关闭。可先点击「停止后续任务」。"}}
     Dialog {id:reportDialog;anchors.centerIn:parent;title:"工作记录与报告";width:720;height:560;modal:true;standardButtons:Dialog.Close

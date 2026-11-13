@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=文矩
+GenericName=文档格式整理
+Comment=文矩 3.3.0
+Exec=launcher/start-kylin.sh
+Icon=wenju
+StartupWMClass=wenju
+Terminal=false
+Categories=Office;

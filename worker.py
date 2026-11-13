@@ -41,7 +41,16 @@ def execute(job):
         fonts={v for k,v in rules['字体'].items() if not k.startswith('_') and k!='模式'}|{rules['页码']['字体'],rules['页码']['中文字体']}
         for group in ('公文','红头'):
             if rules.get(group,{}).get('启用'):fonts.update(v for k,v in rules[group].items() if k.endswith('字体'))
-        for font in sorted(fonts):lines.append(('可用：' if fontembed.find_font(index,font) else '未找到：')+font)
+        import fontfallback
+        fontfallback.reset_index()
+        for font in sorted(fonts):
+            chosen, found = fontfallback.choose(font)
+            if found and chosen == font:
+                lines.append('可用：' + font)
+            elif found:
+                lines.append('可用：' + font + ' → 本机使用 ' + chosen)
+            else:
+                lines.append('未找到：' + font + '（' + fontfallback.LICENSE.get(font, '请自行提供字体文件') + '）')
         lines.append('LibreOffice：'+(shutil.which('soffice') or shutil.which('libreoffice') or '未在 PATH 中发现'))
         if sys.platform.startswith('win'):
             import winreg

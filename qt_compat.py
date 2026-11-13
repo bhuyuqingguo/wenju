@@ -1,55 +1,59 @@
-import importlib.util
+"""Qt binding used by the UI.
+
+Win10/11 and Kylin packages ship PySide6. The Windows 7 package ships only
+PySide2 and sets WENJU_QT=5. With PySide6 installed and WENJU_QT unset, this
+module loads PySide6 and keeps the existing style and color-scheme calls.
+"""
 import os
 
+QT = '6'
+if os.environ.get('WENJU_QT') == '5':
+    QT = '5'
+else:
+    try:
+        from PySide6.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt, QPoint, QPointF
+        from PySide6.QtGui import QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont
+        from PySide6.QtQml import QQmlApplicationEngine
+        from PySide6.QtQuick import QQuickWindow
+        from PySide6.QtQuickControls2 import QQuickStyle
+        from PySide6.QtWidgets import QApplication, QFileDialog
+        from PySide6.QtTest import QTest
+        import shiboken6 as _shiboken
+    except ImportError:
+        QT = '5'
 
-def _use_qt5():
-    flag = os.environ.get("WENJU_QT", "")
-    if flag == "5":
-        return True
-    if flag == "6":
-        return False
-    return importlib.util.find_spec("PySide6") is None
-
-
-QT5 = _use_qt5()
-
-if QT5:
-    from PySide2.QtCore import (QObject, Signal, Slot, Property, QUrl, QProcess, QTimer,
-                                qInstallMessageHandler, Qt, QPoint, QPointF)
-    from PySide2.QtGui import (QGuiApplication, QDesktopServices, QIcon, QPalette, QColor,
-                               QFontDatabase, QFont)
+if QT == '5':
+    from PySide2.QtCore import QObject, Signal, Slot, Property, QUrl, QProcess, QTimer, qInstallMessageHandler, Qt, QPoint, QPointF
+    from PySide2.QtGui import QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont
     from PySide2.QtQml import QQmlApplicationEngine
     from PySide2.QtQuick import QQuickWindow
     from PySide2.QtQuickControls2 import QQuickStyle
     from PySide2.QtWidgets import QApplication, QFileDialog
-    QUICK_STYLE = "Default"
-else:
-    from PySide6.QtCore import (QObject, Signal, Slot, Property, QUrl, QProcess, QTimer,
-                                qInstallMessageHandler, Qt, QPoint, QPointF)
-    from PySide6.QtGui import (QGuiApplication, QDesktopServices, QIcon, QPalette, QColor,
-                               QFontDatabase, QFont)
-    from PySide6.QtQml import QQmlApplicationEngine
-    from PySide6.QtQuick import QQuickWindow
-    from PySide6.QtQuickControls2 import QQuickStyle
-    from PySide6.QtWidgets import QApplication, QFileDialog
-    QUICK_STYLE = "Basic"
+    from PySide2.QtTest import QTest
+    import shiboken2 as _shiboken
+
+
+def exec_app(app):
+    if QT == '5':
+        return app.exec_()
+    return app.exec()
+
+
+def delete_qobject(obj):
+    _shiboken.delete(obj)
 
 
 def set_color_scheme(app, dark):
+    scheme = getattr(Qt, 'ColorScheme', None)
     hints = app.styleHints()
-    scheme = getattr(Qt, "ColorScheme", None)
-    if scheme is None or not hasattr(hints, "setColorScheme"):
+    if scheme is None or not hasattr(hints, 'setColorScheme'):
         return
     hints.setColorScheme(scheme.Dark if dark else scheme.Light)
 
 
-def delete_engine(engine):
-    if QT5:
-        import shiboken2
-        shiboken2.delete(engine)
-    else:
-        import shiboken6
-        shiboken6.delete(engine)
+def quick_style():
+    # Basic exists on Qt 6. Qt 5.15 uses Fusion; the QML controls paint their own backgrounds.
+    return 'Fusion' if QT == '5' else 'Basic'
 
 
 def process_failed(error):
@@ -57,11 +61,3 @@ def process_failed(error):
         return True
     kind = getattr(QProcess, "ProcessError", None)
     return kind is not None and error == getattr(kind, "FailedToStart", None)
-
-
-def qtest():
-    if QT5:
-        from PySide2.QtTest import QTest
-    else:
-        from PySide6.QtTest import QTest
-    return QTest

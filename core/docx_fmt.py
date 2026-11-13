@@ -93,6 +93,8 @@ def rpr(r): return child(r, "rPr", create=True, before=["t","tab","br","drawing"
 KEEP_ORIGINAL_FONTS = False  # 字体模式=原文档 时为 True：不改任何字体名
 def set_fonts(rp, east, west, hint=True):
     if KEEP_ORIGINAL_FONTS: return
+    import fontfallback
+    east, _found = fontfallback.choose(east)
     f = child(rp, "rFonts", create=True)
     for a in list(f.attrib): del f.attrib[a]
     set_attr(f, "ascii", west); set_attr(f, "hAnsi", west); set_attr(f, "cs", west)
