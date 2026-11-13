@@ -261,6 +261,7 @@ def _paint(run, font, size, bold, keep_marks):
         return
     if font:
         run["font"] = font
+        run.pop("ascii", None)
     if size:
         run["size"] = float(size)
     if keep_marks:
@@ -304,7 +305,11 @@ def _style_map(payload):
         name_el = style.find(_q(W, "name"))
         name = name_el.attrib.get(_q(W, "val")) if name_el is not None else sid
         level = _heading_level(name) or _heading_level(sid)
-        found[sid] = {"name": name, "level": level}
+        mark = {}
+        props = style.find(_q(W, "rPr"))
+        if props is not None:
+            mark = _mark_from_rpr(props)
+        found[sid] = {"name": name, "level": level, "mark": mark}
     return found
 
 
@@ -329,13 +334,7 @@ def _block_from_body(child, rels, items, styles, assets):
         table, images = _table_block(child, rels, items, styles, assets)
         return [table] + images
     if child.tag == _q(W, "sdt"):
-        if _is_toc(child):
-            return [{"type": "toc"}]
-        blocks = []
-        for nested in child.iter():
-            if nested.tag == _q(W, "p") or nested.tag == _q(W, "tbl"):
-                blocks.extend(_block_from_body(nested, rels, items, styles, assets))
-        return blocks
+        return _sdt_blocks(child, rels, items, styles, assets)
     return []
 
 
@@ -346,70 +345,152 @@ def _is_toc(element):
     return False
 
 
+_RUN_KEYS = ("bold", "italic", "underline", "font", "ascii", "size", "color")
+
+
 def _paragraph_blocks(paragraph, rels, items, styles, assets):
     level = _paragraph_level(paragraph, styles)
+    base = _paragraph_base_mark(paragraph, styles)
     runs = []
-    images = []
     blocks = []
     current = {"text": ""}
-    seen_text = False
+    seen = False
 
     def flush():
-        nonlocal current, seen_text
-        if seen_text or current.get("text"):
+        nonlocal current, seen
+        if seen or current.get("text"):
             stored = {"text": current.get("text") or ""}
-            for key in ("bold", "italic", "underline", "font", "size", "color"):
+            for key in _RUN_KEYS:
                 if key in current:
                     stored[key] = current[key]
             runs.append(stored)
         current = {"text": ""}
-        seen_text = False
+        seen = False
 
-    for run in paragraph.findall(_q(W, "r")):
-        mark = _run_mark(run)
-        if _mark_key(mark) != _mark_key(current) and (seen_text or current.get("text")):
+    def emit_text(text):
+        nonlocal seen
+        if not text:
+            return
+        current["text"] = current.get("text", "") + text
+        seen = True
+
+    def close_text():
+        nonlocal runs
+        flush()
+        if runs:
+            blocks.append(_text_block(level, runs))
+            runs = []
+
+    def take_drawing(node):
+        boxes = _textbox_blocks(node, rels, items, styles, assets)
+        if boxes:
+            close_text()
+            blocks.extend(boxes)
+            return
+        image = _image_block(node, rels, items, assets)
+        if image:
+            close_text()
+            blocks.append(image)
+
+    def take_run(run):
+        mark = _merge_mark(base, _run_mark(run))
+
+        def use_mark():
+            for key in _RUN_KEYS:
+                current.pop(key, None)
+            current.update(mark)
+
+        if _mark_key(mark) != _mark_key(current) and (seen or current.get("text")):
             flush()
-        for key, value in mark.items():
-            current[key] = value
+        use_mark()
         for node in list(run):
             if node.tag == _q(W, "br") and node.attrib.get(_q(W, "type")) == "page":
-                flush()
-                if runs:
-                    blocks.append(_text_block(level, runs))
-                    runs = []
+                close_text()
                 blocks.append({"type": "pagebreak"})
+                use_mark()
             elif node.tag == _q(W, "br"):
-                current["text"] = current.get("text", "") + "\n"
-                seen_text = True
+                emit_text("\n")
+            elif node.tag == _q(W, "tab"):
+                emit_text("\t")
             elif node.tag == _q(W, "t"):
-                current["text"] = current.get("text", "") + (node.text or "")
-                seen_text = True
+                emit_text(node.text or "")
             elif node.tag == _q(W, "drawing"):
-                image = _image_block(node, rels, items, assets)
-                if image:
-                    images.append(image)
-    for link in paragraph.findall(_q(W, "hyperlink")):
-        for run in link.findall(_q(W, "r")):
-            mark = _run_mark(run)
-            if _mark_key(mark) != _mark_key(current) and (seen_text or current.get("text")):
-                flush()
-            for key, value in mark.items():
-                current[key] = value
-            for node in run.findall(_q(W, "t")):
-                current["text"] = current.get("text", "") + (node.text or "")
-                seen_text = True
+                take_drawing(node)
+                use_mark()
+
+    def walk(node):
+        tag = node.tag
+        if tag == _q(W, "r"):
+            take_run(node)
+            return
+        if tag == _q(W, "del"):
+            return
+        if tag == _q(W, "sdt"):
+            content = node.find(_q(W, "sdtContent"))
+            for child in list(content if content is not None else node):
+                walk(child)
+            return
+        if tag in (_q(W, "hyperlink"), _q(W, "smartTag"), _q(W, "ins"), _q(W, "fldSimple")):
+            for child in list(node):
+                walk(child)
+
+    for child in list(paragraph):
+        if child.tag != _q(W, "pPr"):
+            walk(child)
     flush()
     if _is_toc(paragraph):
         blocks.append({"type": "toc"})
         runs = [run for run in runs if run.get("text", "").strip()]
     if runs:
         blocks.append(_text_block(level, runs))
-    blocks.extend(images)
     return blocks
 
 
+def _sdt_blocks(element, rels, items, styles, assets):
+    if _is_toc(element):
+        return [{"type": "toc"}]
+    content = element.find(_q(W, "sdtContent"))
+    blocks = []
+    for nested in list(content if content is not None else element):
+        if nested.tag in (_q(W, "p"), _q(W, "tbl"), _q(W, "sdt")):
+            blocks.extend(_block_from_body(nested, rels, items, styles, assets))
+    return blocks
+
+
+def _textbox_blocks(drawing, rels, items, styles, assets):
+    blocks = []
+    for box in drawing.iter(_q(W, "txbxContent")):
+        for inner in list(box):
+            if inner.tag in (_q(W, "p"), _q(W, "tbl"), _q(W, "sdt")):
+                blocks.extend(_block_from_body(inner, rels, items, styles, assets))
+    return blocks
+
+
+def _paragraph_base_mark(paragraph, styles):
+    props = paragraph.find(_q(W, "pPr"))
+    if props is None:
+        return {}
+    mark = {}
+    style = props.find(_q(W, "pStyle"))
+    if style is not None:
+        mark.update((styles.get(style.attrib.get(_q(W, "val"))) or {}).get("mark") or {})
+    direct = props.find(_q(W, "rPr"))
+    if direct is not None:
+        mark = _merge_mark(mark, _mark_from_rpr(direct))
+    return mark
+
+
+def _merge_mark(base, direct):
+    mark = dict(base or {})
+    mark.update(direct or {})
+    for key in ("bold", "italic", "underline"):
+        if mark.get(key) is False:
+            mark.pop(key, None)
+    return mark
+
+
 def _mark_key(mark):
-    return tuple(sorted((key, mark[key]) for key in ("bold", "italic", "underline", "font", "size", "color") if key in mark))
+    return tuple(sorted((key, mark[key]) for key in _RUN_KEYS if key in mark))
 
 
 def _text_block(level, runs):
@@ -439,21 +520,30 @@ def _paragraph_level(paragraph, styles):
 
 def _run_mark(run):
     props = run.find(_q(W, "rPr"))
-    mark = {}
     if props is None:
-        return mark
-    if _flag(props, "b"):
-        mark["bold"] = True
-    if _flag(props, "i"):
-        mark["italic"] = True
+        return {}
+    return _mark_from_rpr(props)
+
+
+def _mark_from_rpr(props):
+    mark = {}
+    for key, tag in (("bold", "b"), ("italic", "i")):
+        flag = _tri(props, tag)
+        if flag is not None:
+            mark[key] = flag
     underline = props.find(_q(W, "u"))
-    if underline is not None and underline.attrib.get(_q(W, "val"), "single") not in ("none", "false", "0"):
-        mark["underline"] = True
+    if underline is not None:
+        mark["underline"] = underline.attrib.get(_q(W, "val"), "single") not in ("none", "false", "0")
     fonts = props.find(_q(W, "rFonts"))
     if fonts is not None:
-        font = fonts.attrib.get(_q(W, "eastAsia")) or fonts.attrib.get(_q(W, "ascii")) or fonts.attrib.get(_q(W, "hAnsi"))
-        if font:
-            mark["font"] = font
+        east = fonts.attrib.get(_q(W, "eastAsia"))
+        latin = fonts.attrib.get(_q(W, "ascii")) or fonts.attrib.get(_q(W, "hAnsi"))
+        if east:
+            mark["font"] = east
+        elif latin:
+            mark["font"] = latin
+        if latin and latin != mark.get("font"):
+            mark["ascii"] = latin
     size = props.find(_q(W, "sz"))
     if size is not None and str(size.attrib.get(_q(W, "val"), "")).isdigit():
         mark["size"] = int(size.attrib.get(_q(W, "val"))) / 2.0
@@ -465,12 +555,11 @@ def _run_mark(run):
     return mark
 
 
-def _flag(props, tag):
+def _tri(props, tag):
     node = props.find(_q(W, tag))
     if node is None:
-        return False
-    value = node.attrib.get(_q(W, "val"))
-    return value not in ("false", "0", "off")
+        return None
+    return node.attrib.get(_q(W, "val")) not in ("false", "0", "off")
 
 
 def _image_block(drawing, rels, items, assets):
@@ -515,6 +604,7 @@ def _table_block(table, rels, items, styles, assets):
     rows = []
     merges = []
     open_merge = {}
+    trailing = []
     for r_index, row_el in enumerate(table.findall(_q(W, "tr"))):
         row = []
         col = 0
@@ -529,8 +619,9 @@ def _table_block(table, rels, items, styles, assets):
                 merge = props.find(_q(W, "vMerge"))
                 if merge is not None:
                     vertical = merge.attrib.get(_q(W, "val"), "continue")
-            runs = _cell_runs(cell)
+            runs, extras = _cell_runs(cell, rels, items, styles, assets)
             row.append({"runs": runs})
+            trailing.extend(extras)
             if vertical == "restart":
                 record = {"row": r_index, "col": col, "rowspan": 1, "colspan": span}
                 merges.append(record)
@@ -545,36 +636,32 @@ def _table_block(table, rels, items, styles, assets):
                 row.append({"runs": [{"text": ""}]})
             col += span
         rows.append(row)
-    images = []
-    for drawing in table.iter(_q(W, "drawing")):
-        image = _image_block(drawing, rels, items, assets)
-        if image:
-            images.append(image)
-    return {"type": "table", "rows": rows, "merges": merges}, images
+    return {"type": "table", "rows": rows, "merges": merges}, trailing
 
 
-def _cell_runs(cell):
+def _cell_runs(cell, rels, items, styles, assets):
     runs = []
-    paragraphs = cell.findall(_q(W, "p"))
-    for index, paragraph in enumerate(paragraphs):
-        text = []
-        mark = {}
-        for run in paragraph.findall(_q(W, "r")):
-            mark = _run_mark(run) or mark
-            for node in list(run):
-                if node.tag == _q(W, "t"):
-                    text.append(node.text or "")
-                elif node.tag == _q(W, "br") and node.attrib.get(_q(W, "type")) != "page":
-                    text.append("\n")
-        piece = {"text": "".join(text)}
-        piece.update(mark)
-        if index and runs:
-            piece["text"] = "\n" + piece["text"]
-        if piece["text"] or not runs:
-            runs.append(piece)
+    extras = []
+    started = False
+    for child in list(cell):
+        if child.tag == _q(W, "p"):
+            for block in _paragraph_blocks(child, rels, items, styles, assets):
+                if block.get("type") in ("paragraph", "heading"):
+                    piece = [dict(run) for run in block.get("runs") or []]
+                    if started and piece:
+                        piece[0]["text"] = "\n" + piece[0].get("text", "")
+                    if piece:
+                        runs.extend(piece)
+                        started = True
+                else:
+                    extras.append(block)
+        elif child.tag == _q(W, "tbl"):
+            nested, more = _table_block(child, rels, items, styles, assets)
+            extras.append(nested)
+            extras.extend(more)
     if not runs:
         runs = [{"text": ""}]
-    return runs
+    return runs, extras
 
 
 def _write_docx(doc, path):
@@ -654,7 +741,7 @@ def _write_run(paragraph, run):
         _write_rpr(node, run)
         text = ET.SubElement(node, _q(W, "t"))
         text.text = part
-        if part[:1].isspace() or part[-1:].isspace():
+        if part[:1].isspace() or part[-1:].isspace() or "  " in part:
             text.set(_q(XML, "space"), "preserve")
 
 
@@ -667,10 +754,13 @@ def _write_rpr(run, source):
     if source.get("underline"):
         underline = ET.SubElement(props, _q(W, "u"))
         underline.set(_q(W, "val"), "single")
-    if source.get("font"):
+    east = source.get("font") or source.get("ascii")
+    latin = source.get("ascii") or source.get("font")
+    if east or latin:
         fonts = ET.SubElement(props, _q(W, "rFonts"))
-        for key in ("ascii", "hAnsi", "cs", "eastAsia"):
-            fonts.set(_q(W, key), source["font"])
+        for key in ("ascii", "hAnsi", "cs"):
+            fonts.set(_q(W, key), latin)
+        fonts.set(_q(W, "eastAsia"), east)
     if source.get("size"):
         size = ET.SubElement(props, _q(W, "sz"))
         size.set(_q(W, "val"), str(int(round(float(source["size"]) * 2))))
@@ -723,6 +813,9 @@ def _write_table(block):
                     merge = ET.SubElement(props, _q(W, "vMerge"))
                     merge.set(_q(W, "val"), "restart")
                 if role[0] == "continue":
+                    if role[1].get("colspan", 1) > 1:
+                        span = ET.SubElement(props, _q(W, "gridSpan"))
+                        span.set(_q(W, "val"), str(role[1]["colspan"]))
                     ET.SubElement(props, _q(W, "vMerge"))
             paragraph = ET.SubElement(cell_el, _q(W, "p"))
             if not role or role[0] != "continue":

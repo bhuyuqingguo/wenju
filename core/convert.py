@@ -93,8 +93,8 @@ def run_batch(items, dest_dir, mode="preserve", template=None, on_progress=None)
             files[index]["state"] = "失败"
             files[index]["message"] = str(exc)
             failed.append({"name": files[index]["name"], "message": str(exc)})
-        except (OSError, ValueError, zipfile.BadZipFile) as exc:
-            message = str(exc) or exc.__class__.__name__
+        except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError) as exc:
+            message = "无法读取 %s：%s" % (files[index]["name"], exc)
             files[index]["percent"] = 100
             files[index]["state"] = "失败"
             files[index]["message"] = message
@@ -141,8 +141,8 @@ def run_export(items, dest_dir, template=None, on_progress=None):
             files[index]["state"] = "成功"
             files[index]["message"] = target.name
             succeeded.append(target.name)
-        except (OSError, ValueError, zipfile.BadZipFile) as exc:
-            message = str(exc) or exc.__class__.__name__
+        except (OSError, ValueError, zipfile.BadZipFile, ET.ParseError) as exc:
+            message = "无法读取 %s：%s" % (files[index]["name"], exc)
             files[index]["percent"] = 100
             files[index]["state"] = "失败"
             files[index]["message"] = message
@@ -262,7 +262,7 @@ def _read_text(path):
     data = Path(path).read_bytes()
     if not data.strip():
         raise ConvertError("文件是空的：%s" % Path(path).name)
-    for encoding in ("utf-8-sig", "gb18030"):
+    for encoding in ("utf-8-sig", "utf-16", "gb18030"):
         try:
             return data.decode(encoding)
         except UnicodeDecodeError:
@@ -302,16 +302,17 @@ def _markdown_blocks(text, folder):
             blocks.append({"type": "toc"})
             index += 1
             continue
-        heading = re.match(r"^(#{1,6})\s+(.*)$", line) if not fenced else None
+        heading = re.match(r"^ {0,3}(#{1,6})\s+(.*)$", line) if not fenced else None
         if heading:
             flush()
-            blocks.append({"type": "heading", "level": len(heading.group(1)), "runs": [{"text": heading.group(2).strip()}]})
+            title = re.sub(r"\s+#+\s*$", "", heading.group(2).strip()).strip()
+            blocks.append({"type": "heading", "level": len(heading.group(1)), "runs": [{"text": title}]})
             index += 1
             continue
-        image = re.fullmatch(r"!\[([^\]]*)\]\(([^)]+)\)", stripped) if not fenced else None
+        image = re.fullmatch(r"!\[([^\]]*)\]\((.+)\)", stripped) if not fenced else None
         if image:
             flush()
-            blocks.extend(_markdown_image(image.group(1), image.group(2).strip(), folder))
+            blocks.extend(_markdown_image(image.group(1), _markdown_target(image.group(2).strip()), folder))
             index += 1
             continue
         if not fenced and _looks_like_table(lines, index):
@@ -327,6 +328,13 @@ def _markdown_blocks(text, folder):
         index += 1
     flush()
     return blocks
+
+
+def _markdown_target(body):
+    if body.startswith("<"):
+        end = body.find(">")
+        return body[1:end] if end > 0 else body
+    return body.split()[0] if body.split() else body
 
 
 def _markdown_image(alt, target, folder):
@@ -359,9 +367,30 @@ def _split_row(line):
     body = line.strip()
     if body.startswith("|"):
         body = body[1:]
-    if body.endswith("|"):
+    if body.endswith("|") and not body.endswith("\\|"):
         body = body[:-1]
-    return [cell.strip() for cell in body.split("|")]
+    cells = []
+    current = []
+    escaped = False
+    for char in body:
+        if escaped:
+            if char != "|":
+                current.append("\\")
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == "|":
+            cells.append("".join(current).strip())
+            current = []
+            continue
+        current.append(char)
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current).strip())
+    return cells
 
 
 def _markdown_table(lines, index):
@@ -389,7 +418,7 @@ def _png_size(payload):
 def _read_docx(path):
     try:
         return from_docx(path)
-    except (ValueError, zipfile.BadZipFile, KeyError) as exc:
+    except (ValueError, zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
         raise ConvertError("无法读取 %s：%s" % (Path(path).name, exc))
 
 
@@ -432,6 +461,13 @@ def _read_xlsx(path):
     return _document_from_blocks(blocks, Path(path).name)
 
 
+def _sheet_path(target):
+    target = (target or "").replace("\\", "/").lstrip("/")
+    if target.startswith("xl/"):
+        return target
+    return "xl/" + target
+
+
 def _sheet_targets(items):
     root = ET.fromstring(items["xl/workbook.xml"])
     rels = {}
@@ -441,7 +477,7 @@ def _sheet_targets(items):
             rid = rel.attrib.get("Id")
             target = rel.attrib.get("Target")
             if rid and target:
-                rels[rid] = target if target.startswith("xl/") else "xl/" + target.lstrip("/")
+                rels[rid] = _sheet_path(target)
     found = []
     for sheet in root.findall(_q(SS, "sheets") + "/" + _q(SS, "sheet")):
         name = sheet.attrib.get("name") or "工作表"
@@ -499,18 +535,23 @@ def _sheet_table(payload, strings, fonts):
             r_index = len(grid)
         if r_index < 0:
             r_index = len(grid)
+        next_col = 0
         for cell in row.findall(_q(SS, "c")):
             ref = cell.attrib.get("r") or ""
-            c_index = _col_index(ref)
-            grid[(r_index, c_index)] = _xlsx_run(cell, strings, fonts)
+            if any(char.isalpha() for char in ref):
+                c_index = _col_index(ref)
+            else:
+                c_index = next_col
+            next_col = c_index + 1
+            grid[(r_index, c_index)] = _xlsx_runs(cell, strings, fonts)
             max_col = max(max_col, c_index)
     if not grid:
-        return {"type": "table", "rows": [], "merges": []}
+        return {"type": "table", "rows": [], "merges": _xlsx_merges(root)}
     max_row = max(key[0] for key in grid)
     rows = []
     for r_index in range(max_row + 1):
-        rows.append([{"runs": [grid.get((r_index, c_index), {"text": ""})]} for c_index in range(max_col + 1)])
-    return {"type": "table", "rows": rows, "merges": []}
+        rows.append([{"runs": grid.get((r_index, c_index), [{"text": ""}])} for c_index in range(max_col + 1)])
+    return {"type": "table", "rows": rows, "merges": _xlsx_merges(root)}
 
 
 def _col_index(ref):
@@ -521,6 +562,50 @@ def _col_index(ref):
     for char in letters:
         number = number * 26 + (ord(char.upper()) - 64)
     return number - 1
+
+
+def _xlsx_runs(cell, strings, fonts):
+    if cell.attrib.get("t") == "inlineStr":
+        inline = cell.find(_q(SS, "is"))
+        pieces = inline.findall(_q(SS, "r")) if inline is not None else []
+        if pieces:
+            runs = []
+            for piece in pieces:
+                text = "".join(node.text or "" for node in piece.findall(_q(SS, "t")))
+                run = {"text": text}
+                props = piece.find(_q(SS, "rPr"))
+                if props is not None and props.find(_q(SS, "b")) is not None:
+                    run["bold"] = True
+                runs.append(run)
+            return runs or [{"text": ""}]
+    return [_xlsx_run(cell, strings, fonts)]
+
+
+def _xlsx_merges(root):
+    merges = []
+    for node in root.findall(_q(SS, "mergeCells") + "/" + _q(SS, "mergeCell")):
+        parts = (node.attrib.get("ref") or "").split(":")
+        if len(parts) != 2:
+            continue
+        start = _cell_rc(parts[0])
+        end = _cell_rc(parts[1])
+        if start is None or end is None or end[0] < start[0] or end[1] < start[1]:
+            continue
+        merges.append({
+            "row": start[0],
+            "col": start[1],
+            "rowspan": end[0] - start[0] + 1,
+            "colspan": end[1] - start[1] + 1,
+        })
+    return merges
+
+
+def _cell_rc(ref):
+    letters = "".join(char for char in ref if char.isalpha())
+    digits = "".join(char for char in ref if char.isdigit())
+    if not letters or not digits:
+        return None
+    return int(digits) - 1, _col_index(letters)
 
 
 def _xlsx_run(cell, strings, fonts):
@@ -552,13 +637,28 @@ def _xlsx_run(cell, strings, fonts):
     return run
 
 
+def _unique_asset(assets, name, payload):
+    base, dot, ext = name.rpartition(".")
+    stem = base or name
+    suffix = "." + ext if dot else ""
+    unique = name
+    number = 2
+    while unique in assets and assets[unique] != payload:
+        unique = "%s-%d%s" % (stem, number, suffix)
+        number += 1
+    return unique
+
+
 def _absorb_image_bytes(doc):
     assets = dict(doc.assets)
     blocks = []
     for block in doc.blocks:
         if block.get("type") == "image" and block.get("_bytes") is not None:
             copied = dict(block)
-            assets[copied["asset"]] = copied.pop("_bytes")
+            payload = copied.pop("_bytes")
+            name = _unique_asset(assets, copied.get("asset") or "image.bin", payload)
+            copied["asset"] = name
+            assets[name] = payload
             blocks.append(copied)
         else:
             blocks.append(block)
