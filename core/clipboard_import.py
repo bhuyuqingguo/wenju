@@ -1,7 +1,11 @@
 import base64
+import os
 import re
+import shutil
 import struct
+import tempfile
 from html.parser import HTMLParser
+from urllib.parse import unquote, urlparse
 
 import wenju_format
 
@@ -352,8 +356,8 @@ class _HtmlDoc(HTMLParser):
                 width = int(attr['width']) * 0.75 if attr.get('width', '').isdigit() else 0
                 height = int(attr['height']) * 0.75 if attr.get('height', '').isdigit() else 0
                 image = {'type': 'image', 'asset': '', 'w': width, 'h': height}
-            if image and self.table is not None:
-                self.later_images.append(image)
+            if image and self.cell is not None:
+                self.cell.setdefault('images', []).append(image)
             elif image:
                 self.blocks.append(image)
             return
@@ -457,8 +461,6 @@ class _HtmlDoc(HTMLParser):
                 self.blocks.append(block)
             self.blocks.extend(self.queued_tables)
             self.queued_tables = []
-            self.blocks.extend(self.later_images)
-            self.later_images = []
             self.table = None
 
     def handle_data(self, data):
@@ -483,7 +485,10 @@ class _HtmlDoc(HTMLParser):
             col += 1
         colspan = self.cell['colspan']
         rowspan = self.cell['rowspan']
-        table['grid'][(row, col)] = {'runs': self.cell['runs'], 'colspan': colspan, 'rowspan': rowspan}
+        placed = {'runs': self.cell['runs'], 'colspan': colspan, 'rowspan': rowspan}
+        if self.cell.get('images'):
+            placed['images'] = list(self.cell['images'])
+        table['grid'][(row, col)] = placed
         for dr in range(rowspan):
             for dc in range(colspan):
                 if dr == 0 and dc == 0:
@@ -495,22 +500,31 @@ class _HtmlDoc(HTMLParser):
         src = attr.get('src') or ''
         width = int(attr['width']) * 0.75 if attr.get('width', '').isdigit() else 0
         height = int(attr['height']) * 0.75 if attr.get('height', '').isdigit() else 0
+        data = b''
+        ext = ''
         match = re.match(r'data:image/([a-z0-9.+-]+);base64,(.+)', src, re.I | re.S)
-        if not match:
-            return None
-        kind = match.group(1).lower()
-        ext = _HTML_IMAGE.get(kind)
-        if not ext:
-            return None
-        try:
-            data = base64.b64decode(re.sub(r'\s+', '', match.group(2)))
-        except Exception:
-            return None
+        if match:
+            kind = match.group(1).lower()
+            ext = _HTML_IMAGE.get(kind) or ''
+            if not ext:
+                return None
+            try:
+                data = base64.b64decode(re.sub(r'\s+', '', match.group(2)))
+            except Exception:
+                return None
+        else:
+            data, ext = _file_image(src)
+            if not data:
+                if src.startswith('file:'):
+                    width, height = _point_size(width, height, b'')
+                    return {'type': 'image', 'asset': '', 'w': width, 'h': height, '_from': 'file'}
+                return None
         self.images += 1
         asset = 'image%d.%s' % (self.images, ext)
         self.assets[asset] = data
         width, height = _point_size(width, height, data)
-        return {'type': 'image', 'asset': asset, 'w': width, 'h': height}
+        origin = 'data' if src.startswith('data:') else 'file'
+        return {'type': 'image', 'asset': asset, 'w': width, 'h': height, '_from': origin}
 
     def close_doc(self):
         self._flush()
@@ -518,7 +532,6 @@ class _HtmlDoc(HTMLParser):
             rows, merges = pack_grid(self.table['grid'])
             if rows:
                 self.blocks.append({'type': 'table', 'rows': rows, 'merges': merges})
-            self.blocks.extend(self.later_images)
 
 
 def parse_html(raw, progress=None):
@@ -600,6 +613,13 @@ def _tokens(text):
             while i < n and text[i].isdigit():
                 i += 1
             number = int(text[start:i])
+        if word == 'bin' and isinstance(number, int) and number >= 0:
+            if i < n and text[i] == ' ':
+                i += 1
+            count = number if i + number <= n else n - i
+            blob = text[i:i + count]
+            i += count
+            return ('bin', blob, number)
         if i < n and text[i] == ' ':
             i += 1
         return ('word', word, number)
@@ -643,6 +663,7 @@ class _RtfDoc(object):
         self.assets = {}
         self.images = 0
         self.pending_images = []
+        self.row_images = []
         self.fmt = {'bold': False, 'italic': False, 'font': None, 'size': None, 'uc': 1}
         self.para = {'outline': None, 'style': None, 'intbl': False}
         self.runs = []
@@ -772,6 +793,7 @@ class _RtfDoc(object):
         blip = None
         width = height = None
         hex_text = []
+        binary = []
 
         def walk(items):
             nonlocal blip, width, height
@@ -782,21 +804,28 @@ class _RtfDoc(object):
                     width = token[2] / 20.0
                 elif token[0] == 'word' and token[1] == 'pichgoal' and token[2]:
                     height = token[2] / 20.0
+                elif token[0] == 'bin':
+                    binary.append(token[1])
                 elif token[0] == 'text':
                     hex_text.append(token[1])
                 elif token[0] == 'group':
                     walk(token[1])
 
         walk(tokens)
-        digits = re.sub(r'[^0-9A-Fa-f]', '', ''.join(hex_text))
-        if len(digits) < 2 or not blip:
+        if not blip:
             return
-        if len(digits) % 2:
-            digits = digits[:-1]
-        try:
-            data = bytes.fromhex(digits)
-        except ValueError:
-            return
+        if binary:
+            data = ''.join(binary).encode('latin1')
+        else:
+            digits = re.sub(r'[^0-9A-Fa-f]', '', ''.join(hex_text))
+            if len(digits) < 2:
+                return
+            if len(digits) % 2:
+                digits = digits[:-1]
+            try:
+                data = bytes.fromhex(digits)
+            except ValueError:
+                return
         if blip == 'jpegblip':
             ext = 'jpg'
         elif blip == 'emfblip':
@@ -816,8 +845,11 @@ class _RtfDoc(object):
         self.assets[asset] = data
         width, height = _point_size(width, height, data)
         image = {'type': 'image', 'asset': asset, 'w': width, 'h': height}
+        self._place_image(image)
+
+    def _place_image(self, image):
         if self.in_row:
-            self.pending_images.append(image)
+            self.row_images.append(image)
             return
         self._finish_para_before_image()
         self.blocks.append(image)
@@ -825,7 +857,7 @@ class _RtfDoc(object):
     def _skip_raster_fallback(self, ext):
         if not self.in_fallback_pict or ext not in ('png', 'jpg', 'gif', 'bmp'):
             return False
-        candidates = list(self.blocks) + list(self.pending_images)
+        candidates = list(self.blocks) + list(self.pending_images) + list(self.row_images)
         if not candidates:
             return False
         last = candidates[-1]
@@ -885,11 +917,7 @@ class _RtfDoc(object):
         self.assets[asset] = payload
         width, height = _point_size(None, None, payload)
         image = {'type': 'image', 'asset': asset, 'w': width, 'h': height}
-        if self.in_row:
-            self.pending_images.append(image)
-            return
-        self._finish_para_before_image()
-        self.blocks.append(image)
+        self._place_image(image)
 
     def _content(self, tokens):
         pending = bytearray()
@@ -1073,7 +1101,11 @@ class _RtfDoc(object):
             self.deff = number
 
     def _capture_cell(self):
-        self.row_cells.append({'runs': self._clean(self.runs)})
+        item = {'runs': self._clean(self.runs)}
+        if self.row_images:
+            item['images'] = list(self.row_images)
+            self.row_images = []
+        self.row_cells.append(item)
         self.runs = []
 
     def _finish_row(self):
@@ -1085,8 +1117,12 @@ class _RtfDoc(object):
             if spec.get('hmerge') == 'continue' and expanded:
                 expanded[-1]['colspan'] = int(expanded[-1].get('colspan') or 1) + 1
                 expanded[-1]['runs'] = _keep_runs(expanded[-1].get('runs'), cell.get('runs'))
+                if cell.get('images'):
+                    expanded[-1].setdefault('images', []).extend(cell['images'])
                 continue
             item = {'runs': cell.get('runs') or [], 'colspan': 1, 'vmerge': spec.get('vmerge')}
+            if cell.get('images'):
+                item['images'] = list(cell['images'])
             expanded.append(item)
         self.table_rows.append(expanded)
         self.row_cells = []
@@ -1111,6 +1147,8 @@ class _RtfDoc(object):
                     c += span
                     continue
                 item = {'runs': cell.get('runs') or [], 'colspan': span, 'rowspan': 1}
+                if cell.get('images'):
+                    item['images'] = list(cell['images'])
                 grid[(r, c)] = item
                 for dc in range(1, span):
                     grid[(r, c + dc)] = {'covered': True, 'runs': []}
@@ -1125,9 +1163,9 @@ class _RtfDoc(object):
         if rows:
             self.blocks.append({'type': 'table', 'rows': rows, 'merges': merges})
         self.table_rows = []
-        if self.pending_images:
-            self.blocks.extend(self.pending_images)
-            self.pending_images = []
+        if self.row_images:
+            self.blocks.extend(self.row_images)
+            self.row_images = []
 
 
 def _run_text(runs):
@@ -1238,6 +1276,122 @@ def brush_styles(rules):
     return styles
 
 
+def _file_image(src):
+    if not src or not str(src).lower().startswith('file:'):
+        return b'', ''
+    parsed = urlparse(src)
+    path = unquote(parsed.path or '')
+    if os.name != 'nt' and len(path) > 2 and path[0] == '/' and path[2] == ':':
+        path = path[1:]
+    if not path or not os.path.isfile(path):
+        return b'', ''
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return b'', ''
+    if size <= 0 or size > wenju_format.MAX_ASSET_BYTES:
+        return b'', ''
+    try:
+        with open(path, 'rb') as handle:
+            data = handle.read()
+    except OSError:
+        return b'', ''
+    payload, kind = wenju_format.image_bytes(data)
+    if not kind:
+        return b'', ''
+    return payload, kind
+
+
+def _each_image(blocks):
+    for block in blocks or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get('type') == 'image':
+            yield block
+        elif block.get('type') == 'table':
+            for row in block.get('rows') or []:
+                for cell in row or []:
+                    if isinstance(cell, dict):
+                        for image in cell.get('images') or []:
+                            yield image
+
+
+def _drop_empty_images(blocks):
+    kept = []
+    for block in blocks:
+        if block.get('type') == 'image' and not block.get('asset'):
+            continue
+        if block.get('type') == 'table':
+            for row in block.get('rows') or []:
+                for cell in row or []:
+                    if not isinstance(cell, dict) or not cell.get('images'):
+                        continue
+                    cell['images'] = [image for image in cell['images'] if image.get('asset')]
+                    if not cell['images']:
+                        cell.pop('images', None)
+        kept.append(block)
+    return kept
+
+
+def _apply_rtf_pictures(blocks, assets, rtf):
+    rtf_blocks, rtf_assets = parse_rtf(rtf, None)
+    pictures = [block for block in _each_image(rtf_blocks) if block.get('asset')]
+    slots = [image for image in _each_image(blocks) if image.get('_from') != 'data']
+    used = 0
+    for slot in slots:
+        if used >= len(pictures):
+            break
+        src = pictures[used]
+        used += 1
+        blob = rtf_assets.get(src['asset'], b'')
+        name = str(src.get('asset') or '')
+        meta = name.lower().endswith(('.emf', '.wmf'))
+        if slot.get('asset') and not meta:
+            continue
+        assets[name] = blob
+        slot['asset'] = name
+        if not slot.get('w'):
+            slot['w'] = src.get('w') or 0
+        if not slot.get('h'):
+            slot['h'] = src.get('h') or 0
+    for src in pictures[used:]:
+        blocks.append(dict(src))
+        assets[src['asset']] = rtf_assets.get(src['asset'], b'')
+    return blocks, assets
+
+
+def _style_shells(blocks):
+    names = {}
+
+    def take(node):
+        if not isinstance(node, dict):
+            return
+        name = node.get('style')
+        if name:
+            names.setdefault(name, {})
+        for row in node.get('rows') or []:
+            for cell in row or []:
+                take(cell)
+
+    for block in blocks or []:
+        take(block)
+    return names
+
+
+def _through_docx(doc, progress=None):
+    folder = tempfile.mkdtemp(prefix='wenju-clip-')
+    try:
+        path = os.path.join(folder, 'paste.docx')
+        _progress(progress, 86)
+        wenju_format.to_docx(doc, path)
+        _progress(progress, 93)
+        back = wenju_format.from_docx(path)
+        back.source = {'kind': 'clipboard', 'name': ''}
+        return back
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def document_from_parts(html=None, rtf=None, plain=None, images=None, progress=None):
     _progress(progress, 5)
     images = {_asset_name(name): data for name, data in dict(images or {}).items()}
@@ -1246,28 +1400,30 @@ def document_from_parts(html=None, rtf=None, plain=None, images=None, progress=N
     if _has_bytes(html):
         blocks, assets = parse_html(html, progress)
     if _nonempty(blocks, assets):
-        missing_bytes = any(block.get('type') == 'image' and not block.get('asset') for block in blocks)
-        has_bytes = any(block.get('type') == 'image' and block.get('asset') for block in blocks)
-        if _has_bytes(rtf) and (missing_bytes or not has_bytes):
-            blocks, assets = _merge_rtf_images(blocks, assets, rtf)
+        if _has_bytes(rtf):
+            blocks, assets = _apply_rtf_pictures(blocks, assets, rtf)
     elif _has_bytes(rtf):
         blocks, assets = parse_rtf(rtf, progress)
     if not _nonempty(blocks, assets) and plain and str(plain).strip():
         blocks = parse_plain(plain, progress)
         assets = {}
-    blocks = [block for block in blocks if not (block.get('type') == 'image' and not block.get('asset'))]
-    if images and not any(block.get('type') == 'image' for block in blocks):
+    blocks = _drop_empty_images(blocks)
+    if images and not any(True for _image in _each_image(blocks)):
         assets.update(images)
         for name, data in images.items():
             width, height = _point_size(0, 0, data)
             blocks.append({'type': 'image', 'asset': name, 'w': width, 'h': height})
     if not _nonempty(blocks, assets):
         raise ClipboardEmpty('剪贴板里没有可导入的文字、表格或图片')
+    _progress(progress, 80)
+    doc = wenju_format.WenjuDoc(
+        blocks, _style_shells(blocks), assets, source={'kind': 'clipboard', 'name': ''})
+    doc = _through_docx(doc, progress)
     _progress(progress, 100)
-    return wenju_format.WenjuDoc(blocks, {}, assets, source={'kind': 'clipboard', 'name': ''})
+    return doc
 
 
-def document_from_mime(mime, progress=None):
+def parts_from_mime(mime):
     html = _first_bytes(mime, HTML_MIMES)
     if html is None and getattr(mime, 'html', None):
         text = mime.html() or ''
@@ -1285,16 +1441,65 @@ def document_from_mime(mime, progress=None):
             else:
                 plain = raw.decode('utf-8', 'replace')
     images = {}
-    meta = _meta_from_mime(mime)
-    if meta:
-        images[meta[0]] = meta[1]
-    else:
-        for mime_name, ext in IMAGE_MIMES:
-            raw = _first_bytes(mime, (mime_name,))
-            if raw:
-                images['clipboard.%s' % ext] = raw
-                break
+    chosen = _meta_from_mime(mime) or _bitmap_from_mime(mime)
+    if chosen:
+        images[chosen[0]] = chosen[1]
+    return html, rtf, plain, images
+
+
+def document_from_mime(mime, progress=None):
+    html, rtf, plain, images = parts_from_mime(mime)
     return document_from_parts(html, rtf, plain, images, progress)
+
+
+def _bitmap_from_mime(mime):
+    for mime_name, ext in IMAGE_MIMES:
+        raw = _first_bytes(mime, (mime_name,))
+        if raw:
+            return _coerce_bitmap(raw, ext)
+    raw = _first_bytes(mime, ('application/x-qt-image',))
+    if raw:
+        found = _coerce_bitmap(raw, 'png')
+        if found:
+            return found
+    png = _qt_image_png(mime)
+    if png:
+        return ('clipboard.png', png)
+    return None
+
+
+def _coerce_bitmap(raw, ext):
+    payload, kind = wenju_format.image_bytes(raw)
+    if kind in ('png', 'jpg', 'gif', 'bmp'):
+        return ('clipboard.%s' % kind, payload)
+    if raw:
+        return ('clipboard.%s' % ext, bytes(raw) if not isinstance(raw, bytes) else raw)
+    return None
+
+
+def _qt_image_png(mime):
+    getter = getattr(mime, 'imageData', None)
+    if not getter:
+        return b''
+    try:
+        image = getter()
+    except Exception:
+        return b''
+    if image is None or (hasattr(image, 'isNull') and image.isNull()):
+        return b''
+    save = getattr(image, 'save', None)
+    if not save:
+        return b''
+    try:
+        import qt_compat
+        core, _gui, _widgets = qt_compat.load()
+        buf = core.QBuffer()
+        buf.open(core.QIODevice.WriteOnly)
+        if not save(buf, b'PNG'):
+            return b''
+        return bytes(buf.data())
+    except Exception:
+        return b''
 
 
 def _meta_from_mime(mime):

@@ -243,8 +243,9 @@ class ClipboardTests(unittest.TestCase):
         cell = ''.join(run.get('text', '') for run in table['rows'][0][0]['runs'])
         self.assertIn('before', cell)
         self.assertIn('after', cell)
-        image = next(block for block in doc.blocks if block['type'] == 'image')
+        image = table['rows'][0][0]['images'][0]
         self.assertEqual(doc.assets[image['asset']], png)
+        self.assertFalse(any(block['type'] == 'image' for block in doc.blocks))
 
     def test_utf8_rtf_and_unicode_font_names(self):
         raw = '{\\rtf1\\ansi\\ansicpg65001\\deff0{\\fonttbl{\\f0\\fnil\\fcharset134 黑体;}}\\pard\\f0\\fs44 通知\\par}'.encode('utf-8')
@@ -295,11 +296,11 @@ class ClipboardTests(unittest.TestCase):
             '<td style="font-family:楷体;font-size:16pt">丁</td></tr></table>'
         )
         doc = clip.document_from_parts(html=html)
-        self.assertEqual(doc.blocks[0]['runs'][0], {'text': '甲', 'eastAsia': '宋体', 'ascii': '宋体', 'size_pt': 16})
+        self.assertEqual(doc.blocks[0]['runs'][0], {'text': '甲', 'eastAsia': '宋体', 'ascii': '宋体', 'hAnsi': '宋体', 'size_pt': 16})
         self.assertEqual(doc.blocks[1]['runs'][0]['size_pt'], 16)
         table = next(block for block in doc.blocks if block['type'] == 'table')
-        self.assertEqual(table['rows'][0][0]['runs'][0], {'text': '丙', 'eastAsia': '黑体', 'ascii': '黑体', 'size_pt': 14})
-        self.assertEqual(table['rows'][0][1]['runs'][0], {'text': '丁', 'eastAsia': '楷体', 'ascii': '楷体', 'size_pt': 16})
+        self.assertEqual(table['rows'][0][0]['runs'][0], {'text': '丙', 'eastAsia': '黑体', 'ascii': '黑体', 'hAnsi': '黑体', 'size_pt': 14})
+        self.assertEqual(table['rows'][0][1]['runs'][0], {'text': '丁', 'eastAsia': '楷体', 'ascii': '楷体', 'hAnsi': '楷体', 'size_pt': 16})
 
     def test_file_image_in_html_keeps_the_rtf_pict(self):
         png = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==')

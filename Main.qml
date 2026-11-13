@@ -124,7 +124,7 @@ ApplicationWindow {
             Txt{text:bridge.importProgress+"%";color:win.muted}
         }
     }
-    Dialog{id:clipDone;objectName:"clipDone";anchors.centerIn:parent;width:520;title:"剪贴板导入完成";modal:true;standardButtons:Dialog.Ok
+    Dialog{id:clipDone;objectName:"clipDone";anchors.centerIn:parent;width:520;title:"已读入剪贴板";modal:true;standardButtons:Dialog.Ok
         Text{id:clipDoneText;width:480;wrapMode:Text.Wrap;color:win.ink}
     }
 

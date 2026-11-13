@@ -30,6 +30,10 @@ Item {
         spacing: 10
         model: root.blocks
         boundsBehavior: Flickable.StopAtBounds
+        onContentYChanged: {
+            if (contentHeight > height + 4 && contentY > contentHeight - height - 120)
+                bridge.morePreview()
+        }
         ScrollBar.vertical: ScrollBar {
             policy: list.contentHeight > list.height + 4 ? ScrollBar.AlwaysOn : ScrollBar.AsNeeded
         }
@@ -144,7 +148,7 @@ Item {
                     source: row.modelData.path || ""
                     fillMode: Image.PreserveAspectFit
                     smooth: false
-                    asynchronous: false
+                    asynchronous: true
                 }
                 Text {
                     visible: shot.status === Image.Error
