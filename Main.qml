@@ -321,7 +321,7 @@ ApplicationWindow {
                             }
                             Rectangle {anchors{left:parent.left;right:parent.right;bottom:parent.bottom;leftMargin:24;rightMargin:24;bottomMargin:65}height:1;color:appearance.palette["#edf0f4"]}
                             Text {anchors{left:parent.left;right:parent.right;bottom:parent.bottom;leftMargin:24;rightMargin:24;bottomMargin:30}
-                                text:win.pageEnabled?win.prefix+"1"+win.suffix:"不显示页码";color:"#22344a";font.family:win.pageFont;font.pointSize:win.pageSize;font.letterSpacing:win.spacing*96/72
+                                text:win.pageEnabled?win.prefix+"1"+win.suffix:"不显示页码";color:"#22344a";font.family:bridge.paintFont(win.pageFont);font.pointSize:win.pageSize;font.letterSpacing:win.spacing*96/72
                                 horizontalAlignment:(win.alignment==="底部左侧"||win.alignment==="底部两端对齐")?Text.AlignLeft:win.alignment==="底部右侧"?Text.AlignRight:Text.AlignHCenter
                             }
                         }

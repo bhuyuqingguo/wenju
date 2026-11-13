@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "core"))
 
-from fontfallback import resolve
+from fontfallback import choose, reset_index
 from wenju_format import WenjuDoc, from_docx, load, save, to_docx, validate
 from compose import merge, merge_export
 
@@ -66,9 +66,15 @@ def header_order(package):
 
 
 def main():
-    assert resolve("仿宋_GB2312") == "仿宋"
-    assert resolve("仿宋") == "仿宋"
-    assert resolve("黑体") == "黑体"
+    import fontfallback
+    fontfallback._INDEX = {"仿宋": "仿宋", "fangsong": "仿宋"}
+    face, found = choose("仿宋_GB2312")
+    assert found and face == "仿宋"
+    reset_index()
+    fontfallback._INDEX = {}
+    face, found = choose("仿宋_GB2312")
+    assert not found and face == "仿宋_GB2312"
+    reset_index()
 
     picture_b = b"\x89PNG-b"
     picture_c = b"\x89PNG-c"
@@ -128,7 +134,7 @@ def main():
             assert any(name.startswith("assets/") and name.count("/") == 1 for name in archive.namelist())
         stored = load(exported["wenju"])
         body_run = next(block["runs"][0] for block in stored.blocks if block["type"] == "paragraph")
-        assert body_run["eastAsia"] == "仿宋" and body_run["size_pt"] == 12 and "font" not in body_run
+        assert body_run["eastAsia"] == "仿宋_GB2312" and body_run["size_pt"] == 12 and "font" not in body_run
         stored_headings = [block for block in stored.blocks if block["type"] == "heading"]
         assert ["".join(run["text"] for run in block["runs"]) for block in stored_headings] == ["1. 总则", "1.1 范围", "2. 附则", "3. 附图"]
         assert [block["level"] for block in stored_headings] == [1, 2, 1, 1]
@@ -142,8 +148,7 @@ def main():
         assert b"ns0" not in package["word/_rels/document.xml.rels"]
         assert b"TOC \\o \"1-3\"" in blob
         assert b"updateFields" in blob
-        assert b"\xe4\xbb\xbf\xe5\xae\x8b_GB2312" not in blob
-        assert "仿宋".encode("utf-8") in blob
+        assert "仿宋_GB2312".encode("utf-8") in blob
         entries = toc_entries(package)
         assert [(sid, texts[0], texts[-1]) for sid, texts in entries] == [
             ("TOC1", "1. 总则", "1"),

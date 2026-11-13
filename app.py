@@ -12,6 +12,8 @@ from appearance import Appearance
 
 ROOT = Path(__file__).resolve().parent
 DATA = data_directory(ROOT)
+sys.path.insert(0, str(ROOT / "core"))
+import fontfallback
 def qt_log(kind, context, message):
     with (DATA/'界面日志.txt').open('a',encoding='utf-8') as log: log.write(message+'\n')
 qInstallMessageHandler(qt_log)
@@ -62,8 +64,11 @@ class Bridge(QObject):
             r=t['rules'];p=r['页码'];body=r['正文'];size=body['字号']
             heading={'汉字顿号':'一、（一）','多级数字':'1 / 1.1','第X章':'第一章','数字点':'1.'}.get(r['标题']['一级']['格式'],r['标题']['一级']['格式'])
             page=p['左侧字符']+'1'+p['右侧字符'] if p['启用'] else '无页码'
-            rows.append({**{k:v for k,v in t.items() if k!='rules'},'font':r['字体']['正文'],'size':size,'line':body['行距值'],
-                'bodySummary':r['字体']['正文']+' · '+(str(size)+' 磅' if isinstance(size,(float,int)) else size),
+            requested = r['字体']['正文']
+            shown, found = fontfallback.choose(requested)
+            body_font = shown if found else str(requested) + '（未安装）'
+            rows.append({**{k:v for k,v in t.items() if k!='rules'},'font':body_font,'size':size,'line':body['行距值'],
+                'bodySummary':body_font+' · '+(str(size)+' 磅' if isinstance(size,(float,int)) else size),
                 'lineSummary':body['行距类型']+' '+str(body['行距值'])+(' 倍' if body['行距类型']=='多倍' else ' 磅' if body['行距类型'] in ('固定值','最小值') else ''),
                 'headingSummary':heading+' · '+str(r['标题']['级数'])+' 级',
                 'pageSummary':page+' · '+p['位置'].replace('底部','') if p['启用'] else page,
@@ -94,6 +99,10 @@ class Bridge(QObject):
         return rows
     @Property('QStringList',constant=True)
     def fontNames(self):return list(dict.fromkeys(['宋体','仿宋','黑体','楷体','Times New Roman','Arial']+QFontDatabase.families()))
+    @Slot(str, result=str)
+    def paintFont(self, name):
+        chosen, found = fontfallback.choose(name or "")
+        return chosen if found else (name or "")
     @Property(str,notify=rulesChanged)
     def sectionName(self):return self.section.replace('.',' / ')
     @Property(str,notify=rulesChanged)

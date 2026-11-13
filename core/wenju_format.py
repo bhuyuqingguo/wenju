@@ -4,8 +4,6 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 
-import fontfallback
-
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
@@ -203,7 +201,7 @@ def _label(counters, level):
 
 
 def apply_template(doc, template):
-    """Renumber headings to 1. / 1.1 / 1.1.1 and resolve font faces. None only resolves fonts."""
+    """Renumber headings to 1. / 1.1 / 1.1.1 and record the requested font name."""
     default = None
     renumber = False
     if template:
@@ -243,7 +241,7 @@ def _styled(text, font, default):
     run = {"text": text, "size_pt": 12}
     chosen = font or default
     if chosen:
-        run["eastAsia"] = fontfallback.resolve(chosen)
+        run["eastAsia"] = chosen
     return run
 
 
@@ -254,12 +252,8 @@ def _walk_runs(doc, default):
                 run["eastAsia"] = run.pop("font")
             elif "font" in run:
                 run.pop("font", None)
-            if run.get("eastAsia"):
-                run["eastAsia"] = fontfallback.resolve(run["eastAsia"])
-            elif default:
-                run["eastAsia"] = fontfallback.resolve(default)
-            if run.get("ascii"):
-                run["ascii"] = fontfallback.resolve(run["ascii"])
+            if not run.get("eastAsia") and default:
+                run["eastAsia"] = default
             if not run.get("size_pt"):
                 run["size_pt"] = 12
     for block in doc.blocks:
@@ -954,7 +948,7 @@ def _text_run(paragraph, text, font, size_pt=12, ascii_font=None):
     run = ET.SubElement(paragraph, _w("r"))
     rpr = ET.SubElement(run, _w("rPr"))
     fonts = ET.SubElement(rpr, _w("rFonts"))
-    face = fontfallback.resolve(font or "仿宋")
+    face = font or "仿宋"
     fonts.set(_w("eastAsia"), face)
     western = ascii_font or face
     for attr in ("ascii", "hAnsi", "cs"):
@@ -1174,7 +1168,7 @@ def _footer_xml(text):
 
 
 def _styles_xml(font):
-    face = fontfallback.resolve(font)
+    face = font or "仿宋"
     styles = ET.Element(_w("styles"))
     defaults = ET.SubElement(styles, _w("docDefaults"))
     rdef = ET.SubElement(ET.SubElement(defaults, _w("rPrDefault")), _w("rPr"))
