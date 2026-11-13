@@ -48,6 +48,25 @@ ApplicationWindow {
         else {bridge.selectTemplate(t.id);page=pendingPage;}
     }
     function preset(i) { let t=templates[i]; selectedPreset=i; prefix=t.prefix;suffix=t.suffix;pageFont=t.font;pageSize=t.size;spacing=t.spacing;alignment="底部居中";pageEnabled=true;pageUniform=true;commitPage(); }
+    function titleOf(p) {
+        if(p===0) return "文档整理"
+        if(p===1) return "页码设计"
+        if(p===2) return "选择模板"
+        if(p===3) return "设置 · 格式规则"
+        if(p===4) return "设置 · 外观"
+        if(p===5) return "格式转换"
+        return "文矩"
+    }
+    function blurbOf(p) {
+        if(p===0) return "选好格式，剩下的交给文矩。"
+        if(p===1) return "从一个好用的样式开始，让细节恰到好处。"
+        if(p===2) return "为不同的工作，准备恰好的格式。"
+        if(p===3) return "让每一项格式，都符合你的要求。"
+        if(p===4) return "文矩的另一面，随你喜欢。"
+        if(p===5) return "文矩、Word、表格和剪贴板可以互转。"
+        return ""
+    }
+    function navOn(p) { return p===3 ? (page===1||page===3||page===4) : page===p }
     Component.onCompleted: {syncPage();opening.playing=startupAnimation;if(bridge.fontNotice) fontNotice.open();}
     onClosing: function(close) { if(bridge.busy) {close.accepted=false; closeNotice.open();} }
     Dialog {id:fontNotice;anchors.centerIn:parent;width:640;title:"需要安装字体";modal:true;standardButtons:Dialog.Ok
@@ -154,21 +173,31 @@ ApplicationWindow {
             Txt {text:"文档，自有章法。";font.pixelSize:Math.round(12*appearance.scale);color:appearance.palette["#a6bbcd"];font.letterSpacing:2}
         }
         Column {
-            x:14;y:150;width:190;spacing:10
+            x:14;y:142;width:190;spacing:8
             Repeater {
-                model:[{title:"选择模板",page:2,icon:"▥"},{title:"文档整理",page:0,icon:"▤"},{title:"格式转换",page:5,icon:"换"},{title:"设置",page:3,icon:"≡"}]
+                model:[{title:"选择模板",page:2,icon:"▥"},{title:"文档整理",page:0,icon:"▤"},{title:"设置",page:3,icon:"≡"}]
                 delegate: Rectangle {
                     required property int index; required property var modelData
-                    objectName:"nav_"+modelData.page; width:190;height:48*appearance.scale;radius:8;color:(win.page===modelData.page||(modelData.page===3&&(win.page===1||win.page===4)))?appearance.palette["#2c526f"]:"transparent"
-                    Rectangle {visible:(win.page===modelData.page||(modelData.page===3&&(win.page===1||win.page===4)));x:0;y:15;width:3;height:18;radius:2;color:appearance.palette["#e6b35f"]}
+                    objectName:"nav_"+modelData.page; width:190;height:44*appearance.scale;radius:8;color:win.navOn(modelData.page)?appearance.palette["#2c526f"]:"transparent"
+                    Rectangle {visible:win.navOn(modelData.page);x:0;y:13;width:3;height:18;radius:2;color:appearance.palette["#e6b35f"]}
                     Row {x:19;anchors.verticalCenter:parent.verticalCenter;spacing:16
-                        Txt {text:modelData.icon;color:(win.page===modelData.page||(modelData.page===3&&(win.page===1||win.page===4)))?appearance.colors.navText:appearance.palette["#a6bbcd"];font.pixelSize:Math.round(20*appearance.scale)}
-                        Txt {text:modelData.title;color:(win.page===modelData.page||(modelData.page===3&&(win.page===1||win.page===4)))?appearance.colors.navText:appearance.palette["#a6bbcd"];font.weight:Font.Medium}
+                        Txt {text:modelData.icon;color:win.navOn(modelData.page)?appearance.colors.navText:appearance.palette["#a6bbcd"];font.pixelSize:Math.round(18*appearance.scale)}
+                        Txt {text:modelData.title;color:win.navOn(modelData.page)?appearance.colors.navText:appearance.palette["#a6bbcd"];font.weight:Font.Medium}
                     }
                     MouseArea {anchors.fill:parent;cursorShape:Qt.PointingHandCursor;onClicked:win.page=modelData.page}
                 }
             }
-            Txt {x:19;topPadding:22;text:"本地工作空间";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
+            Txt {x:19;topPadding:14;text:"转换";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
+            Rectangle {
+                objectName:"nav_5"; width:190;height:44*appearance.scale;radius:8;color:win.page===5?appearance.palette["#2c526f"]:"transparent"
+                Rectangle {visible:win.page===5;x:0;y:13;width:3;height:18;radius:2;color:appearance.palette["#e6b35f"]}
+                Row {x:19;anchors.verticalCenter:parent.verticalCenter;spacing:16
+                    Txt {text:"换";color:win.page===5?appearance.colors.navText:appearance.palette["#a6bbcd"];font.pixelSize:Math.round(18*appearance.scale)}
+                    Txt {text:"格式转换";color:win.page===5?appearance.colors.navText:appearance.palette["#a6bbcd"];font.weight:Font.Medium}
+                }
+                MouseArea {anchors.fill:parent;cursorShape:Qt.PointingHandCursor;onClicked:win.page=5}
+            }
+            Txt {x:19;topPadding:8;text:"本地工作空间";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
         }
         Item {
             x:30;y:460;width:158;height:180;visible:win.height>900&&appearance.scale<=1
@@ -189,18 +218,33 @@ ApplicationWindow {
     }
 
     ColumnLayout {
-        anchors {left:parent.left;leftMargin:250;right:parent.right;rightMargin:32;top:parent.top;topMargin:28;bottom:parent.bottom;bottomMargin:20}
-        spacing:20
+        anchors {left:parent.left;leftMargin:250;right:parent.right;rightMargin:32;top:parent.top;topMargin:20;bottom:parent.bottom;bottomMargin:16}
+        spacing:12
         RowLayout {
             Layout.fillWidth:true
-            Column {spacing:7
-                Txt {text:page===0?"文档整理":page===1?"页码设计":page===2?"选择模板":page===3?"设置 · 格式规则":"设置 · 外观";font.pixelSize:Math.round(28*appearance.scale);font.weight:Font.DemiBold}
-                Txt {text:page===0?"选好格式，剩下的交给文矩。":page===1?"从一个好用的样式开始，让细节恰到好处。":page===2?"为不同的工作，准备恰好的格式。":page===3?"让每一项格式，都符合你的要求。":"文矩的另一面，随你喜欢。";color:muted;font.pixelSize:Math.round(13*appearance.scale)}
+            ColumnLayout {Layout.fillWidth:true;spacing:2
+                Txt {text:win.titleOf(win.page);font.pixelSize:Math.round(26*appearance.scale);font.weight:Font.DemiBold;Layout.fillWidth:true;elide:Text.ElideRight}
+                Txt {text:win.blurbOf(win.page);color:muted;font.pixelSize:Math.round(13*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
             }
-            Item {Layout.fillWidth:true}
             Action {visible:page===2;text:"管理模板";onClicked:manageDialog.open()}
             Action {visible:page!==2&&page<4;text:page===0?"体验样例":"另存为模板";onClicked:{win.contentItem.forceActiveFocus();if(page===0)bridge.sample();else saveDialog.open();}}
             Action {visible:(page===1||page===3);text:"保存修改";primary:true;enabled:bridge.personal&&bridge.dirty;onClicked:{win.contentItem.forceActiveFocus();bridge.saveTemplate();}}
+        }
+        Rectangle {
+            visible:page===0
+            Layout.fillWidth:true;Layout.preferredHeight:72*appearance.scale;radius:10
+            color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
+            RowLayout {anchors.fill:parent;anchors.leftMargin:16;anchors.rightMargin:12;spacing:12
+                Rectangle {width:36;height:36;radius:8;color:appearance.colors.surface
+                    Txt{anchors.centerIn:parent;text:"+";font.pixelSize:Math.round(22*appearance.scale);color:blue}
+                }
+                ColumnLayout {Layout.fillWidth:true;spacing:2
+                    Txt {text:"把要整理的文档拖到这里";font.pixelSize:Math.round(15*appearance.scale);font.weight:Font.DemiBold;Layout.fillWidth:true;elide:Text.ElideRight}
+                    Txt {text:"DOCX / DOC / WPS / RTF / 文矩 · 先选模板再导入";color:muted;font.pixelSize:Math.round(12*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
+                }
+                Action {text:"选择文档";primary:true;onClicked:bridge.choose()}
+            }
+            DropArea {anchors.fill:parent;onDropped:function(drop){if(drop.hasUrls)bridge.dropFiles(drop.urls);}}
         }
 
         RowLayout{visible:page===1||page===3||page===4;Layout.fillWidth:true;spacing:10
@@ -212,27 +256,10 @@ ApplicationWindow {
         Item {id:pageArea
             Layout.fillWidth:true;Layout.fillHeight:true
             ColumnLayout {
-                anchors.fill:parent;spacing:18;visible:page===0
+                anchors.fill:parent;spacing:10;visible:page===0
                 Rectangle {
-                    Layout.fillWidth:true;Layout.preferredHeight:268;radius:12;color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
-                    Column {anchors.centerIn:parent;spacing:10
-                        Rectangle {anchors.horizontalCenter:parent.horizontalCenter;width:46;height:46;radius:12;color:appearance.colors.surface;Txt{anchors.centerIn:parent;text:"+";font.pixelSize:Math.round(30*appearance.scale);color:blue}}
-                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"把 Word 文档拖到这里";font.pixelSize:Math.round(19*appearance.scale);font.weight:Font.DemiBold}
-                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"DOCX / DOC / WPS / RTF / 文矩 · 可批量添加 · 原文件保持不变";color:muted;font.pixelSize:Math.round(12*appearance.scale)}
-                        Row {anchors.horizontalCenter:parent.horizontalCenter;spacing:10
-                            Action {text:"选择文档";primary:true;onClicked:bridge.choose()}
-                            Action {objectName:"importClipboard";text:"从剪贴板导入";implicitWidth:168;enabled:!bridge.busy;onClicked:bridge.importClipboard(clipboardBrush.checked)}
-                        }
-                        CheckBox {id:clipboardBrush;objectName:"clipboardBrush";anchors.horizontalCenter:parent.horizontalCenter;text:"按模板刷格式";checked:false;onToggled:bridge.setClipboardBrush(checked)
-                            palette.text:win.ink;palette.windowText:win.ink;palette.buttonText:win.ink
-                        }
-                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"默认保留复制时的标题、表格、图片、字体和字号";color:muted;font.pixelSize:Math.round(11*appearance.scale)}
-                    }
-                    DropArea {anchors.fill:parent;onDropped:function(drop){if(drop.hasUrls)bridge.dropFiles(drop.urls);}}
-                }
-                Rectangle {
-                    Layout.fillWidth:true;Layout.preferredHeight:72;radius:10;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
-                    RowLayout {anchors.fill:parent;anchors.margins:18;spacing:18
+                    Layout.fillWidth:true;Layout.preferredHeight:58;radius:10;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
+                    RowLayout {anchors.fill:parent;anchors.leftMargin:14;anchors.rightMargin:10;anchors.topMargin:8;anchors.bottomMargin:8;spacing:12
                         Rectangle {width:38;height:38;radius:8;color:appearance.palette["#f1f4f8"];Txt{anchors.centerIn:parent;text:"Aa";color:blue;font.pixelSize:Math.round(17*appearance.scale)}}
                         Column {spacing:5;Txt{text:win.templateName+(bridge.dirty?" · 已修改":"");font.weight:Font.Medium}Txt{text:"页码："+prefix+"1"+suffix+"  ·  "+pageFont+"  "+pageSize+" 磅";color:muted;font.pixelSize:Math.round(12*appearance.scale)}}
                         Item {Layout.fillWidth:true}
@@ -299,52 +326,77 @@ ApplicationWindow {
             }
 
             ColumnLayout {
-                anchors.fill:parent;spacing:14;visible:page===5
+                anchors.fill:parent;spacing:10;visible:page===5
                 Rectangle {
-                    Layout.fillWidth:true;Layout.preferredHeight:132;radius:12;color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
-                    Column {anchors.centerIn:parent;spacing:8
-                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"把文件拖到这里，转成文矩格式";font.pixelSize:Math.round(18*appearance.scale);font.weight:Font.DemiBold}
-                        Txt {anchors.horizontalCenter:parent.horizontalCenter;text:"DOCX / XLSX / TXT / MD / DOC · 可一次拖入多份 · 原文件保持不变";color:muted;font.pixelSize:Math.round(12*appearance.scale)}
-                        Action {anchors.horizontalCenter:parent.horizontalCenter;text:"选择文件";primary:true;enabled:!bridge.busy;onClicked:bridge.chooseConvert()}
+                    Layout.fillWidth:true;Layout.preferredHeight:108;radius:10;color:appearance.palette["#eaf0f6"];border.color:appearance.palette["#dbe5ef"]
+                    RowLayout {anchors.fill:parent;anchors.margins:12;spacing:12
+                        ColumnLayout {Layout.preferredWidth:300;Layout.maximumWidth:340;Layout.fillHeight:true;spacing:6
+                            Txt {text:"把文件拖到这里";font.pixelSize:Math.round(15*appearance.scale);font.weight:Font.DemiBold;Layout.fillWidth:true;elide:Text.ElideRight}
+                            Txt {text:"DOCX / XLSX / TXT / MD / DOC / 文矩";color:muted;font.pixelSize:Math.round(12*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
+                            Row {spacing:8
+                                Action {text:"选择文件";primary:true;implicitWidth:110;implicitHeight:36;enabled:!bridge.busy;onClicked:bridge.chooseConvert()}
+                                Action {objectName:"importClipboard";text:"从剪贴板导入";implicitWidth:148;implicitHeight:36;enabled:!bridge.busy;onClicked:bridge.importClipboard(bridge.convertTarget==="wenju"||bridge.convertTarget==="styled")}
+                            }
+                        }
+                        Rectangle {Layout.fillWidth:true;Layout.fillHeight:true;radius:8;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
+                            TextArea {
+                                anchors.fill:parent;anchors.margins:8
+                                placeholderText:"也可以把文字粘贴在这里，和文件一起转换"
+                                selectByMouse:true;wrapMode:TextEdit.Wrap;color:win.ink
+                                font.pixelSize:Math.round(13*appearance.scale)
+                                onTextChanged:bridge.setConvertPaste(text)
+                            }
+                        }
                     }
                     DropArea {anchors.fill:parent;onDropped:function(drop){if(drop.hasUrls)bridge.dropConvert(drop.urls);}}
                 }
-                RowLayout {Layout.fillWidth:true;spacing:10
-                    Action {text:"保留原格式";primary:bridge.convertMode==="preserve";enabled:!bridge.busy;onClicked:bridge.setConvertMode("preserve")}
-                    Action {text:"按模板刷";primary:bridge.convertMode==="template";enabled:!bridge.busy;onClicked:bridge.setConvertMode("template")}
-                    Txt {text:bridge.convertMode==="template"?"使用当前模板："+win.templateName:"保留文件里原来的字体和字号";color:muted;font.pixelSize:Math.round(12*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
-                }
-                Rectangle {Layout.fillWidth:true;Layout.preferredHeight:92;radius:10;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
-                    TextArea {
-                        anchors.fill:parent;anchors.margins:10
-                        placeholderText:"也可以把文字粘贴在这里，和文件一起转换"
-                        selectByMouse:true;wrapMode:TextEdit.Wrap;color:win.ink
-                        font.pixelSize:Math.round(13*appearance.scale)
-                        onTextChanged:bridge.setConvertPaste(text)
+                Txt {text:"转换目标";font.weight:Font.DemiBold;font.pixelSize:Math.round(13*appearance.scale)}
+                GridLayout {columns:5;columnSpacing:8;rowSpacing:8;Layout.fillWidth:true
+                    Repeater {model:bridge.convertTargets
+                        delegate: Rectangle {
+                            required property var modelData
+                            objectName:"target_"+modelData.id
+                            property bool checked: bridge.convertTarget===modelData.id
+                            Layout.fillWidth:true;Layout.preferredHeight:36*appearance.scale;radius:8
+                            color:checked?appearance.palette["#eaf1f8"]:appearance.colors.surface
+                            border.width:checked?2:1
+                            border.color:checked?win.blue:appearance.palette["#dce3eb"]
+                            Txt {anchors.fill:parent;anchors.leftMargin:8;anchors.rightMargin:8;text:modelData.label;horizontalAlignment:Text.AlignHCenter;verticalAlignment:Text.AlignVCenter;elide:Text.ElideRight;color:checked?win.blue:win.ink;font.weight:checked?Font.DemiBold:Font.Normal;font.pixelSize:Math.round(13*appearance.scale)}
+                            MouseArea {anchors.fill:parent;enabled:!bridge.busy;cursorShape:Qt.PointingHandCursor;onClicked:bridge.setConvertTarget(modelData.id)}
+                        }
                     }
                 }
-                Rectangle {Layout.fillWidth:true;Layout.fillHeight:true;radius:12;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
-                    ProgressPanel {
-                        objectName:"progressPanel"
-                        anchors.fill:parent;anchors.margins:16
-                        files:bridge.convertFiles
-                        overall:bridge.convertOverall
-                        heading:"总进度"
-                        ink:win.ink
-                        muted:win.muted
-                        track:appearance.palette["#e6ebf1"]
-                        fill:win.blue
-                        okColor:appearance.palette["#35806c"]
-                        badColor:"#a33b3b"
-                        fontPx:Math.round(13*appearance.scale)
+                Txt {text:bridge.convertHint;color:muted;font.pixelSize:Math.round(12*appearance.scale);Layout.fillWidth:true;wrapMode:Text.WordWrap}
+                Rectangle {Layout.fillWidth:true;Layout.fillHeight:true;Layout.minimumHeight:150;radius:12;color:appearance.colors.surface;border.color:appearance.palette["#e2e7ee"]
+                    ColumnLayout {anchors.fill:parent;anchors.margins:12;spacing:6
+                        Txt {text:"内容预览";font.weight:Font.DemiBold}
+                        Txt {text:bridge.previewNote;color:muted;font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;wrapMode:Text.WordWrap}
+                        ConvertPreview {objectName:"convertPreview";Layout.fillWidth:true;Layout.fillHeight:true;blocks:bridge.previewBlocks}
                     }
+                }
+                ProgressPanel {
+                    objectName:"progressPanel"
+                    Layout.fillWidth:true
+                    Layout.preferredHeight:bridge.convertFiles.length===0?40:Math.min(140, 36+bridge.convertFiles.length*36)
+                    Layout.maximumHeight:bridge.convertFiles.length===0?40:140
+                    idleHint:false
+                    files:bridge.convertFiles
+                    overall:bridge.convertOverall
+                    heading:"总进度"
+                    ink:win.ink
+                    muted:win.muted
+                    track:appearance.palette["#e6ebf1"]
+                    fill:win.blue
+                    okColor:appearance.palette["#35806c"]
+                    badColor:"#a33b3b"
+                    fontPx:Math.round(13*appearance.scale)
                 }
                 RowLayout {Layout.fillWidth:true
                     Action {text:"清空列表";enabled:!bridge.busy;onClicked:bridge.clearConvert()}
                     Item {Layout.fillWidth:true}
                     Action {visible:bridge.busy;text:"停止后续任务";onClicked:bridge.cancel()}
                     Action {text:"导出为 DOCX";enabled:!bridge.busy;onClicked:bridge.exportConvert()}
-                    Action {text:bridge.busy?"正在转换…":"开始转换";primary:true;enabled:!bridge.busy;objectName:"startConvert";onClicked:bridge.startConvert()}
+                    Action {text:bridge.busy?"正在转换…":(bridge.convertTarget==="merge"?"开始合并":"开始转换");primary:true;enabled:!bridge.busy;objectName:"startConvert";onClicked:bridge.startConvert()}
                 }
             }
 
