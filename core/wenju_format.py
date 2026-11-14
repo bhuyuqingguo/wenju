@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import struct
 import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
-APP_VERSION = "3.4.0"
+import image_size
+
+APP_VERSION = "3.3.0"
 FORMAT = "wenju"
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -17,15 +20,49 @@ R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+C = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+CX = "http://schemas.microsoft.com/office/drawing/2014/chartex"
+MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+VML = "urn:schemas-microsoft-com:vml"
+O = "urn:schemas-microsoft-com:office:office"
 REL = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
+IMAGE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+CHART_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
+CHARTEX_REL = "http://schemas.microsoft.com/office/2014/relationships/chartEx"
+CHART_STYLE_REL = "http://schemas.microsoft.com/office/2011/relationships/chartStyle"
+CHART_COLOR_REL = "http://schemas.microsoft.com/office/2011/relationships/chartColorStyle"
+THEME_OVERRIDE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/themeOverride"
+CHART_CT = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+CHARTEX_CT = "application/vnd.ms-office.chartex+xml"
+CHART_STYLE_CT = "application/vnd.ms-office.chartstyle+xml"
+CHART_COLOR_CT = "application/vnd.ms-office.chartcolorstyle+xml"
+THEME_OVERRIDE_CT = "application/vnd.openxmlformats-officedocument.themeOverride+xml"
+XLSX_CT = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+DOC_REL_TYPES = {"image": IMAGE_REL, "chart": CHART_REL, "chartex": CHARTEX_REL}
+PART_OVERRIDE = {
+    CHART_STYLE_REL: CHART_STYLE_CT,
+    CHART_COLOR_REL: CHART_COLOR_CT,
+    THEME_OVERRIDE_REL: THEME_OVERRIDE_CT,
+}
+IMAGE_TYPES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "gif": "image/gif",
+    "bmp": "image/bmp",
+    "emf": "image/x-emf",
+    "wmf": "image/x-wmf",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+}
 DC = "http://purl.org/dc/elements/1.1/"
 DCTERMS = "http://purl.org/dc/terms/"
 CP = "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
 
 EMU_PER_PT = 12700
 MAX_ASSET_BYTES = 64 * 1024 * 1024
-BLOCK_TYPES = ("heading", "paragraph", "table", "image", "pagebreak", "toc")
+BLOCK_TYPES = ("heading", "paragraph", "table", "image", "chart", "pagebreak", "toc")
 HEADING_NAME = re.compile(r"^(?:heading|标题)\s*(\d)$", re.I)
 ALIGNS = {
     "left": "left", "center": "center", "right": "right", "both": "both",
@@ -38,6 +75,7 @@ RUN_KEYS = ("text", "eastAsia", "ascii", "hAnsi", "size_pt", "bold", "italic", "
 
 for _prefix, _uri in (
     ("w", W), ("r", R), ("wp", WP), ("a", A), ("pic", PIC),
+    ("c", C), ("cx", CX), ("mc", MC), ("v", VML), ("o", O),
     ("pr", REL), ("ct", CT), ("dc", DC), ("cp", CP),
 ):
     ET.register_namespace(_prefix, _uri)
@@ -80,12 +118,15 @@ class WenjuDoc:
     app_version: str = APP_VERSION
     created: str = ""
     version: int = 1
+    sections: list = field(default_factory=list)
 
     def __post_init__(self):
         if not self.created:
             self.created = utcnow()
         if not self.source:
             self.source = {"kind": "new", "name": ""}
+        if self.sections is None:
+            self.sections = []
 
 
 def manifest_of(doc):
@@ -111,6 +152,7 @@ def validate(doc):
     if not isinstance(doc.blocks, list):
         errors.append("document.blocks 必须是有序列表")
         return errors
+    _check_sections(getattr(doc, "sections", None), errors)
     if not isinstance(doc.styles, dict):
         errors.append("styles 必须是命名样式表")
     else:
@@ -166,6 +208,7 @@ def load(path):
     if not isinstance(styles, dict):
         raise ValueError("styles.json 必须是命名样式表")
     source = manifest.get("source") if isinstance(manifest.get("source"), dict) else {}
+    sections = document.get("sections") if isinstance(document.get("sections"), list) else []
     doc = WenjuDoc(
         blocks=document["blocks"],
         styles=styles,
@@ -175,6 +218,7 @@ def load(path):
         app_version=manifest.get("app_version") or APP_VERSION,
         created=manifest.get("created") or utcnow(),
         version=manifest.get("version") or 0,
+        sections=sections,
     )
     errors = validate(doc)
     if errors:
@@ -192,7 +236,7 @@ def save(doc, path):
         os.makedirs(parent, exist_ok=True)
     files = [
         ("manifest.json", _dump(manifest_of(doc))),
-        ("document.json", _dump({"blocks": doc.blocks})),
+        ("document.json", _dump({"blocks": doc.blocks, "sections": list(getattr(doc, "sections", None) or [])})),
         ("styles.json", _dump(doc.styles)),
     ]
     for name, data in doc.assets.items():
@@ -215,7 +259,10 @@ def from_docx(path):
     root = ET.fromstring(files["word/document.xml"])
     body = root.find(q(W, "body"))
     ctx = {"rels": rels, "files": files, "names": style_names, "styles": styles, "outlines": outlines, "defaults": defaults, "theme": theme}
-    blocks = _read_container(body, ctx) if body is not None else []
+    if body is not None:
+        blocks, sections = _read_body(body, ctx)
+    else:
+        blocks, sections = [], []
     assets = _store_images(blocks)
     title = _title_from(blocks) or Path(path).stem
     return WenjuDoc(
@@ -224,6 +271,7 @@ def from_docx(path):
         assets=assets,
         title=title,
         source={"kind": "docx", "name": os.path.basename(path)},
+        sections=sections,
     )
 
 
@@ -237,37 +285,99 @@ def to_docx(doc, path, template=None):
         for name, override in brush.items():
             styles[name] = _merge_style(styles.get(name), override)
     style_ids = _style_ids(styles)
+    sections = [dict(item) for item in (getattr(doc, "sections", None) or []) if isinstance(item, dict)]
+    active = _sections_active(sections)
+    header_ids = []
+    footer_ids = []
+    next_rid = 2
+    if active:
+        for _section in sections:
+            header_ids.append("rId%d" % next_rid)
+            next_rid += 1
+            footer_ids.append("rId%d" % next_rid)
+            next_rid += 1
+    image_start = next_rid
     image_rels = []
+    extra_files = {}
+    extra_overrides = []
+    chart_seq = 1
     body = ET.Element(q(W, "body"))
     picture_id = 1
-    for block in doc.blocks:
+    last_p = None
+    open_section = None
+    for index, block in enumerate(doc.blocks):
+        section = _section_at(index, sections) if active else None
+        if active and open_section is not None and section is not open_section:
+            if last_p is None:
+                last_p = ET.SubElement(body, q(W, "p"))
+            _attach_sect(last_p, open_section, sections, header_ids, footer_ids, section.get("break") or "nextPage")
+            last_p = None
+        if active:
+            open_section = section
         kind = block["type"]
         if kind in ("heading", "paragraph"):
             _write_paragraph(body, block, styles, style_ids, brush)
+            last_p = body[-1]
         elif kind == "table":
-            _write_table(body, block, styles, style_ids, brush)
+            picture_id = _write_table(body, block, styles, style_ids, brush, doc.assets, image_rels, extra_files, image_start, picture_id)
+            last_p = None
         elif kind == "image":
-            rel_id = "rId%d" % (len(image_rels) + 2)
-            image_rels.append((rel_id, block["asset"]))
-            _write_image(body, block, rel_id, picture_id)
-            picture_id += 1
+            rel_id, used = _place_media(block, doc.assets, image_rels, extra_files, image_start, picture_id)
+            _write_image(body, block, rel_id, used)
+            picture_id = used + 1
+            last_p = body[-1]
+        elif kind == "chart":
+            plan = prepare_chart(block, doc.assets, chart_seq)
+            chart_seq += 1
+            rel_ids = []
+            for rel_kind, target in plan["doc_rels"]:
+                rel_id = "rId%d" % (image_start + len(image_rels))
+                image_rels.append((rel_id, target, DOC_REL_TYPES.get(rel_kind, IMAGE_REL)))
+                rel_ids.append(rel_id)
+            if rel_ids:
+                write_chart_paragraph(body, block, rel_ids, picture_id)
+                picture_id += 1
+                last_p = body[-1]
+            for part_name, blob in plan["files"]:
+                extra_files[part_name] = blob
+            extra_overrides.extend(plan["overrides"])
         elif kind == "pagebreak":
-            _write_page_break(body)
+            if active:
+                following = _section_at(index + 1, sections) if index + 1 < len(doc.blocks) else section
+                if following is section:
+                    _write_page_break(body)
+                    last_p = body[-1]
+                elif last_p is None:
+                    last_p = ET.SubElement(body, q(W, "p"))
+            else:
+                _write_page_break(body)
+                last_p = body[-1]
         elif kind == "toc":
-            _write_toc(body)
-    sect = ET.SubElement(body, q(W, "sectPr"))
-    ET.SubElement(sect, q(W, "pgSz")).set(q(W, "w"), "11906")
-    sect.find(q(W, "pgSz")).set(q(W, "h"), "16838")
+            _write_toc(body, doc.blocks, sections)
+            last_p = body[-1]
+    if active:
+        if open_section is None and sections:
+            open_section = sections[0]
+        body.append(_sect_element(open_section or {}, sections, header_ids, footer_ids, True, ""))
+    else:
+        sect = ET.SubElement(body, q(W, "sectPr"))
+        ET.SubElement(sect, q(W, "pgSz")).set(q(W, "w"), "11906")
+        sect.find(q(W, "pgSz")).set(q(W, "h"), "16838")
+    part_files = {}
+    if active:
+        for index, section in enumerate(sections):
+            part_files["word/header%d.xml" % (index + 1)] = _header_xml(section.get("header") or "")
+            part_files["word/footer%d.xml" % (index + 1)] = _footer_xml(section.get("footer") or "", _footer_has_page(section, sections))
     files = {
-        "[Content_Types].xml": _content_types(doc.assets),
+        "[Content_Types].xml": _content_types(doc.assets, len(sections) if active else 0, extra_overrides, list(extra_files)),
         "_rels/.rels": _package_rels(),
         "docProps/core.xml": _core_xml(doc.title),
         "word/document.xml": _xml(ET.ElementTree(_document_root(body))),
         "word/styles.xml": _styles_xml(styles, style_ids),
-        "word/_rels/document.xml.rels": _document_rels(image_rels),
+        "word/_rels/document.xml.rels": _document_rels(image_rels, header_ids if active else None, footer_ids if active else None),
     }
-    for _rel_id, asset in image_rels:
-        files["word/media/" + asset] = bytes(doc.assets[asset])
+    files.update(part_files)
+    files.update(extra_files)
     path = str(path)
     parent = os.path.dirname(path)
     if parent:
@@ -291,6 +401,29 @@ def convert_file(src, dest, template=None):
     else:
         raise ValueError("只能保存为 .wenju 或 .docx")
     return dest
+
+
+def _check_sections(sections, errors):
+    if sections is None:
+        return
+    if not isinstance(sections, list):
+        errors.append("document.sections 必须是列表")
+        return
+    allowed = ("nextPage", "continuous", "evenPage", "oddPage", "nextColumn")
+    for index, section in enumerate(sections):
+        where = "第 %d 节" % (index + 1)
+        if not isinstance(section, dict):
+            errors.append("%s 无法识别" % where)
+            continue
+        at = section.get("at", 0)
+        if isinstance(at, bool) or not isinstance(at, int) or at < 0:
+            errors.append("%s 的起始位置无法识别" % where)
+        brk = section.get("break", "nextPage")
+        if brk is not None and brk not in allowed:
+            errors.append("%s 的分节方式无法识别" % where)
+        for key in ("header", "footer"):
+            if key in section and section[key] is not None and not isinstance(section[key], str):
+                errors.append("%s 的页眉页脚必须是文字" % where)
 
 
 def _check_block(block, index, assets, errors):
@@ -330,6 +463,12 @@ def _check_block(block, index, assets, errors):
                 else:
                     for run in cell["runs"]:
                         _check_run(run, where, errors)
+                for image in cell.get("images") or []:
+                    if not isinstance(image, dict):
+                        errors.append("%s 单元格里的图片无法识别" % where)
+                        continue
+                    _check_asset_ref(image.get("asset"), assets, where, "图片", errors)
+                    _check_extent(image, where, "图片", errors)
         occupied = set()
         for merge in block.get("merges") or []:
             span = _check_merge(merge, len(rows), width, where, errors)
@@ -347,14 +486,77 @@ def _check_block(block, index, assets, errors):
                         if not (isinstance(covered, dict) and covered.get("covered") is True) or _cell_text(covered):
                             errors.append("%s 的合并盖住了仍有内容的单元格" % where)
     elif kind == "image":
-        asset = block.get("asset")
-        if not isinstance(asset, str) or not asset or "/" in asset or "\\" in asset:
-            errors.append("%s 图片 asset 必须是 assets 目录下的文件名" % where)
-        elif asset not in assets:
-            errors.append("%s 找不到图片 %s" % (where, asset))
-        for key in ("w", "h"):
-            if not isinstance(block.get(key), (int, float)) or isinstance(block.get(key), bool) or block.get(key) <= 0:
-                errors.append("%s 图片%s必须是正数磅值" % (where, key))
+        _check_asset_ref(block.get("asset"), assets, where, "图片", errors)
+        _check_extent(block, where, "图片", errors)
+    elif kind == "chart":
+        _check_asset_ref(block.get("asset"), assets, where, "图表", errors)
+        _check_extent(block, where, "图表", errors)
+        preview = block.get("preview")
+        if preview is not None:
+            _check_asset_ref(preview, assets, where, "图表预览", errors)
+        if "uri" in block and block.get("uri") is not None and not isinstance(block.get("uri"), str):
+            errors.append("%s 的图表类型无法识别" % where)
+        _check_chart_rels(block.get("rels") or [], assets, where, errors, 0)
+
+
+def _check_asset_ref(name, assets, where, label, errors):
+    if not isinstance(name, str) or not name or _unsafe_asset_name(name):
+        errors.append("%s %s必须是 assets 目录下的文件名" % (where, label))
+    elif name not in assets:
+        errors.append("%s 找不到%s %s" % (where, label, name))
+
+
+def _check_extent(block, where, label, errors):
+    for key in ("w", "h"):
+        value = block.get(key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+            errors.append("%s %s%s必须是正数磅值" % (where, label, key))
+
+
+def _check_chart_rels(rels, assets, where, errors, depth):
+    if depth > 6:
+        errors.append("%s 的图表部件嵌套过深" % where)
+        return
+    if not isinstance(rels, list):
+        errors.append("%s 的图表关系无法识别" % where)
+        return
+    for rel in rels:
+        if not isinstance(rel, dict):
+            errors.append("%s 的图表关系无法识别" % where)
+            continue
+        if not isinstance(rel.get("id"), str) or not rel.get("id"):
+            errors.append("%s 的图表关系缺少编号" % where)
+        if not isinstance(rel.get("type"), str) or not rel.get("type"):
+            errors.append("%s 的图表关系类型无法识别" % where)
+        target = rel.get("target")
+        if rel.get("external"):
+            if not isinstance(target, str) or not target:
+                errors.append("%s 的图表外部链接无法识别" % where)
+            continue
+        if not isinstance(target, str) or _bad_rel_target(target):
+            errors.append("%s 的图表部件路径无法识别" % where)
+        _check_asset_ref(rel.get("asset"), assets, where, "图表部件", errors)
+        if rel.get("rels"):
+            _check_chart_rels(rel.get("rels") or [], assets, where, errors, depth + 1)
+
+
+def _bad_rel_target(target):
+    if not isinstance(target, str) or not target or "\\" in target or target.startswith("/") or ":" in target:
+        return True
+    ups = 0
+    for piece in target.split("/"):
+        if piece == "":
+            return True
+        if piece == ".":
+            continue
+        if piece == "..":
+            ups += 1
+            if ups > 2:
+                return True
+            continue
+        if piece in ("..",) or "/" in piece:
+            return True
+    return False
 
 
 def _check_run(run, where, errors):
@@ -576,12 +778,37 @@ def _public_style(props):
     return style
 
 
+def _read_body(body, ctx):
+    return _read_blocks(body, ctx, True)
+
+
 def _read_container(node, ctx):
+    blocks, _sections = _read_blocks(node, ctx, False)
+    return blocks
+
+
+def _read_blocks(node, ctx, track_sections):
     blocks = []
+    sections = []
+    current = _blank_section(0, "nextPage")
+    saw = False
     for child in list(node):
         kind = local(child.tag)
+        if kind == "sectPr" and track_sections:
+            _apply_sect(current, child, ctx)
+            sections.append(_public_section(current))
+            saw = True
+            continue
         if kind == "p":
             blocks.extend(_read_paragraph(child, ctx))
+            if track_sections:
+                ppr = child.find(q(W, "pPr"))
+                sect = ppr.find(q(W, "sectPr")) if ppr is not None else None
+                if sect is not None:
+                    _apply_sect(current, sect, ctx)
+                    sections.append(_public_section(current))
+                    saw = True
+                    current = _blank_section(len(blocks), "nextPage")
         elif kind == "tbl":
             table, images = _read_table(child, ctx)
             blocks.append(table)
@@ -593,7 +820,141 @@ def _read_container(node, ctx):
                 content = child.find(q(W, "sdtContent"))
                 if content is not None:
                     blocks.extend(_read_container(content, ctx))
-    return blocks
+    if track_sections and saw:
+        return blocks, sections
+    return blocks, []
+
+
+def _blank_section(at, brk):
+    return {
+        "at": at,
+        "header": "",
+        "footer": "",
+        "break": brk or "nextPage",
+        "footer_page": False,
+    }
+
+
+def _apply_sect(section, sect, ctx):
+    section["break"] = _sect_break(sect)
+    header_id = _part_ref(sect, "headerReference")
+    footer_id = _part_ref(sect, "footerReference")
+    header, _page = _part_story(ctx, header_id)
+    footer, page = _part_story(ctx, footer_id)
+    section["header"] = header
+    section["footer"] = footer
+    section["footer_page"] = page
+    page_box = _page_box(sect)
+    section.update(page_box)
+
+
+def _public_section(section):
+    public = {
+        "at": int(section.get("at") or 0),
+        "header": section.get("header") or "",
+        "footer": section.get("footer") or "",
+        "break": section.get("break") or "nextPage",
+        "footer_page": bool(section.get("footer_page")),
+    }
+    if section.get("pgSz"):
+        public["pgSz"] = section["pgSz"]
+    if section.get("pgMar"):
+        public["pgMar"] = section["pgMar"]
+    return public
+
+
+def _sect_break(sect):
+    kind = sect.find(q(W, "type"))
+    value = kind.get(q(W, "val")) if kind is not None and kind.get(q(W, "val")) else "nextPage"
+    if value not in ("nextPage", "continuous", "evenPage", "oddPage", "nextColumn"):
+        return "nextPage"
+    return value
+
+
+def _part_ref(sect, tag):
+    chosen = None
+    for node in sect.findall(q(W, tag)):
+        rel_id = node.get(q(R, "id"))
+        if node.get(q(W, "type")) in (None, "default"):
+            return rel_id
+        chosen = rel_id
+    return chosen
+
+
+def _part_story(ctx, rel_id):
+    if not rel_id:
+        return "", False
+    target = (ctx.get("rels") or {}).get(rel_id)
+    blob = (ctx.get("files") or {}).get(_word_part(target)) if target else None
+    if not blob:
+        return "", False
+    try:
+        root = ET.fromstring(blob)
+    except ET.ParseError:
+        return "", False
+    parts = []
+    page = False
+    in_result = False
+    instr = ""
+    for node in root.iter():
+        name = local(node.tag)
+        if name == "fldChar":
+            kind = node.get(q(W, "fldCharType"))
+            if kind == "begin":
+                in_result = False
+                instr = ""
+            elif kind == "separate":
+                in_result = "PAGE" in instr.upper()
+            elif kind == "end":
+                in_result = False
+                instr = ""
+        elif name == "instrText":
+            instr += node.text or ""
+            if "PAGE" in (node.text or "").upper():
+                page = True
+        elif name == "t" and not in_result:
+            parts.append(node.text or "")
+    return "".join(parts), page
+
+
+def _word_part(target):
+    target = (target or "").replace("\\", "/").strip()
+    while target.startswith("./"):
+        target = target[2:]
+    while target.startswith("../"):
+        target = target[3:]
+    target = target.lstrip("/")
+    if not target:
+        return ""
+    if target.startswith("word/"):
+        return target
+    return "word/" + target
+
+
+def _page_box(sect):
+    found = {}
+    pg = sect.find(q(W, "pgSz"))
+    if pg is not None:
+        box = {}
+        for key in ("w", "h"):
+            raw = pg.get(q(W, key))
+            if raw and raw.isdigit():
+                box[key] = int(raw)
+        orient = pg.get(q(W, "orient"))
+        if orient:
+            box["orient"] = orient
+        if box:
+            found["pgSz"] = box
+    mar = sect.find(q(W, "pgMar"))
+    if mar is not None:
+        edges = {}
+        for key in ("top", "right", "bottom", "left", "header", "footer", "gutter"):
+            raw = mar.get(q(W, key))
+            if raw and (raw.lstrip("-").isdigit()):
+                edges[key] = int(raw)
+        if edges:
+            found["pgMar"] = edges
+    return found
 
 
 def _read_paragraph(paragraph, ctx):
@@ -626,14 +987,20 @@ def _read_paragraph(paragraph, ctx):
         pieces.append(block)
         text_runs.clear()
 
-    for run_node in _iter_runs(paragraph):
-        for kind, payload in _run_events(run_node, ctx):
-            if kind == "text":
+    for kind, node in _walk_paragraph(paragraph):
+        if kind == "run":
+            events = _run_events(node, ctx)
+        elif kind == "alt":
+            events = (("media", block) for block in _alternate_media(node, ctx))
+        else:
+            events = (("media", block) for block in _media_in(node, ctx))
+        for event, payload in events:
+            if event == "text":
                 text_runs.append(_inherit_run(payload, inherited))
-            elif kind == "break":
+            elif event == "break":
                 flush_text()
                 pieces.append({"type": "pagebreak"})
-            elif kind == "image":
+            elif event == "media" and payload:
                 flush_text()
                 pieces.append(payload)
     flush_text()
@@ -649,10 +1016,22 @@ def _read_paragraph(paragraph, ctx):
     return pieces
 
 
-def _iter_runs(paragraph):
+def _walk_paragraph(paragraph):
     for child in list(paragraph):
-        for run in _runs_under(child):
-            yield run
+        name = local(child.tag)
+        if name == "AlternateContent":
+            yield "alt", child
+        elif name in ("drawing", "pict", "object"):
+            yield "media", child
+        else:
+            for run in _runs_under(child):
+                yield "run", run
+
+
+def _iter_runs(paragraph):
+    for kind, node in _walk_paragraph(paragraph):
+        if kind == "run":
+            yield node
 
 
 def _runs_under(node):
@@ -691,9 +1070,34 @@ def _inherited_props(style_name, ctx):
     return inherited
 
 
+def _is_cjk_font(name):
+    if not name:
+        return False
+    if any("\u4e00" <= char <= "\u9fff" for char in name):
+        return True
+    return str(name).casefold() in (
+        "fangsong_gb2312", "kaiti_gb2312", "simsun", "simhei", "fangsong", "kaiti",
+        "nsimsun", "stfangsong", "stkaiti", "stsong", "stheiti", "stzhongsong",
+    )
+
+
+def _explicit_cjk(run):
+    for key in ("ascii", "hAnsi"):
+        name = run.get(key)
+        if _is_cjk_font(name):
+            return name
+    return None
+
+
 def _inherit_run(run, inherited):
+    # WPS often stores 仿宋_GB2312 in ascii/hAnsi and leaves eastAsia empty.
+    # Keep that requested name; do not replace it with a document default.
+    if run.get("eastAsia") in (None, ""):
+        face = _explicit_cjk(run)
+        if face:
+            run["eastAsia"] = face
     if not inherited:
-        return run
+        return _order_run(run)
     for key in ("eastAsia", "ascii", "hAnsi", "size_pt"):
         if run.get(key) in (None, "") and inherited.get(key) not in (None, ""):
             run[key] = inherited[key]
@@ -704,23 +1108,105 @@ def _inherit_run(run, inherited):
 
 def _run_events(run_node, ctx):
     pending = []
+
+    def flush_text():
+        if not pending:
+            return None
+        payload = _read_run(run_node, "".join(pending), ctx.get("theme"))
+        pending[:] = []
+        return payload
+
     for child in list(run_node):
         name = local(child.tag)
         if name == "t":
             pending.append(child.text or "")
         elif name == "br" and child.get(q(W, "type")) == "page":
-            if pending:
-                yield "text", _read_run(run_node, "".join(pending), ctx.get("theme"))
-                pending = []
+            text = flush_text()
+            if text is not None:
+                yield "text", text
             yield "break", None
-        elif name in ("drawing", "pict"):
-            if pending:
-                yield "text", _read_run(run_node, "".join(pending), ctx.get("theme"))
-                pending = []
-            for image in _images_in(child, ctx["rels"], ctx["files"]):
-                yield "image", image
-    if pending:
-        yield "text", _read_run(run_node, "".join(pending), ctx.get("theme"))
+        elif name in ("drawing", "pict", "object"):
+            text = flush_text()
+            if text is not None:
+                yield "text", text
+            for block in _media_in(child, ctx):
+                yield "media", block
+        elif name == "AlternateContent":
+            text = flush_text()
+            if text is not None:
+                yield "text", text
+            for block in _alternate_media(child, ctx):
+                yield "media", block
+    text = flush_text()
+    if text is not None:
+        yield "text", text
+
+
+def _run_images(run_node, ctx):
+    found = []
+    for kind, payload in _run_events(run_node, ctx):
+        if kind == "media" and payload:
+            found.append(payload)
+    if found:
+        return found
+    return _media_in(run_node, ctx)
+
+
+def _alternate_media(node, ctx):
+    choice = None
+    fallback = None
+    for child in list(node):
+        name = local(child.tag)
+        if name == "Choice" and choice is None:
+            choice = child
+        elif name == "Fallback" and fallback is None:
+            fallback = child
+    chosen = _media_in(choice, ctx) if choice is not None else []
+    backup = _media_in(fallback, ctx) if fallback is not None else []
+    if any(item.get("type") == "chart" for item in chosen):
+        _attach_preview(chosen, backup)
+        return _dedupe_media(chosen)
+    if chosen:
+        return _dedupe_media(chosen)
+    return _dedupe_media(backup)
+
+
+def _attach_preview(chosen, backup):
+    preview = None
+    for item in backup:
+        if item.get("type") == "image" and item.get("_bytes"):
+            preview = item
+            break
+    if preview is None:
+        return
+    blob = bytes(preview.get("_bytes") or b"")
+    name = preview.get("asset") or "preview.bin"
+    for block in chosen:
+        if block.get("type") != "chart" or block.get("preview"):
+            continue
+        files = block.setdefault("_files", {})
+        final = name
+        serial = 2
+        while final in files and files[final] != blob:
+            stem, dot, ext = name.rpartition(".")
+            final = ("%s-preview-%d.%s" % (stem, serial, ext)) if dot else "%s-preview-%d" % (name, serial)
+            serial += 1
+        files[final] = blob
+        block["preview"] = final
+
+
+def _unique_images(images):
+    found = []
+    seen = set()
+    for image in images:
+        if not image:
+            continue
+        key = (image.get("asset"), image.get("w"), image.get("h"))
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(image)
+    return found
 
 
 def _run_props(rpr, theme=None):
@@ -816,32 +1302,36 @@ def _section_break(ppr):
     return value in ("nextPage", "oddPage", "evenPage")
 
 
-VML = "urn:schemas-microsoft-com:vml"
-
-
-def _images_in(run, rels, files):
+def _images_in(node, rels, files):
+    if node is None:
+        return []
     images = []
-    for blip in run.iter(q(A, "blip")):
+    for blip in node.iter(q(A, "blip")):
         embed = blip.get(q(R, "embed"))
         target = rels.get(embed or "")
         if not target:
             continue
-        width, height = _extent(run)
+        width, height = _blip_size(node)
         images.append(_image_block(target, files, width, height))
-    for data in run.iter(q(VML, "imagedata")):
-        embed = data.get(q(R, "id"))
+    for data in node.iter(q(VML, "imagedata")):
+        embed = data.get(q(R, "id")) or data.get(q(O, "relid"))
         target = rels.get(embed or "")
         if not target:
             continue
-        width, height = _vml_extent(run, data)
+        width, height = _vml_extent(node, data)
+        if not width or not height:
+            width, height = _media_size(node)
         images.append(_image_block(target, files, width, height))
-    return [image for image in images if image]
+    images = [image for image in images if image]
+    if images:
+        return _dedupe_media(images)
+    return _dedupe_media(_ole_images(node, rels, files))
 
 
 def _extent(run):
     extent = next(run.iter(q(WP, "extent")), None)
     if extent is None:
-        return 100, 100
+        return None, None
     return emu_to_pt(extent.get("cx") or 0), emu_to_pt(extent.get("cy") or 0)
 
 
@@ -850,8 +1340,11 @@ def _vml_extent(run, data):
         if data not in list(shape.iter()):
             continue
         style = shape.get("style") or ""
-        return _css_pt(style, "width") or 100, _css_pt(style, "height") or 100
-    return 100, 100
+        width = _css_pt(style, "width")
+        height = _css_pt(style, "height")
+        if width and height:
+            return width, height
+    return None, None
 
 
 def _css_pt(style, key):
@@ -862,10 +1355,14 @@ def _css_pt(style, key):
         value = value.strip().lower()
         if value.endswith("pt"):
             return num(float(value[:-2]))
+        if value.endswith("px"):
+            return num(float(value[:-2]) * 0.75)
         if value.endswith("in"):
             return num(float(value[:-2]) * 72)
         if value.endswith("cm"):
             return num(float(value[:-2]) * 72 / 2.54)
+        if value.endswith("mm"):
+            return num(float(value[:-2]) * 72 / 25.4)
     return None
 
 
@@ -881,13 +1378,649 @@ def _image_block(target, files, width, height):
     if blob is None:
         return None
     name = key.split("/")[-1] or "image.bin"
-    return {"type": "image", "asset": name, "w": width or 100, "h": height or 100, "_bytes": blob}
+    shown_w, shown_h = image_size.display_size(blob, width, height)
+    return {"type": "image", "asset": name, "w": shown_w, "h": shown_h, "_bytes": blob}
+
+
+def _blip_size(node):
+    extent = next(node.iter(q(WP, "extent")), None)
+    if extent is not None and (extent.get("cx") or extent.get("cy")):
+        return emu_to_pt(extent.get("cx") or 0), emu_to_pt(extent.get("cy") or 0)
+    return _media_size(node)
+
+
+def _media_size(node):
+    for shape in node.iter(q(VML, "shape")):
+        style = shape.get("style") or ""
+        width = _css_pt(style, "width")
+        height = _css_pt(style, "height")
+        if width and height:
+            return width, height
+    for obj in node.iter():
+        if local(obj.tag) != "object":
+            continue
+        dxa = obj.get(q(W, "dxaOrig"))
+        dya = obj.get(q(W, "dyaOrig"))
+        if dxa and dya and str(dxa).isdigit() and str(dya).isdigit():
+            return num(int(dxa) / 20.0), num(int(dya) / 20.0)
+    return None, None
+
+
+def _dedupe_media(items):
+    found = []
+    seen = set()
+    for item in items:
+        if not item:
+            continue
+        blob = item.get("_bytes") or b""
+        if item.get("type") == "chart":
+            key = ("chart", item.get("asset"), len(item.get("_files") or {}))
+        else:
+            key = ("image", item.get("asset"), len(blob), blob[:24], item.get("w"), item.get("h"))
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(item)
+    return found
+
+
+def _media_in(node, ctx):
+    if node is None:
+        return []
+    rels = ctx.get("rels") or {}
+    files = ctx.get("files") or {}
+    images = _images_in(node, rels, files)
+    charts = _charts_in(node, ctx)
+    if charts:
+        return _dedupe_media(list(images) + charts)
+    return images
+
+
+def _charts_in(node, ctx):
+    if node is None:
+        return []
+    found = []
+    seen = set()
+    for data in node.iter(q(A, "graphicData")):
+        uri = data.get("uri") or ""
+        if "chart" not in uri:
+            continue
+        for child in list(data):
+            if local(child.tag) != "chart":
+                continue
+            block = _chart_from(child, ctx, _blip_size(node), uri)
+            if not block or block.get("asset") in seen:
+                continue
+            seen.add(block.get("asset"))
+            found.append(block)
+    return found
+
+
+def _chart_from(chart, ctx, size, uri):
+    rid = chart.get(q(R, "id"))
+    target = (ctx.get("rels") or {}).get(rid or "")
+    if not target:
+        return None
+    path = _word_part(target)
+    blob = (ctx.get("files") or {}).get(path)
+    if not blob:
+        return None
+    seq = int(ctx.get("chart_seq") or 0) + 1
+    ctx["chart_seq"] = seq
+    asset = _claim_asset(ctx, "chart%d.xml" % seq)
+    files = {asset: bytes(blob)}
+    rels = _read_rel_tree(path, ctx, files, set(), seq)
+    width, height = size or (None, None)
+    shown_w, shown_h = image_size.display_size(b"", width, height)
+    return {
+        "type": "chart",
+        "asset": asset,
+        "w": shown_w,
+        "h": shown_h,
+        "uri": uri or C,
+        "rels": rels,
+        "_files": files,
+    }
+
+
+def _claim_asset(ctx, name):
+    used = ctx.setdefault("asset_names", set())
+    name = _basename(name) or "part.bin"
+    if _unsafe_asset_name(name):
+        name = "part.bin"
+    if name not in used:
+        used.add(name)
+        return name
+    stem, dot, ext = name.rpartition(".")
+    number = 2
+    while True:
+        candidate = "%s-%d.%s" % (stem, number, ext) if dot else "%s-%d" % (name, number)
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+        number += 1
+
+
+def _basename(name):
+    return str(name or "").replace("\\", "/").rstrip("/").split("/")[-1]
+
+
+def _read_rel_tree(path, ctx, files, visiting, seq):
+    if path in visiting:
+        return []
+    visiting.add(path)
+    result = []
+    known = ctx.setdefault("part_assets", {})
+    trees = ctx.setdefault("part_trees", {})
+    for rel in _read_rel_items((ctx.get("files") or {}).get(_rels_name(path))):
+        item = {"id": rel["id"], "type": rel["type"], "target": rel["target"]}
+        if rel.get("external"):
+            item["external"] = True
+            result.append(item)
+            continue
+        if _bad_rel_target(rel["target"]):
+            continue
+        dep = _norm_join(_parent_dir(path), rel["target"])
+        if not dep or dep in visiting and dep not in known:
+            continue
+        data = (ctx.get("files") or {}).get(dep)
+        if data is None:
+            continue
+        if dep in known:
+            item["asset"] = known[dep]
+            files[known[dep]] = bytes(data)
+            if trees.get(dep):
+                item["rels"] = trees[dep]
+            result.append(item)
+            continue
+        asset = _claim_asset(ctx, "chart%d-%s" % (seq, _basename(dep)))
+        known[dep] = asset
+        files[asset] = bytes(data)
+        item["asset"] = asset
+        nested = _rels_name(dep)
+        if _basename(dep).lower().endswith(".xml") and nested in (ctx.get("files") or {}):
+            item["rels"] = _read_rel_tree(dep, ctx, files, visiting, seq)
+            trees[dep] = item["rels"]
+        result.append(item)
+    return result
+
+
+def _read_rel_items(blob):
+    if not blob:
+        return []
+    try:
+        root = ET.fromstring(blob)
+    except ET.ParseError:
+        return []
+    items = []
+    for rel in list(root):
+        rid = rel.get("Id")
+        target = rel.get("Target")
+        if not rid or not target:
+            continue
+        item = {"id": rid, "type": rel.get("Type") or "", "target": target}
+        if rel.get("TargetMode") == "External":
+            item["external"] = True
+        items.append(item)
+    return items
+
+
+def _rels_name(part):
+    parent, _, name = part.rpartition("/")
+    folder = parent + "/_rels/" if parent else "_rels/"
+    return folder + name + ".rels"
+
+
+def _parent_dir(part):
+    parent, _, _name = part.rpartition("/")
+    return parent
+
+
+def _norm_join(base_dir, target):
+    target = (target or "").replace("\\", "/").strip()
+    if not target or target.startswith("/") or ":" in target:
+        return ""
+    parts = [piece for piece in str(base_dir or "").split("/") if piece and piece != "."]
+    for piece in target.split("/"):
+        if piece in ("", "."):
+            continue
+        if piece == "..":
+            if not parts:
+                return ""
+            parts.pop()
+            continue
+        parts.append(piece)
+    if not parts or parts[0] != "word":
+        return ""
+    return "/".join(parts)
+
+
+def _ole_images(node, rels, files):
+    found = []
+    width, height = _media_size(node)
+    seen = set()
+    for ole in node.iter(q(O, "OLEObject")):
+        rid = ole.get(q(R, "id"))
+        target = rels.get(rid or "")
+        if not target or target in seen:
+            continue
+        seen.add(target)
+        key = _word_part(target)
+        blob = files.get(key)
+        if not blob or len(blob) > MAX_ASSET_BYTES:
+            continue
+        payload, kind = image_bytes(blob)
+        if not payload or not kind:
+            continue
+        shown_w, shown_h = image_size.display_size(payload, width, height)
+        found.append({
+            "type": "image",
+            "asset": "ole%d.%s" % (len(found) + 1, kind),
+            "w": shown_w,
+            "h": shown_h,
+            "_bytes": payload,
+        })
+    return found
+
+
+def image_kind(data):
+    return _kind_of(data)
+
+
+def image_bytes(data):
+    """Return image bytes when the blob is an image or safely wraps one."""
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        return b"", ""
+    data = bytes(data)
+    payload, kind = _plain_image(data)
+    if kind:
+        return payload, kind
+    if not data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return b"", ""
+    found = []
+    for stream in _cfb_streams(data):
+        payload, kind = _plain_image(stream)
+        if kind:
+            found.append((payload, kind))
+    for want in ("emf", "wmf", "png", "jpg", "gif", "bmp"):
+        for payload, kind in found:
+            if kind == want:
+                return payload, kind
+    return b"", ""
+
+
+def clipboard_metafile(data):
+    """Return a bare EMF or WMF when a clipboard value carries one."""
+    if not isinstance(data, (bytes, bytearray)) or len(data) < 18:
+        return b"", ""
+    data = bytes(data)
+    payload, kind = _plain_image(data)
+    if kind in ("emf", "wmf"):
+        return payload, kind
+    if len(data) > 22:
+        payload, kind = _plain_image(data[16:])
+        if kind in ("emf", "wmf"):
+            return payload, kind
+    region = data[:512]
+    pos = region.find(b" EMF")
+    if pos >= 40:
+        payload, kind = _plain_image(data[pos - 40:])
+        if kind == "emf":
+            return payload, kind
+    for magic in (b"\xd7\xcd\xc6\x9a", b"\x01\x00\x09\x00"):
+        pos = region.find(magic)
+        if 0 <= pos <= 64:
+            payload, kind = _plain_image(data[pos:])
+            if kind == "wmf":
+                return payload, kind
+    return b"", ""
+
+
+def _plain_image(data):
+    kind = _kind_of(data)
+    if kind == "emf":
+        nbytes = struct.unpack_from("<I", data, 48)[0]
+        return data[:nbytes], "emf"
+    if kind == "wmf":
+        return _trim_wmf(data), "wmf"
+    if kind:
+        return data, kind
+    if len(data) >= 8:
+        size = struct.unpack_from("<I", data, 0)[0]
+        if 18 <= size <= len(data) - 4:
+            payload, kind = _plain_image(data[4:4 + size])
+            if kind:
+                return payload, kind
+    return b"", ""
+
+
+def _kind_of(data):
+    if len(data) >= 8 and data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if len(data) >= 3 and data.startswith(b"\xff\xd8\xff"):
+        return "jpg"
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return "gif"
+    if _is_bmp(data):
+        return "bmp"
+    if _is_emf(data):
+        return "emf"
+    if _is_wmf(data):
+        return "wmf"
+    return ""
+
+
+def _is_bmp(data):
+    if len(data) < 14 or not data.startswith(b"BM"):
+        return False
+    size = struct.unpack_from("<I", data, 2)[0]
+    offset = struct.unpack_from("<I", data, 10)[0]
+    return 14 <= offset < size <= len(data)
+
+
+def _is_emf(data):
+    if len(data) < 88 or data[:4] != b"\x01\x00\x00\x00" or data[40:44] != b" EMF":
+        return False
+    header = struct.unpack_from("<I", data, 4)[0]
+    nbytes = struct.unpack_from("<I", data, 48)[0]
+    return 88 <= header <= nbytes <= len(data)
+
+
+def _is_wmf(data):
+    if data.startswith(b"\xd7\xcd\xc6\x9a") and len(data) >= 40:
+        if data[22:24] != b"\x01\x00" or data[24:26] != b"\x09\x00":
+            return False
+        words = struct.unpack_from("<I", data, 28)[0]
+        return 9 <= words and words * 2 <= len(data) - 22
+    if len(data) >= 18 and data[:4] == b"\x01\x00\x09\x00":
+        words = struct.unpack_from("<I", data, 6)[0]
+        return 9 <= words and words * 2 <= len(data)
+    return False
+
+
+def _trim_wmf(data):
+    if data.startswith(b"\xd7\xcd\xc6\x9a"):
+        words = struct.unpack_from("<I", data, 28)[0]
+        size = 22 + words * 2
+        if 40 <= size <= len(data):
+            return data[:size]
+        return data
+    words = struct.unpack_from("<I", data, 6)[0]
+    size = words * 2
+    if 18 <= size <= len(data):
+        return data[:size]
+    return data
+
+
+def _cfb_streams(blob):
+    try:
+        return _cfb_stream_list(blob)
+    except Exception:
+        return []
+
+
+def _cfb_sector(blob, index, sector_size):
+    if index >= 0xFFFFFFF0:
+        return None
+    start = (index + 1) * sector_size
+    end = start + sector_size
+    if start < 0 or end > len(blob):
+        return None
+    return blob[start:end]
+
+
+def _cfb_stream_list(blob):
+    if len(blob) < 512 or blob[:8] != b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+        return []
+    sector_shift = struct.unpack_from("<H", blob, 0x1E)[0]
+    if sector_shift not in (9, 12):
+        return []
+    sector_size = 1 << sector_shift
+    mini_shift = struct.unpack_from("<H", blob, 0x20)[0]
+    if mini_shift < 4 or mini_shift > 10:
+        return []
+    mini_size = 1 << mini_shift
+    major = struct.unpack_from("<H", blob, 0x1A)[0]
+    num_fat = struct.unpack_from("<I", blob, 0x2C)[0]
+    dir_start = struct.unpack_from("<I", blob, 0x30)[0]
+    cutoff = struct.unpack_from("<I", blob, 0x38)[0]
+    mini_fat_start = struct.unpack_from("<I", blob, 0x3C)[0]
+    num_mini_fat = struct.unpack_from("<I", blob, 0x40)[0]
+    if num_fat <= 0 or num_fat > 1024 or num_mini_fat > 1024:
+        return []
+    difat = []
+    for index in range(109):
+        value = struct.unpack_from("<I", blob, 0x4C + 4 * index)[0]
+        if value < 0xFFFFFFF0:
+            difat.append(value)
+    next_difat = struct.unpack_from("<I", blob, 0x44)[0]
+    guard = 0
+    while next_difat < 0xFFFFFFF0 and guard < 1024 and len(difat) < num_fat:
+        guard += 1
+        chunk = _cfb_sector(blob, next_difat, sector_size)
+        if not chunk:
+            break
+        count = sector_size // 4
+        for index in range(count - 1):
+            value = struct.unpack_from("<I", chunk, index * 4)[0]
+            if value < 0xFFFFFFF0:
+                difat.append(value)
+        next_difat = struct.unpack_from("<I", chunk, (count - 1) * 4)[0]
+    fat_parts = []
+    for sector in difat[:num_fat]:
+        chunk = _cfb_sector(blob, sector, sector_size)
+        if not chunk:
+            return []
+        fat_parts.append(chunk)
+    fat = b"".join(fat_parts)
+
+    def fat_next(sector):
+        offset = sector * 4
+        if offset + 4 > len(fat):
+            return 0xFFFFFFFE
+        return struct.unpack_from("<I", fat, offset)[0]
+
+    def read_chain(start, size):
+        if start >= 0xFFFFFFF0 or size <= 0 or size > 32 * 1024 * 1024:
+            return b""
+        parts = []
+        seen = set()
+        sector = start
+        got = 0
+        while sector < 0xFFFFFFF0 and sector not in seen and got < size and len(seen) < 100000:
+            seen.add(sector)
+            chunk = _cfb_sector(blob, sector, sector_size)
+            if chunk is None:
+                break
+            parts.append(chunk)
+            got += len(chunk)
+            sector = fat_next(sector)
+        return b"".join(parts)[:size]
+
+    def read_chain_all(start, limit_sectors):
+        parts = []
+        seen = set()
+        sector = start
+        while sector < 0xFFFFFFF0 and sector not in seen and len(seen) < limit_sectors:
+            seen.add(sector)
+            chunk = _cfb_sector(blob, sector, sector_size)
+            if chunk is None:
+                break
+            parts.append(chunk)
+            sector = fat_next(sector)
+        return b"".join(parts)
+
+    directory = read_chain_all(dir_start, 1024)
+    if len(directory) < 128:
+        return []
+    entries = []
+    for offset in range(0, len(directory) - 127, 128):
+        entry = directory[offset:offset + 128]
+        kind = entry[66]
+        if kind not in (1, 2, 5):
+            continue
+        if major >= 4:
+            size = struct.unpack_from("<Q", entry, 120)[0]
+        else:
+            size = struct.unpack_from("<I", entry, 120)[0]
+        start = struct.unpack_from("<I", entry, 116)[0]
+        entries.append((kind, start, size))
+    root = entries[0] if entries and entries[0][0] == 5 else None
+    mini_stream = b""
+    mini_fat = b""
+    if root and root[2] > 0 and root[1] < 0xFFFFFFF0:
+        mini_stream = read_chain(root[1], root[2])
+    if num_mini_fat and mini_fat_start < 0xFFFFFFF0:
+        mini_fat = read_chain_all(mini_fat_start, num_mini_fat + 1)[:num_mini_fat * sector_size]
+
+    def read_mini(start, size):
+        if size <= 0 or size > 32 * 1024 * 1024 or not mini_stream or not mini_fat:
+            return b""
+        parts = []
+        seen = set()
+        sector = start
+        got = 0
+        while sector < 0xFFFFFFF0 and sector not in seen and got < size and len(seen) < 100000:
+            seen.add(sector)
+            offset = sector * mini_size
+            if offset >= len(mini_stream):
+                break
+            parts.append(mini_stream[offset:offset + mini_size])
+            got += mini_size
+            next_at = sector * 4
+            if next_at + 4 > len(mini_fat):
+                break
+            sector = struct.unpack_from("<I", mini_fat, next_at)[0]
+        return b"".join(parts)[:size]
+
+    found = []
+    for kind, start, size in entries:
+        if kind != 2 or size <= 0 or size > 32 * 1024 * 1024:
+            continue
+        data = read_mini(start, size) if size < cutoff else read_chain(start, size)
+        if data:
+            found.append(data)
+    return found
+
+
+def prepare_chart(block, assets, index):
+    """Pack a chart block back into docx parts. Bytes are copied, not redrawn."""
+    asset = block.get("asset")
+    chart_bytes = assets.get(asset) if asset else None
+    if chart_bytes is None:
+        return {"files": [], "overrides": [], "doc_rels": []}
+    name = "chart%d.xml" % index
+    uri = block.get("uri") or C
+    files = [("word/charts/" + name, bytes(chart_bytes))]
+    overrides = [("/word/charts/" + name, CHARTEX_CT if "chartex" in uri else CHART_CT)]
+    rels = block.get("rels") or []
+    if rels:
+        files.append(("word/charts/_rels/" + name + ".rels", _rels_bytes(rels)))
+    _write_rel_targets("word/charts", rels, assets, files, overrides, set())
+    kind = "chartex" if "chartex" in uri else "chart"
+    doc_rels = [(kind, "charts/" + name)]
+    preview = block.get("preview")
+    if preview and preview in assets:
+        ext = preview.rsplit(".", 1)[-1].lower() if "." in preview else "bin"
+        media = "chart%d-preview.%s" % (index, ext)
+        files.append(("word/media/" + media, bytes(assets[preview])))
+        doc_rels.append(("image", "media/" + media))
+    return {"files": files, "overrides": overrides, "doc_rels": doc_rels}
+
+
+def _write_rel_targets(base_dir, rels, assets, files, overrides, seen):
+    for rel in rels or []:
+        if not isinstance(rel, dict) or rel.get("external"):
+            continue
+        asset = rel.get("asset")
+        target = rel.get("target") or ""
+        if not asset or asset not in assets:
+            continue
+        part = _norm_join(base_dir, target)
+        if not part or part in seen:
+            continue
+        seen.add(part)
+        files.append((part, bytes(assets[asset])))
+        content = PART_OVERRIDE.get(rel.get("type") or "")
+        if content:
+            overrides.append(("/" + part, content))
+        nested = rel.get("rels") or []
+        if nested:
+            parent = part.rpartition("/")[0]
+            files.append((_rels_name(part), _rels_bytes(nested)))
+            _write_rel_targets(parent, nested, assets, files, overrides, seen)
+
+
+def _rels_bytes(rels):
+    root = ET.Element(q(REL, "Relationships"))
+    for rel in rels or []:
+        if not isinstance(rel, dict):
+            continue
+        node = ET.SubElement(root, q(REL, "Relationship"))
+        node.set("Id", rel.get("id") or "rId1")
+        node.set("Type", rel.get("type") or "")
+        node.set("Target", rel.get("target") or "")
+        if rel.get("external"):
+            node.set("TargetMode", "External")
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def write_chart_paragraph(body, block, rel_ids, picture_id):
+    paragraph = ET.Element(q(W, "p"))
+    run = ET.SubElement(paragraph, q(W, "r"))
+    chart_rel = rel_ids[0]
+    preview_rel = rel_ids[1] if len(rel_ids) > 1 else None
+    if preview_rel:
+        alt = ET.SubElement(run, q(MC, "AlternateContent"))
+        choice = ET.SubElement(alt, q(MC, "Choice"))
+        uri = block.get("uri") or C
+        if "chartex" in uri:
+            choice.set("Requires", "cx")
+            choice.set(q(CX, "anchor"), "1")
+        else:
+            choice.set("Requires", "c")
+            choice.set(q(C, "anchor"), "1")
+        _chart_drawing(choice, block, chart_rel, picture_id)
+        _vml_picture(ET.SubElement(alt, q(MC, "Fallback")), block, preview_rel)
+    else:
+        _chart_drawing(run, block, chart_rel, picture_id)
+    body.append(paragraph)
+    return paragraph
+
+
+def _chart_drawing(parent, block, rel_id, picture_id):
+    drawing = ET.SubElement(parent, q(W, "drawing"))
+    inline = ET.SubElement(drawing, q(WP, "inline"))
+    shown_w, shown_h = image_size.fit_points(block.get("w") or 0, block.get("h") or 0, image_size.content_width_pt())
+    cx, cy = str(pt_to_emu(shown_w)), str(pt_to_emu(shown_h))
+    extent = ET.SubElement(inline, q(WP, "extent"))
+    extent.set("cx", cx)
+    extent.set("cy", cy)
+    doc_pr = ET.SubElement(inline, q(WP, "docPr"))
+    doc_pr.set("id", str(picture_id))
+    doc_pr.set("name", "Chart %d" % picture_id)
+    graphic = ET.SubElement(inline, q(A, "graphic"))
+    data = ET.SubElement(graphic, q(A, "graphicData"))
+    uri = block.get("uri") or C
+    data.set("uri", uri)
+    chart = ET.SubElement(data, q(CX if "chartex" in uri else C, "chart"))
+    chart.set(q(R, "id"), rel_id)
+
+
+def _vml_picture(parent, block, rel_id):
+    pict = ET.SubElement(parent, q(W, "pict"))
+    shape = ET.SubElement(pict, q(VML, "shape"))
+    shown_w, shown_h = image_size.fit_points(block.get("w") or 0, block.get("h") or 0, image_size.content_width_pt())
+    shape.set("style", "width:%spt;height:%spt" % (shown_w, shown_h))
+    imagedata = ET.SubElement(shape, q(VML, "imagedata"))
+    imagedata.set(q(R, "id"), rel_id)
 
 
 def _read_table(table, ctx):
     parsed = []
     befores = []
     loose = []
+    columns = _grid_widths(table)
     for tr in table.findall(q(W, "tr")):
         row = []
         trpr = tr.find(q(W, "trPr"))
@@ -913,20 +2046,72 @@ def _read_table(table, ctx):
                 if horizontal is not None:
                     hmerge = horizontal.get(q(W, "val")) or "continue"
             runs = []
+            cell_images = []
+
+            def keep_media(block):
+                if block.get("type") == "image":
+                    cell_images.append(block)
+                elif block:
+                    loose.append(block)
+
             for paragraph in tc.findall(q(W, "p")):
                 if runs and _paragraph_text(paragraph):
                     runs.append({"text": "\n"})
                 inherited = _inherited_props("", ctx)
-                for run_node in _iter_runs(paragraph):
-                    for image in _images_in(run_node, ctx["rels"], ctx["files"]):
-                        loose.append(image)
-                    run = _inherit_run(_read_run(run_node, theme=ctx.get("theme")), inherited)
+                for kind, node in _walk_paragraph(paragraph):
+                    if kind == "alt":
+                        for block in _alternate_media(node, ctx):
+                            keep_media(block)
+                        continue
+                    if kind == "media":
+                        for block in _media_in(node, ctx):
+                            keep_media(block)
+                        continue
+                    for image in _run_images(node, ctx):
+                        keep_media(image)
+                    run = _inherit_run(_read_run(node, theme=ctx.get("theme")), inherited)
                     if run.get("text"):
                         runs.append(run)
-            row.append({"span": max(span, 1), "vmerge": vmerge, "hmerge": hmerge, "runs": runs})
+            limit = _cell_width_pt(tcpr, columns, len(row), span)
+            for image in cell_images:
+                image["w"], image["h"] = image_size.fit_points(image["w"], image["h"], limit)
+            item = {"span": max(span, 1), "vmerge": vmerge, "hmerge": hmerge, "runs": runs}
+            if cell_images:
+                item["images"] = cell_images
+            row.append(item)
         parsed.append(row)
     grid, merges = _expand_table(parsed, befores)
     return {"type": "table", "rows": grid, "merges": merges}, loose
+
+
+def _grid_widths(table):
+    grid = table.find(q(W, "tblGrid"))
+    if grid is None:
+        return []
+    widths = []
+    for col in grid.findall(q(W, "gridCol")):
+        try:
+            widths.append(int(col.get(q(W, "w")) or 0))
+        except ValueError:
+            widths.append(0)
+    return widths
+
+
+def _cell_width_pt(tcpr, columns, col, span):
+    if tcpr is not None:
+        tcw = tcpr.find(q(W, "tcW"))
+        if tcw is not None and (tcw.get(q(W, "type")) in (None, "dxa")):
+            try:
+                stated = int(tcw.get(q(W, "w")) or 0)
+            except ValueError:
+                stated = 0
+            if stated > 0:
+                return stated / 20.0
+    if columns:
+        width = sum(columns[col:col + span]) or columns[min(col, len(columns) - 1)]
+        if width > 0:
+            return width / 20.0
+    return image_size.content_width_pt()
 
 
 def _paragraph_text(paragraph):
@@ -961,6 +2146,8 @@ def _expand_table(parsed, befores=None):
                 col += span
                 continue
             entry = {"runs": cell["runs"]}
+            if cell.get("images"):
+                entry["images"] = cell["images"]
             row.append(entry)
             h_anchor = None
             if cell.get("hmerge") == "restart":
@@ -1011,23 +2198,71 @@ def _flag(node):
 
 def _store_images(blocks):
     assets = {}
+
+    def put(name, blob):
+        name = _basename(name) or "part.bin"
+        if _unsafe_asset_name(name):
+            name = "part.bin"
+        if name not in assets:
+            assets[name] = blob
+            return name
+        if assets[name] == blob:
+            return name
+        stem, dot, ext = name.rpartition(".")
+        number = 2
+        while True:
+            candidate = "%s-%d.%s" % (stem, number, ext) if dot else "%s-%d" % (name, number)
+            if candidate not in assets:
+                assets[candidate] = blob
+                return candidate
+            if assets[candidate] == blob:
+                return candidate
+            number += 1
+
     for block in blocks:
-        if block.get("type") != "image":
-            continue
-        blob = bytes(block.pop("_bytes", b"") or b"")
-        name = block.get("asset") or "image.bin"
-        if name in assets and assets[name] != blob:
-            stem, dot, ext = name.rpartition(".")
-            number = 2
-            while True:
-                candidate = "%s-%d.%s" % (stem, number, ext) if dot else "%s-%d" % (name, number)
-                if candidate not in assets:
-                    name = candidate
-                    break
-                number += 1
-            block["asset"] = name
-        assets[name] = blob
+        if block.get("type") == "image":
+            blob = bytes(block.pop("_bytes", b"") or b"")
+            block["asset"] = put(block.get("asset") or "image.bin", blob)
+        elif block.get("type") == "table":
+            for row in block.get("rows") or []:
+                for cell in row or []:
+                    if not isinstance(cell, dict):
+                        continue
+                    kept = []
+                    for image in cell.get("images") or []:
+                        if not isinstance(image, dict):
+                            continue
+                        blob = bytes(image.pop("_bytes", b"") or b"")
+                        if not blob:
+                            continue
+                        image["asset"] = put(image.get("asset") or "image.bin", blob)
+                        kept.append(image)
+                    if kept:
+                        cell["images"] = kept
+                    elif "images" in cell:
+                        cell.pop("images", None)
+        elif block.get("type") == "chart":
+            files = block.pop("_files", {}) or {}
+            mapping = {}
+            for name, blob in files.items():
+                mapping[name] = put(name, bytes(blob or b""))
+            if block.get("asset") in mapping:
+                block["asset"] = mapping[block["asset"]]
+            if block.get("preview") in mapping:
+                block["preview"] = mapping[block["preview"]]
+            _remap_rel_assets(block.get("rels") or [], mapping)
     return assets
+
+
+def _remap_rel_assets(rels, mapping):
+    for rel in rels or []:
+        if not isinstance(rel, dict):
+            continue
+        asset = rel.get("asset")
+        if asset in mapping:
+            rel["asset"] = mapping[asset]
+        if rel.get("rels"):
+            _remap_rel_assets(rel.get("rels"), mapping)
 
 
 def _title_from(blocks):
@@ -1207,7 +2442,28 @@ def _write_run(paragraph, run):
     text.text = run.get("text") or ""
 
 
-def _write_table(body, block, styles, style_ids, brush):
+def _place_media(block, assets, image_rels, extra_files, image_start, picture_id):
+    rel_id = "rId%d" % (image_start + len(image_rels))
+    asset = block["asset"]
+    blob = assets[asset]
+    blob = blob if isinstance(blob, bytes) else bytes(blob)
+    key = "word/media/" + asset
+    if key in extra_files and extra_files[key] != blob:
+        stem, dot, ext = asset.rpartition(".")
+        serial = 2
+        while True:
+            renamed = ("%s-%d.%s" % (stem, serial, ext)) if dot else "%s-%d" % (asset, serial)
+            key = "word/media/" + renamed
+            if key not in extra_files or extra_files[key] == blob:
+                asset = renamed
+                break
+            serial += 1
+    extra_files[key] = blob
+    image_rels.append((rel_id, "media/" + asset, IMAGE_REL))
+    return rel_id, picture_id
+
+
+def _write_table(body, block, styles, style_ids, brush, assets=None, image_rels=None, extra_files=None, image_start=1, picture_id=1):
     table = ET.SubElement(body, q(W, "tbl"))
     grid_pr = ET.SubElement(table, q(W, "tblGrid"))
     width = len(block["rows"][0])
@@ -1249,20 +2505,34 @@ def _write_table(body, block, styles, style_ids, brush):
                 for run in runs:
                     cell_overlay = _brush_style({"type": "paragraph", "style": "正文"}, brush, True) if brush else {}
                     _write_run(paragraph, _effective_run(run, cell_overlay, bool(cell_overlay)))
+            if not cover and assets is not None and image_rels is not None:
+                for image in cell.get("images") or []:
+                    if not isinstance(image, dict) or not image.get("asset"):
+                        continue
+                    rel_id, picture_id = _place_media(image, assets, image_rels, extra_files, image_start, picture_id)
+                    own = ET.SubElement(tc, q(W, "p"))
+                    _write_drawing(own, image, rel_id, picture_id)
+                    picture_id += 1
+    return picture_id
 
 
 def _write_image(body, block, rel_id, picture_id):
     paragraph = ET.SubElement(body, q(W, "p"))
+    _write_drawing(paragraph, block, rel_id, picture_id)
+
+
+def _write_drawing(paragraph, block, rel_id, picture_id):
     run = ET.SubElement(paragraph, q(W, "r"))
     drawing = ET.SubElement(run, q(W, "drawing"))
     inline = ET.SubElement(drawing, q(WP, "inline"))
-    cx, cy = str(pt_to_emu(block["w"])), str(pt_to_emu(block["h"]))
+    shown_w, shown_h = image_size.fit_points(block["w"], block["h"], image_size.content_width_pt())
+    cx, cy = str(pt_to_emu(shown_w)), str(pt_to_emu(shown_h))
     extent = ET.SubElement(inline, q(WP, "extent"))
     extent.set("cx", cx)
     extent.set("cy", cy)
     doc_pr = ET.SubElement(inline, q(WP, "docPr"))
     doc_pr.set("id", str(picture_id))
-    doc_pr.set("name", block["asset"])
+    doc_pr.set("name", "Picture %d" % picture_id)
     graphic = ET.SubElement(inline, q(A, "graphic"))
     data = ET.SubElement(graphic, q(A, "graphicData"))
     data.set("uri", PIC)
@@ -1270,7 +2540,7 @@ def _write_image(body, block, rel_id, picture_id):
     nv = ET.SubElement(pic, q(PIC, "nvPicPr"))
     c_nv = ET.SubElement(nv, q(PIC, "cNvPr"))
     c_nv.set("id", str(picture_id))
-    c_nv.set("name", block["asset"])
+    c_nv.set("name", "Picture %d" % picture_id)
     ET.SubElement(nv, q(PIC, "cNvPicPr"))
     fill = ET.SubElement(pic, q(PIC, "blipFill"))
     ET.SubElement(fill, q(A, "blip")).set(q(R, "embed"), rel_id)
@@ -1291,7 +2561,7 @@ def _write_page_break(body):
     ET.SubElement(run, q(W, "br")).set(q(W, "type"), "page")
 
 
-def _write_toc(body):
+def _write_toc(body, blocks=None, sections=None):
     paragraph = ET.SubElement(body, q(W, "p"))
     begin = ET.SubElement(paragraph, q(W, "r"))
     ET.SubElement(begin, q(W, "fldChar")).set(q(W, "fldCharType"), "begin")
@@ -1303,8 +2573,146 @@ def _write_toc(body):
     ET.SubElement(separate, q(W, "fldChar")).set(q(W, "fldCharType"), "separate")
     shown = ET.SubElement(paragraph, q(W, "r"))
     ET.SubElement(shown, q(W, "t")).text = "目录"
+    for label, page in _toc_entries(blocks, sections):
+        label_run = ET.SubElement(paragraph, q(W, "r"))
+        label_text = ET.SubElement(label_run, q(W, "t"))
+        label_text.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        label_text.text = label
+        if page is not None:
+            page_run = ET.SubElement(paragraph, q(W, "r"))
+            page_text = ET.SubElement(page_run, q(W, "t"))
+            page_text.text = str(page)
     end = ET.SubElement(paragraph, q(W, "r"))
     ET.SubElement(end, q(W, "fldChar")).set(q(W, "fldCharType"), "end")
+
+
+def _toc_entries(blocks, sections):
+    if not blocks:
+        return []
+    pages = {}
+    try:
+        import compose
+        pages = dict((id(block), number) for block, number in compose.heading_pages(blocks, sections or None))
+    except (ImportError, ValueError, TypeError):
+        pages = {}
+    entries = []
+    for block in blocks:
+        if block.get("type") != "heading":
+            continue
+        label = "".join(run.get("text", "") for run in block.get("runs") or []).strip()
+        if not label:
+            continue
+        entries.append((label + "\t", pages.get(id(block))))
+    return entries
+
+
+def _sections_active(sections):
+    if not sections:
+        return False
+    if len(sections) > 1:
+        return True
+    section = sections[0]
+    if section.get("header") or section.get("footer") or section.get("footer_page"):
+        return True
+    if section.get("pgSz") or section.get("pgMar"):
+        return True
+    return False
+
+
+def _section_at(index, sections):
+    chosen = sections[0]
+    for section in sections:
+        if int(section.get("at") or 0) <= index:
+            chosen = section
+        else:
+            break
+    return chosen
+
+
+def _footer_has_page(section, sections):
+    if section.get("footer_page") is True:
+        return True
+    if section.get("footer_page") is False:
+        return False
+    if len(sections) > 1 or section.get("header") or section.get("footer"):
+        return True
+    return False
+
+
+def _attach_sect(paragraph, section, sections, header_ids, footer_ids, next_break):
+    ppr = paragraph.find(q(W, "pPr"))
+    if ppr is None:
+        ppr = ET.Element(q(W, "pPr"))
+        paragraph.insert(0, ppr)
+    ppr.append(_sect_element(section, sections, header_ids, footer_ids, False, next_break))
+
+
+def _sect_element(section, sections, header_ids, footer_ids, final, next_break):
+    index = 0
+    for cursor, item in enumerate(sections):
+        if item is section:
+            index = cursor
+            break
+    sect = ET.Element(q(W, "sectPr"))
+    if header_ids:
+        header = ET.SubElement(sect, q(W, "headerReference"))
+        header.set(q(W, "type"), "default")
+        header.set(q(R, "id"), header_ids[index])
+        footer = ET.SubElement(sect, q(W, "footerReference"))
+        footer.set(q(W, "type"), "default")
+        footer.set(q(R, "id"), footer_ids[index])
+    if not final:
+        kind = ET.SubElement(sect, q(W, "type"))
+        kind.set(q(W, "val"), section.get("break") or next_break or "nextPage")
+    _write_page_box(sect, section)
+    return sect
+
+
+def _write_page_box(sect, section):
+    pg = section.get("pgSz") if isinstance(section.get("pgSz"), dict) else {}
+    size = ET.SubElement(sect, q(W, "pgSz"))
+    size.set(q(W, "w"), str(int(pg.get("w") or 11906)))
+    size.set(q(W, "h"), str(int(pg.get("h") or 16838)))
+    if pg.get("orient"):
+        size.set(q(W, "orient"), str(pg.get("orient")))
+    edges = section.get("pgMar") if isinstance(section.get("pgMar"), dict) else {}
+    mar = ET.SubElement(sect, q(W, "pgMar"))
+    for key, default in (
+        ("top", 1440), ("right", 1440), ("bottom", 1440), ("left", 1440),
+        ("header", 720), ("footer", 720), ("gutter", 0),
+    ):
+        mar.set(q(W, key), str(int(edges.get(key) if edges.get(key) is not None else default)))
+
+
+def _header_xml(text):
+    root = ET.Element(q(W, "hdr"))
+    paragraph = ET.SubElement(root, q(W, "p"))
+    if text:
+        node = ET.SubElement(ET.SubElement(paragraph, q(W, "r")), q(W, "t"))
+        node.text = text
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def _footer_xml(text, with_page):
+    root = ET.Element(q(W, "ftr"))
+    paragraph = ET.SubElement(root, q(W, "p"))
+    if text:
+        node = ET.SubElement(ET.SubElement(paragraph, q(W, "r")), q(W, "t"))
+        node.text = text
+    if with_page:
+        begin = ET.SubElement(paragraph, q(W, "r"))
+        ET.SubElement(begin, q(W, "fldChar")).set(q(W, "fldCharType"), "begin")
+        instr = ET.SubElement(paragraph, q(W, "r"))
+        token = ET.SubElement(instr, q(W, "instrText"))
+        token.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+        token.text = " PAGE "
+        separate = ET.SubElement(paragraph, q(W, "r"))
+        ET.SubElement(separate, q(W, "fldChar")).set(q(W, "fldCharType"), "separate")
+        shown = ET.SubElement(paragraph, q(W, "r"))
+        ET.SubElement(shown, q(W, "t")).text = "1"
+        end = ET.SubElement(paragraph, q(W, "r"))
+        ET.SubElement(end, q(W, "fldChar")).set(q(W, "fldCharType"), "end")
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
 def _document_root(body):
@@ -1317,22 +2725,20 @@ def _xml(tree):
     return ET.tostring(tree.getroot(), encoding="utf-8", xml_declaration=True)
 
 
-def _content_types(assets):
+def _content_types(assets, section_count=0, extra_overrides=None, extra_names=None):
     root = ET.Element(q(CT, "Types"))
     defaults = {
         "rels": "application/vnd.openxmlformats-package.relationships+xml",
         "xml": "application/xml",
     }
-    for name in assets:
-        ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
-        if ext in ("png",):
-            defaults[ext] = "image/png"
-        elif ext in ("jpg", "jpeg"):
-            defaults[ext] = "image/jpeg"
-        elif ext == "gif":
-            defaults[ext] = "image/gif"
-        elif ext == "emf":
-            defaults[ext] = "image/x-emf"
+    names = list(assets)
+    names.extend(extra_names or [])
+    for name in names:
+        ext = str(name).rsplit(".", 1)[-1].lower() if "." in str(name) else ""
+        if ext in IMAGE_TYPES:
+            defaults[ext] = IMAGE_TYPES[ext]
+        elif ext == "xlsx":
+            defaults[ext] = XLSX_CT
     for ext, content in defaults.items():
         node = ET.SubElement(root, q(CT, "Default"))
         node.set("Extension", ext)
@@ -1342,6 +2748,22 @@ def _content_types(assets):
         ("/word/styles.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"),
         ("/docProps/core.xml", "application/vnd.openxmlformats-package.core-properties+xml"),
     ):
+        node = ET.SubElement(root, q(CT, "Override"))
+        node.set("PartName", part)
+        node.set("ContentType", content)
+    for index in range(section_count or 0):
+        for name, content in (
+            ("/word/header%d.xml" % (index + 1), "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"),
+            ("/word/footer%d.xml" % (index + 1), "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"),
+        ):
+            node = ET.SubElement(root, q(CT, "Override"))
+            node.set("PartName", name)
+            node.set("ContentType", content)
+    seen = set()
+    for part, content in extra_overrides or []:
+        if part in seen:
+            continue
+        seen.add(part)
         node = ET.SubElement(root, q(CT, "Override"))
         node.set("PartName", part)
         node.set("ContentType", content)
@@ -1355,11 +2777,15 @@ def _package_rels():
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def _document_rels(images):
+def _document_rels(images, header_ids=None, footer_ids=None):
     root = ET.Element(q(REL, "Relationships"))
     _rel(root, "rId1", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles", "styles.xml")
-    for rel_id, asset in images:
-        _rel(root, rel_id, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", "media/" + asset)
+    for index, rel_id in enumerate(header_ids or []):
+        _rel(root, rel_id, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header", "header%d.xml" % (index + 1))
+    for index, rel_id in enumerate(footer_ids or []):
+        _rel(root, rel_id, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer", "footer%d.xml" % (index + 1))
+    for rel_id, target, rel_type in images:
+        _rel(root, rel_id, rel_type, target)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 

@@ -43,13 +43,8 @@ PLUGIN_PREFIXES = (
     'plugins/imageformats/qwebp.dll',
     'plugins/iconengines/qsvgicon.dll',
 )
-APP_FILES = (
-    'app.py', 'qt_compat.py', 'platform_support.py', 'template_library.py', 'appearance.py',
-    'templates.py', 'preset_store.py', 'rule_schema.py', 'worker.py', 'Main.qml', 'Advanced.qml',
-    'AppearancePage.qml', 'Opening.qml', 'TemplateHome.qml', '使用说明.txt', 'README.md',
-    'requirements-windows.txt', '可选字体/README.txt',
-    'ui/ProgressPanel.qml', 'ui/qmldir',
-)
+import app_files
+APP_FILES = app_files.names(ROOT)
 # Data exports of ucrtbase. Marking a code export DATA breaks the loader.
 UCRT_DATA = {
     '_errno', '_doserrno', '__argc', '__argv', '__wargv', '_environ', '_wenviron', 'environ',
@@ -328,6 +323,7 @@ def assemble():
         dest = STAGE / path.relative_to(ROOT)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, dest)
+    app_files.require_tree(ROOT, STAGE)
     docs = STAGE / 'docs'
     docs.mkdir(exist_ok=True)
     for path in (ROOT / 'docs').glob('*.png'):

@@ -44,6 +44,7 @@ def overlay(app):
     mark = icons / 'hicolor' / '256x256' / 'apps' / 'wenju.png'
     if mark.exists():
         shutil.copy2(mark, app / '.DirIcon')
+    package_win7.app_files.require_tree(ROOT, app)
 
 
 def show_failure():

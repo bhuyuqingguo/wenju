@@ -61,7 +61,7 @@ class Appearance(QObject):
           'muted':['#7b8899','#8795a5','#a0aab7','#a3adba','#9eafbf'],
           'soft':['#eaf0f6','#e9eff6','#e8eef5','#eaf1f8','#e9eef4','#edf2f7','#d6e3ef','#e3edf6'],
           'field':['#f9fafc','#f7f9fc','#f1f4f8'],
-          'line':['#dce3eb','#dce4ed','#e0e5ed','#dbe5ef','#e2e7ee','#edf0f5','#dfe5ed','#e0e6ee','#dfe6ee','#d5dee8','#edf0f4'],
+          'line':['#dce3eb','#dce4ed','#e0e5ed','#dbe5ef','#e2e7ee','#edf0f5','#dfe5ed','#e0e6ee','#dfe6ee','#d5dee8','#edf0f4','#e6ebf1'],
           'navMuted':['#a6bbcd','#738fa6','#adc1d0','#819bad','#9aabba','#688297'],
           'selected':['#2c526f','#35536c','#1e405d','#49647b','#45647d'],
           'gold':['#e6b35f','#c79a46'], 'success':['#35806c','#8cbaa8','#5a9684']}

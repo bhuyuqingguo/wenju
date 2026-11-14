@@ -4,6 +4,7 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 
+import image_size
 from wenju_format import WenjuDoc, load as load_package, save as save_package, validate
 
 
@@ -133,9 +134,33 @@ def _copy_blocks(doc, index, assets):
             continue
         block = json.loads(json.dumps(block))
         if block.get("type") == "image":
-            block["asset"] = mapping[block["asset"]]
+            block["asset"] = mapping.get(block["asset"], block["asset"])
+        elif block.get("type") == "chart":
+            if block.get("asset") in mapping:
+                block["asset"] = mapping[block["asset"]]
+            if block.get("preview") in mapping:
+                block["preview"] = mapping[block["preview"]]
+            _remap_chart_rels(block.get("rels") or [], mapping)
+        elif block.get("type") == "table":
+            for row in block.get("rows") or []:
+                for cell in row or []:
+                    if not isinstance(cell, dict):
+                        continue
+                    for image in cell.get("images") or []:
+                        if isinstance(image, dict) and image.get("asset") in mapping:
+                            image["asset"] = mapping[image["asset"]]
         copied.append(block)
     return copied
+
+
+def _remap_chart_rels(rels, mapping):
+    for rel in rels or []:
+        if not isinstance(rel, dict):
+            continue
+        if rel.get("asset") in mapping:
+            rel["asset"] = mapping[rel["asset"]]
+        if rel.get("rels"):
+            _remap_chart_rels(rel.get("rels"), mapping)
 
 
 def merge_export(paths, out_wenju, out_docx, template=None, progress=None):
@@ -262,7 +287,7 @@ def _lines(block):
     if kind == "table":
         spans = _span_map(block)
         return max(1, sum(_row_span_lines(block, spans, r) for r in range(len(block.get("rows") or []))))
-    if kind == "image":
+    if kind in ("image", "chart"):
         return max(1, int(round(float(block.get("h") or 20) / 20.0)))
     if kind in ("heading", "paragraph"):
         count = len(_run_text(block.get("runs")))
@@ -393,16 +418,47 @@ def _build_docx(doc, pages):
         header_ids.append(add_rel("header", header_name))
         footer_ids.append(add_rel("footer", footer_name))
     drawing_seq = 1
+    chart_seq = 1
+    chart_plans = {}
+    chart_overrides = []
+    import wenju_format
     for block in doc.blocks:
-        if block.get("type") != "image":
-            continue
-        asset = block["asset"]
-        ext = os.path.splitext(asset)[1].lower() or ".png"
-        target = "media/%d%s" % (drawing_seq, ext)
-        parts["word/" + target] = doc.assets[asset]
-        media_ids[id(block)] = (add_rel("image", target), drawing_seq, ext)
-        drawing_seq += 1
-    document, overrides = _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids)
+        if block.get("type") == "image":
+            asset = block["asset"]
+            ext = os.path.splitext(asset)[1].lower() or ".png"
+            target = "media/%d%s" % (drawing_seq, ext)
+            parts["word/" + target] = doc.assets[asset]
+            media_ids[id(block)] = (add_rel("image", target), drawing_seq, ext)
+            drawing_seq += 1
+        elif block.get("type") == "table":
+            for row in block.get("rows") or []:
+                for cell in row:
+                    if not isinstance(cell, dict):
+                        continue
+                    for image in cell.get("images") or []:
+                        asset = image.get("asset") if isinstance(image, dict) else None
+                        if not asset or asset not in doc.assets:
+                            continue
+                        ext = os.path.splitext(asset)[1].lower() or ".png"
+                        target = "media/%d%s" % (drawing_seq, ext)
+                        parts["word/" + target] = doc.assets[asset]
+                        media_ids[id(image)] = (add_rel("image", target), drawing_seq, ext)
+                        drawing_seq += 1
+        elif block.get("type") == "chart":
+            plan = wenju_format.prepare_chart(block, doc.assets, chart_seq)
+            ids = []
+            for rel_kind, target in plan["doc_rels"]:
+                ids.append(add_rel(rel_kind, target))
+            plan["ids"] = ids
+            plan["seq"] = drawing_seq
+            for part_name, blob in plan["files"]:
+                parts[part_name] = blob
+            chart_overrides.extend(plan["overrides"])
+            chart_plans[id(block)] = plan
+            chart_seq += 1
+            drawing_seq += 1
+    document, overrides = _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids, chart_plans)
+    overrides = list(overrides) + chart_overrides
     parts["word/document.xml"] = document
     parts["word/styles.xml"] = _styles_xml(_first_font(_all_runs(doc)) or "仿宋")
     parts["word/settings.xml"] = _xml(_settings())
@@ -424,7 +480,7 @@ def _section_for(index, sections):
     return chosen
 
 
-def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids):
+def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids, chart_plans=None):
     body = ET.Element(_w("body"))
     last_p = None
     open_section = None
@@ -450,9 +506,17 @@ def _document_xml(doc, pages, sections, header_ids, footer_ids, media_ids):
             last_p = _emit_runs(body, block.get("runs"), style=block.get("style") or "Normal")
         elif kind == "image":
             rel_id, seq, _ext = media_ids[id(block)]
-            last_p = _emit_image(body, rel_id, seq, block.get("w") or 40, block.get("h") or 20)
+            shown_w, shown_h = image_size.fit_points(block.get("w") or 40, block.get("h") or 20, image_size.content_width_pt())
+            last_p = _emit_image(body, rel_id, seq, shown_w, shown_h)
+        elif kind == "chart":
+            plan = (chart_plans or {}).get(id(block))
+            if plan and plan.get("ids"):
+                import wenju_format
+                fitted = dict(block)
+                fitted["w"], fitted["h"] = image_size.fit_points(block.get("w") or 40, block.get("h") or 20, image_size.content_width_pt())
+                last_p = wenju_format.write_chart_paragraph(body, fitted, plan["ids"], plan.get("seq") or 1)
         elif kind == "table":
-            _emit_table(body, block)
+            _emit_table(body, block, media_ids)
             last_p = None
     if open_section is None:
         open_section = sections[0]
@@ -536,25 +600,45 @@ def _instr(paragraph, text):
 def _emit_runs(parent, runs, style=None, outline=None):
     paragraph = _emit_paragraph(parent, None, style=style, outline=outline)
     for run in runs or []:
-        _text_run(paragraph, run.get("text") or "", run.get("eastAsia"), run.get("size_pt") or 12, run.get("ascii"))
+        _text_run(
+            paragraph,
+            run.get("text") or "",
+            run.get("eastAsia"),
+            run.get("size_pt") or 12,
+            run.get("ascii"),
+            run.get("hAnsi"),
+            run.get("bold"),
+            run.get("italic"),
+            run.get("underline"),
+            run.get("color"),
+        )
     if not runs:
         _text_run(paragraph, "", "仿宋", 12, None)
     return paragraph
 
 
-def _text_run(paragraph, text, font, size_pt=12, ascii_font=None):
+def _text_run(paragraph, text, font, size_pt=12, ascii_font=None, h_ansi=None, bold=None, italic=None, underline=None, color=None):
     run = ET.SubElement(paragraph, _w("r"))
     rpr = ET.SubElement(run, _w("rPr"))
     fonts = ET.SubElement(rpr, _w("rFonts"))
     face = font or "仿宋"
     fonts.set(_w("eastAsia"), face)
     western = ascii_font or face
-    for attr in ("ascii", "hAnsi", "cs"):
-        fonts.set(_w(attr), western)
+    fonts.set(_w("ascii"), western)
+    fonts.set(_w("hAnsi"), h_ansi or western)
+    fonts.set(_w("cs"), western)
     if size_pt:
         half = str(int(round(float(size_pt) * 2)))
         ET.SubElement(rpr, _w("sz")).set(_w("val"), half)
         ET.SubElement(rpr, _w("szCs")).set(_w("val"), half)
+    if bold:
+        ET.SubElement(rpr, _w("b"))
+    if italic:
+        ET.SubElement(rpr, _w("i"))
+    if underline:
+        ET.SubElement(rpr, _w("u")).set(_w("val"), "single")
+    if color:
+        ET.SubElement(rpr, _w("color")).set(_w("val"), str(color))
     node = ET.SubElement(run, _w("t"))
     if text.startswith(" ") or text.endswith(" "):
         node.set(XML_SPACE, "preserve")
@@ -604,23 +688,48 @@ def _pt_to_emu(value):
 
 def _emit_image(parent, rel_id, seq, width, height):
     paragraph = ET.SubElement(parent, _w("p"))
+    _emit_inline(paragraph, rel_id, seq, width, height)
+    return paragraph
+
+
+def _emit_inline(paragraph, rel_id, seq, width, height):
+    """One inline drawing. wp:extent and a:ext use the same size, and docPr ids stay unique."""
     run = ET.SubElement(paragraph, _w("r"))
     drawing = ET.SubElement(run, _w("drawing"))
     inline = ET.SubElement(drawing, "{%s}inline" % WP)
+    cx = str(_pt_to_emu(width))
+    cy = str(_pt_to_emu(height))
     extent = ET.SubElement(inline, "{%s}extent" % WP)
-    extent.set("cx", str(_pt_to_emu(width)))
-    extent.set("cy", str(_pt_to_emu(height)))
+    extent.set("cx", cx)
+    extent.set("cy", cy)
     doc_pr = ET.SubElement(inline, "{%s}docPr" % WP)
     doc_pr.set("id", str(seq))
-    doc_pr.set("name", "Picture%d" % seq)
+    doc_pr.set("name", "Picture %d" % seq)
     graphic = ET.SubElement(inline, "{%s}graphic" % A)
     data = ET.SubElement(graphic, "{%s}graphicData" % A)
     data.set("uri", PIC)
     pic = ET.SubElement(data, "{%s}pic" % PIC)
+    nv = ET.SubElement(pic, "{%s}nvPicPr" % PIC)
+    cnv = ET.SubElement(nv, "{%s}cNvPr" % PIC)
+    cnv.set("id", str(seq))
+    cnv.set("name", "Picture %d" % seq)
+    ET.SubElement(nv, "{%s}cNvPicPr" % PIC)
     fill = ET.SubElement(pic, "{%s}blipFill" % PIC)
     blip = ET.SubElement(fill, "{%s}blip" % A)
     blip.set(_r("embed"), rel_id)
-    return paragraph
+    stretch = ET.SubElement(fill, "{%s}stretch" % A)
+    ET.SubElement(stretch, "{%s}fillRect" % A)
+    sp = ET.SubElement(pic, "{%s}spPr" % PIC)
+    xfrm = ET.SubElement(sp, "{%s}xfrm" % A)
+    off = ET.SubElement(xfrm, "{%s}off" % A)
+    off.set("x", "0")
+    off.set("y", "0")
+    ext = ET.SubElement(xfrm, "{%s}ext" % A)
+    ext.set("cx", cx)
+    ext.set("cy", cy)
+    geom = ET.SubElement(sp, "{%s}prstGeom" % A)
+    geom.set("prst", "rect")
+    ET.SubElement(geom, "{%s}avLst" % A)
 
 
 def _span_map(block):
@@ -662,7 +771,7 @@ def _row_span_lines(block, spans, r_i):
     return lines
 
 
-def _emit_table(parent, block):
+def _emit_table(parent, block, media_ids=None):
     tbl = ET.SubElement(parent, _w("tbl"))
     props = ET.SubElement(tbl, _w("tblPr"))
     margins = ET.SubElement(props, _w("tblCellMar"))
@@ -676,8 +785,9 @@ def _emit_table(parent, block):
     for r_i, row in enumerate(block["rows"]):
         tr = ET.SubElement(tbl, _w("tr"))
         height = ET.SubElement(ET.SubElement(tr, _w("trPr")), _w("trHeight"))
-        height.set(_w("val"), str(LINE_TWIP * _row_span_lines(block, spans, r_i)))
-        height.set(_w("hRule"), "exact")
+        image_twips = _row_image_twips(row)
+        height.set(_w("val"), str(LINE_TWIP * _row_span_lines(block, spans, r_i) + image_twips))
+        height.set(_w("hRule"), "atLeast" if image_twips else "exact")
         c_i = 0
         while c_i < len(row):
             found = _merge_at(spans, r_i, c_i)
@@ -697,10 +807,11 @@ def _emit_table(parent, block):
                 if _rowspan(merge) > 1:
                     vm = ET.SubElement(tcpr, _w("vMerge"))
                     vm.set(_w("val"), "restart")
-                _emit_rectangle(tc, block, merge)
+                _emit_rectangle(tc, block, merge, media_ids)
                 c_i += _colspan(merge)
             else:
-                _emit_cell_text(tc, _run_text(row[c_i].get("runs")), _run_font(row[c_i].get("runs")))
+                _emit_cell_runs(tc, row[c_i].get("runs"))
+                _emit_cell_images(tc, row[c_i], media_ids)
                 c_i += 1
     return tbl
 
@@ -730,24 +841,82 @@ def _emit_continue(tr, merge):
     _emit_paragraph(tc, "")
 
 
-def _emit_rectangle(parent, block, merge):
-    emitted = False
+def _row_image_twips(row):
+    total = 0
+    for cell in row:
+        if not isinstance(cell, dict):
+            continue
+        for image in cell.get("images") or []:
+            if isinstance(image, dict) and image.get("h"):
+                total += int(round(float(image["h"]) * 20))
+    return total
+
+
+def _emit_cell_images(parent, cell, media_ids):
+    if not media_ids or not isinstance(cell, dict):
+        return
+    for image in cell.get("images") or []:
+        packed = media_ids.get(id(image))
+        if not packed:
+            continue
+        rel_id, seq, _ext = packed
+        shown_w, shown_h = image_size.fit_points(image.get("w") or 40, image.get("h") or 20, image_size.content_width_pt())
+        paragraph = ET.SubElement(parent, _w("p"))
+        _emit_inline(paragraph, rel_id, seq, shown_w, shown_h)
+
+
+def _emit_rectangle(parent, block, merge, media_ids=None):
+    runs = []
     for r in range(merge["row"], merge["row"] + _rowspan(merge)):
         for c in range(merge["col"], merge["col"] + _colspan(merge)):
             cell = block["rows"][r][c]
-            raw = _run_text(cell.get("runs"))
-            if not raw:
+            found = [run for run in (cell.get("runs") or []) if isinstance(run, dict) and run.get("text")]
+            if not found:
                 continue
-            _emit_cell_text(parent, raw, _run_font(cell.get("runs")))
-            emitted = True
-    if not emitted:
+            if runs and _run_text(runs) and not str(runs[-1].get("text") or "").endswith("\n"):
+                runs.append({"text": "\n"})
+            runs.extend(found)
+    if runs:
+        _emit_cell_runs(parent, runs)
+    else:
         _emit_paragraph(parent, "")
+    for r in range(merge["row"], merge["row"] + _rowspan(merge)):
+        for c in range(merge["col"], merge["col"] + _colspan(merge)):
+            _emit_cell_images(parent, block["rows"][r][c], media_ids)
 
 
-def _emit_cell_text(parent, text, font):
-    parts = text.split("\n") if text else [""]
-    for part in parts:
-        _emit_paragraph(parent, part, font=font)
+def _emit_cell_runs(parent, runs):
+    paragraphs = [[]]
+    for run in runs or []:
+        if not isinstance(run, dict):
+            continue
+        parts = (run.get("text") or "").split("\n")
+        for index, part in enumerate(parts):
+            if part:
+                copied = dict(run)
+                copied["text"] = part
+                paragraphs[-1].append(copied)
+            if index < len(parts) - 1:
+                paragraphs.append([])
+    paragraphs = [item for item in paragraphs if item] or [[]]
+    for item in paragraphs:
+        if not item:
+            _emit_paragraph(parent, "")
+            continue
+        paragraph = _emit_paragraph(parent, None)
+        for run in item:
+            _text_run(
+                paragraph,
+                run.get("text") or "",
+                run.get("eastAsia"),
+                run.get("size_pt") or 12,
+                run.get("ascii"),
+                run.get("hAnsi"),
+                run.get("bold"),
+                run.get("italic"),
+                run.get("underline"),
+                run.get("color"),
+            )
 
 
 def _header_xml(text):
@@ -821,6 +990,8 @@ def _rels_xml(rels):
         "header": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/header",
         "footer": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer",
         "image": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        "chart": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",
+        "chartex": "http://schemas.microsoft.com/office/2014/relationships/chartEx",
     }
     lines = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', '<Relationships xmlns="%s">' % REL_NS]
     for rel_id, kind, target in rels:
@@ -829,13 +1000,18 @@ def _rels_xml(rels):
     return "\n".join(lines).encode("utf-8")
 
 
-def _content_types(parts, _overrides):
+def _content_types(parts, extra_overrides):
     defaults = (
         ("rels", "application/vnd.openxmlformats-package.relationships+xml"),
         ("xml", "application/xml"),
         ("png", "image/png"),
         ("jpeg", "image/jpeg"),
         ("jpg", "image/jpeg"),
+        ("gif", "image/gif"),
+        ("bmp", "image/bmp"),
+        ("emf", "image/x-emf"),
+        ("wmf", "image/x-wmf"),
+        ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         ("bin", "application/octet-stream"),
     )
     overrides = [
@@ -848,6 +1024,8 @@ def _content_types(parts, _overrides):
             overrides.append(("/" + name, "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"))
         if re.match(r"word/footer\d+\.xml$", name):
             overrides.append(("/" + name, "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"))
+    for part, value in extra_overrides or []:
+        overrides.append((part, value))
     lines = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', '<Types xmlns="%s">' % CT_NS]
     for ext, value in defaults:
         lines.append('<Default Extension="%s" ContentType="%s"/>' % (ext, value))
