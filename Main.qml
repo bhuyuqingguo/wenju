@@ -213,7 +213,7 @@ ApplicationWindow {
         }
         Column {x:30;anchors.bottom:parent.bottom;anchors.bottomMargin:28;spacing:9
             Row {spacing:7;Rectangle{width:6;height:6;radius:3;color:appearance.palette["#8cbaa8"];anchors.verticalCenter:parent.verticalCenter} Txt{text:"离线运行 · 文档不上传";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale)}}
-            Txt {text:"3.3.0  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
+            Txt {text:"3.4.0  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
             Txt {text:"使用帮助 ↗";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale);MouseArea{anchors.fill:parent;cursorShape:Qt.PointingHandCursor;onClicked:bridge.help()}}
         }
     }

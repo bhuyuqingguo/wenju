@@ -11,7 +11,7 @@ OUT = ROOT / 'dist'
 sys.path.insert(0, str(ROOT / 'launcher'))
 import package_win7
 
-VERSION = '3.3.0'
+VERSION = '3.4.0'
 APP_NAMES = package_win7.APP_FILES + (
     'launcher/打开文矩.sh', 'launcher/start-kylin.sh', 'launcher/diagnose-kylin.sh',
     'launcher/wenju.desktop', 'launcher/win7-vm.ps1',
@@ -133,6 +133,7 @@ def main():
     sums = [f'{digest}  WenJu_{VERSION}_Windows_Portable.zip']
     win7 = OUT / f'WenJu_{VERSION}_Windows7_x64_Portable.zip'
     sums.append(f'{hashlib.sha256(win7.read_bytes()).hexdigest()}  {win7.name}')
+    # These 3.3.0 archives are the glibc 2.17 runtimes. VERSION names the new packages.
     for arch, name in (('x86_64', 'WenJu_3.3.0_KylinV10_x86_64.tar.gz'), ('arm64', 'WenJu_3.3.0_KylinV10_arm64.tar.gz')):
         src = cache / name
         if not src.exists():

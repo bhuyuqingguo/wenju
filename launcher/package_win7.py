@@ -22,7 +22,7 @@ PY_ZIP = CACHE / 'py.zip'
 WHEEL_DIR = CACHE / 'wheels'
 OUT = ROOT / 'dist'
 STAGE = OUT / 'win7-stage' / '文矩'
-ARCHIVE = OUT / 'WenJu_3.3.0_Windows7_x64_Portable.zip'
+ARCHIVE = OUT / 'WenJu_3.4.0_Windows7_x64_Portable.zip'
 
 KEEP_PYD = {
     'QtCore.pyd', 'QtGui.pyd', 'QtWidgets.pyd', 'QtQml.pyd', 'QtQuick.pyd',
@@ -282,7 +282,7 @@ def build_launcher(stage):
 
 def write_note(stage):
     (stage / 'Windows7说明.txt').write_text(textwrap.dedent("""\
-        文矩 3.3.0 Windows 7 便携包（64 位）
+        文矩 3.4.0 Windows 7 便携包（64 位）
 
         适用系统：Windows 7 SP1 x64，并安装平台更新 KB2670838（提供 d3d11.dll；Qt 5.15 会直接加载它）。
         本包自带 Python 3.8.10、PySide2 5.15.2.1（Qt 5.15.2）、vcruntime140、msvcp140、
