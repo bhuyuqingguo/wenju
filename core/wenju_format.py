@@ -12,7 +12,7 @@ from xml.etree import ElementTree as ET
 
 import image_size
 
-APP_VERSION = "3.3.0"
+APP_VERSION = "3.4.0"
 FORMAT = "wenju"
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
