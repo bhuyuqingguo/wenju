@@ -35,6 +35,24 @@ def _rva_to_off(sections, rva):
     return None
 
 
+def require_native_launcher(path):
+    data = path.read_bytes()
+    pe = struct.unpack_from('<I', data, 0x3c)[0]
+    optional = pe + 24
+    if data[:2] != b'MZ' or data[pe:pe+4] != b'PE\0\0':
+        raise ValueError(f'Invalid Windows launcher: {path}')
+    magic = struct.unpack_from('<H', data, optional)[0]
+    if magic not in (0x10b, 0x20b):
+        raise ValueError(f'Invalid PE optional header: {path}')
+    directory = optional + (112 if magic == 0x20b else 96)
+    if struct.unpack_from('<II', data, directory + 14 * 8) != (0, 0):
+        raise ValueError(f'Launcher depends on .NET: {path}')
+    hard, delay = pe_imports(path)
+    if any(dll.lower() in ('mscoree.dll', 'hostfxr.dll', 'coreclr.dll')
+           for dll, _ in hard + delay):
+        raise ValueError(f'Launcher imports .NET: {path}')
+
+
 def pe_imports(path):
     data = path.read_bytes()
     if data[:2] != b'MZ':

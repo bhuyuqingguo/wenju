@@ -10,8 +10,9 @@ ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / 'dist'
 sys.path.insert(0, str(ROOT / 'launcher'))
 import package_win7
+from pe_imports import require_native_launcher
 
-VERSION = '3.3.0'
+VERSION = '3.4.1'
 APP_NAMES = package_win7.APP_FILES + (
     'launcher/打开文矩.sh', 'launcher/start-kylin.sh', 'launcher/diagnose-kylin.sh',
     'launcher/wenju.desktop', 'launcher/win7-vm.ps1',
@@ -97,7 +98,9 @@ def windows_tree(src_zip, work):
     shutil.move(str(raw_app), str(app))
     shutil.rmtree(work / '_raw')
     overlay(app)
-    package_win7.build_launcher(app)
+    native = ROOT / '文矩.exe'
+    require_native_launcher(native)
+    shutil.copy2(native, app / '文矩.exe')
     shutil.copy2(app / '文矩.exe', work / '打开文矩.exe')
     subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'exe', str(work / '打开文矩.exe')])
     subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'exe', str(app / '文矩.exe')])

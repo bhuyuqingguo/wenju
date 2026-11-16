@@ -1,10 +1,10 @@
 """Package an already prepared Windows runtime, excluding all user data."""
 from pathlib import Path
-import shutil,sys,zipfile,struct,zlib
+import re,sys,zipfile,struct,zlib
 
 ROOT=Path(__file__).resolve().parent.parent
 OUT=ROOT/'dist';OUT.mkdir(exist_ok=True)
-ARCHIVE=OUT/'WenJu_3.3.0_Windows_Portable.zip'
+ARCHIVE=OUT/'文矩_3.4.1_Windows_x64_免NET.zip'
 
 class ChineseZipInfo(zipfile.ZipInfo):
     def _encodeFilenameFlags(self):
@@ -13,11 +13,15 @@ class ChineseZipInfo(zipfile.ZipInfo):
 def include(p):
     rel=p.relative_to(ROOT)
     if '__pycache__' in rel.parts or p.suffix=='.pyc':return False
-    if rel.parts[0]=='core' and (p.name.endswith('_已整理.docx') or p.name.endswith('_整理报告.txt')):return False
+    if rel.parts[0]=='core' and re.search(r'(?:_已整理(?: \(\d+\))?\.docx|_整理报告(?: \(\d+\))?\.txt)$',p.name):return False
     return True
 
 sys.path.insert(0, str(ROOT / 'launcher'))
 import app_files
+from pe_imports import require_native_launcher
+from check_icons import check_exe
+require_native_launcher(ROOT / "文矩.exe")
+check_exe(ROOT / "文矩.exe")
 app_files.require_tree(ROOT)
 files=[p for name in ('runtime','core') for p in (ROOT/name).rglob('*') if p.is_file() and include(p)]
 files += [ROOT / '文矩.exe']

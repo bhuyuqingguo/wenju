@@ -1174,7 +1174,23 @@ if hasattr(QGuiApplication, 'setDesktopFileName'):
 # argv[0] becomes the X11 WM_CLASS instance. Keep it the same as StartupWMClass.
 if sys.platform != 'win32':
     sys.argv[0] = 'wenju'
+if sys.platform == 'win32':
+    import windows_identity
+    windows_identity.initialize()
 app = QApplication(sys.argv)
+incoming = [str(Path(arg).resolve()) for arg in sys.argv[1:] if not arg.startswith('--') and Path(arg).is_file()]
+session = None
+if sys.platform == 'win32' and not any(arg.startswith(('--test-', '--capture', '--smoke')) for arg in sys.argv[1:]):
+    from single_instance import LaunchSession
+    from qt_compat import load
+    QMessageBox = load()[2].QMessageBox
+    session = LaunchSession(DATA)
+    try:
+        if not session.acquire(incoming):
+            sys.exit(0)
+    except RuntimeError as exc:
+        QMessageBox.warning(None, '文矩', '无法连接已运行的文矩窗口：' + str(exc))
+        sys.exit(1)
 set_color_scheme(app, False)
 palette=QPalette()
 for role,color in [(QPalette.Window,'#f4f6f9'),(QPalette.WindowText,'#22344a'),(QPalette.Base,'#f9fafc'),(QPalette.Text,'#22344a'),(QPalette.Button,'#ffffff'),(QPalette.ButtonText,'#22344a'),(QPalette.Highlight,'#245a83'),(QPalette.HighlightedText,'#ffffff')]:
@@ -1184,9 +1200,6 @@ for font_file in fontfallback.application_font_files(ROOT):
     QFontDatabase.addApplicationFont(str(font_file))
 fontfallback.reset_index()
 app.setApplicationName('wenju')
-if sys.platform == 'win32':
-    import ctypes
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('WenJu.Desktop.3.3')
 app.setOrganizationName('WenJu')
 app.setWindowIcon(brand_icon())
 app.setFont(QFont('Microsoft YaHei UI',10))
@@ -1201,6 +1214,10 @@ if not engine.rootObjects(): sys.exit(1)
 window = engine.rootObjects()[0]
 if hasattr(window, 'setIcon'):
     window.setIcon(app.windowIcon())
+
+identity = windows_identity.WindowIdentity(window, ROOT) if sys.platform == 'win32' else None
+if identity:
+    app.aboutToQuit.connect(identity.close)
 
 def _window_drop(paths):
     page = window.property('page')
@@ -1217,8 +1234,18 @@ def _window_hover(hot):
     window.setProperty('dropHot', bool(hot))
 
 import_drop.install_window_drop(window, _window_drop, _window_hover, import_drop.CONVERT_SUFFIXES)
-incoming=[arg for arg in sys.argv[1:] if not arg.startswith('--') and Path(arg).is_file()]
 if incoming:bridge.add(incoming)
+def reuse_window(paths):
+    if paths:
+        _window_drop(paths)
+    if window.visibility() == QQuickWindow.Minimized:
+        window.showNormal()
+    window.raise_()
+    window.requestActivate()
+
+if session:
+    session.set_handler(reuse_window)
+window.show()
 if '--test-opening' in sys.argv:
     before=copy.deepcopy(bridge.store.rules)
     def opening_capture():
@@ -1738,6 +1765,12 @@ if '--capture-layout' in sys.argv:
         raise AssertionError('转成 Word 没有处于选中')
     QTimer.singleShot(700, capture_layout)
     QTimer.singleShot(20000, lambda: app.exit(2))
-exit_code=exec_app(app)
-delete_qobject(engine)
+try:
+    exit_code=exec_app(app)
+finally:
+    if identity:
+        identity.close()
+    if session:
+        session.close()
+    delete_qobject(engine)
 sys.exit(exit_code)

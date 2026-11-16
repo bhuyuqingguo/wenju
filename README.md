@@ -2,7 +2,7 @@
 
 **文档，自有章法。** 离线 Word 文档格式整理工具，Qt Quick / QML 桌面界面与 Python 文档处理引擎。
 
-## 3.3.0 功能
+## 3.4.1 功能
 
 - 115 套场景模板（含 10 套红头文件），按工作用途提供内容提示；同类文种共享规范版式，可进一步编辑。
 - 红头支持机关名称、发文字号、签发人和红线；填写机关名称后使用。不包含印章、版记或完整公文标准校验。
@@ -54,11 +54,13 @@ python -m venv .venv
 .venv\Scripts\python.exe app.py
 ```
 
-编译 EXE 启动入口（Windows 系统自带的 .NET Framework C# 编译器）：
+编译原生 EXE 启动入口（构建机需 Visual Studio C++ Build Tools 和 Windows SDK）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File launcher/build.ps1
 ```
+
+Windows x64 免安装包的原生启动器使用静态 C++ 运行库。使用电脑无需 .NET Framework、C++ 构建工具或管理员权限。请整包解压到持久目录再固定任务栏。移动便携目录后，已有桌面和开始菜单快捷方式会在从新目录启动时更新；如旧任务栏固定项仍指向旧入口，请手动取消固定文矩并重新固定。运行 `文矩.exe --shortcuts` 可创建用户桌面与开始菜单快捷方式。
 
 `runtime` 不进入 Git。便携包构建需先准备 Python Windows embeddable runtime，以及相应 PySide6 Essentials / Shiboken6 运行库。`launcher/package.py` 将已准备好的运行环境和应用组成发布包。
 
