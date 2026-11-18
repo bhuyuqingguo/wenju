@@ -6,10 +6,12 @@ from io import BytesIO
 import re
 import shutil
 import struct
+import sys
 import tarfile
 import tempfile
 import zipfile
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import app_files
 import package_win7
 
@@ -43,7 +45,9 @@ def stage_linux(work):
 def linux_archive(source, work, dest, arch):
     prefix = APP + '/runtime'
     python_name = prefix + '/bin/python3'
+    python_binary = python_name + '.11'
     saw_python = False
+    saw_launcher = False
     with tarfile.open(source, 'r|gz') as original, tarfile.open(dest, 'w:gz') as output:
         def app_mode(info):
             info.uid, info.gid = 0, 0
@@ -57,6 +61,10 @@ def linux_archive(source, work, dest, arch):
             if member.name != prefix and not member.name.startswith(prefix + '/'):
                 continue
             if member.name == python_name:
+                if not member.issym() or member.linkname != 'python3.11':
+                    raise ValueError(f'Unexpected Python launcher in {source}')
+                saw_launcher = True
+            if member.name == python_binary:
                 if not member.isfile() or not member.mode & 0o111:
                     raise ValueError(f'Python entry is not an executable file in {source}')
                 with original.extractfile(member) as stream:
@@ -71,8 +79,8 @@ def linux_archive(source, work, dest, arch):
                     output.addfile(member, stream)
             else:
                 output.addfile(member)
-    if not saw_python:
-        raise ValueError(f'Missing {python_name} in {source}')
+    if not (saw_python and saw_launcher):
+        raise ValueError(f'Missing Python launcher or executable in {source}')
 
 
 def verify_tutorial(archive_names):
@@ -101,7 +109,8 @@ def main():
             if APP + '/文矩.exe' not in archive.namelist() or archive.testzip() is not None:
                 raise ValueError(f'Windows ZIP verification failed: {source}')
         dest = OUT / target
-        shutil.copy2(source, dest)
+        if not dest.exists() or dest.read_bytes() != source.read_bytes():
+            shutil.copy2(source, dest)
         published.append(dest)
     with tempfile.TemporaryDirectory(prefix='wenju-kylin-') as directory:
         work = Path(directory)
