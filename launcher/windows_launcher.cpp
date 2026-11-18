@@ -94,6 +94,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         MessageBoxW(nullptr, L"\u8bf7\u5b8c\u6574\u89e3\u538b\u6587\u77e9\u4fbf\u643a\u5305\uff0c\u5e76\u4fdd\u7559 runtime \u548c\u5e94\u7528\u6587\u4ef6\u3002", Name, MB_ICONERROR);
         return 1;
     }
+#ifdef WENJU_WIN7
+    // Python 3.8's extension loader uses the secure DLL search flags.
+    if (!GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "AddDllDirectory")) {
+        MessageBoxW(nullptr, L"Windows 7 SP1 needs KB2533623 or a later system update that provides AddDllDirectory.", Name, MB_ICONERROR);
+        return 1;
+    }
+    SetEnvironmentVariableW(L"WENJU_QT", L"5");
+    SetEnvironmentVariableW(L"WENJU_LOW_POWER", L"1");
+#endif
     const bool persistent = !transient_path(exe);
     SetCurrentProcessExplicitAppUserModelID(AppId);
     SetEnvironmentVariableW(L"WENJU_PRODUCT_ENTRY", persistent ? exe.c_str() : nullptr);

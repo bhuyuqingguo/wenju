@@ -3,15 +3,16 @@ from pathlib import Path
 from platform_support import data_directory, configure_rendering
 configure_rendering()
 from qt_compat import (
-    QObject, Signal, Slot, Property, QUrl, QProcess, QThread, QTimer, qInstallMessageHandler, Qt, QMimeData, QMetaObject,
+    QObject, Signal, Slot, Property, constant_property, QUrl, QProcess, QThread, QTimer, qInstallMessageHandler, Qt, QMimeData, QMetaObject,
     QGuiApplication, QDesktopServices, QIcon, QPalette, QColor, QFontDatabase, QFont,
     QQmlApplicationEngine, QQuickWindow, QQuickStyle, QApplication, QFileDialog,
     QTest, QPoint, QPointF, exec_app, delete_qobject, set_color_scheme, quick_style,
-    failed_to_start,
+    failed_to_start, font_families, QT,
 )
 from templates import CATALOG
 from preset_store import PresetStore, normalize, checked, sections, fields, SIZES, BASE
 from appearance import Appearance
+from tutorial import Tutorial
 
 ROOT = Path(__file__).resolve().parent
 DATA = data_directory(ROOT)
@@ -190,7 +191,7 @@ class Bridge(QObject):
     def convertTarget(self): return self.convert_target
     @Property(str, notify=changed)
     def convertHint(self): return CONVERT_TARGETS[self.convert_target]['hint']
-    @Property('QVariantList', constant=True)
+    @constant_property('QVariantList')
     def convertTargets(self):
         return [{'id': key, 'label': CONVERT_TARGETS[key]['label']} for key in ('keep', 'wenju', 'docx', 'styled', 'merge')]
     @Property('QVariantList', notify=changed)
@@ -205,7 +206,7 @@ class Bridge(QObject):
     def overall(self): return self.overall_value
     @Property(int, notify=importProgressChanged)
     def importProgress(self): return self.import_progress
-    @Property('QVariantMap', constant=True)
+    @constant_property('QVariantMap')
     def saved(self): return self.settings
     @Property('QVariantList', notify=libraryChanged)
     def templates(self):
@@ -223,7 +224,7 @@ class Bridge(QObject):
                 'pageSummary':page+' · '+p['位置'].replace('底部','') if p['启用'] else page,
                 'marginSummary':'上 '+str(r['页面']['上边距'])+' / 下 '+str(r['页面']['下边距'])+' / 左 '+str(r['页面']['左边距'])+' / 右 '+str(r['页面']['右边距'])+' cm'})
         return rows
-    @Property(str, constant=True)
+    @constant_property(str)
     def fontNotice(self): return self.font_notice
     @Slot(str)
     def installFont(self, path):
@@ -247,17 +248,17 @@ class Bridge(QObject):
     def pageSettings(self):
         p=self.store.rules['页码']
         return dict(prefix=p['左侧字符'],suffix=p['右侧字符'],font=p['字体'],size=SIZES.get(p['字号'],p['字号']),spacing=p['字间距'],alignment=p['位置'],start=p['起始位置'],enabled=p['启用'],uniform=p['统一字体'])
-    @Property('QVariantList',constant=True)
+    @constant_property('QVariantList')
     def ruleSections(self):return sections(self.store.rules)
     @Property('QVariantList',notify=rulesChanged)
     def ruleFields(self):
         rows=fields(self.store.rules,self.section)
         for row in rows:
             if row['kind']=='choice' and row['editable'] and not row['path'].endswith('.字号'):
-                row['values']=list(dict.fromkeys(row['values']+QFontDatabase.families()));row['labels']=row['values']
+                row['values']=list(dict.fromkeys(row['values']+font_families()));row['labels']=row['values']
         return rows
-    @Property('QStringList',constant=True)
-    def fontNames(self):return list(dict.fromkeys(['宋体','仿宋','黑体','楷体','Times New Roman','Arial']+QFontDatabase.families()))
+    @constant_property('QStringList')
+    def fontNames(self):return list(dict.fromkeys(['宋体','仿宋','黑体','楷体','Times New Roman','Arial']+font_families()))
     @Slot(str, result=str)
     def paintFont(self, name):
         chosen, found = fontfallback.choose(name or "")
@@ -1154,9 +1155,6 @@ class Bridge(QObject):
             path=self.rows[index].get('report')
             if path and Path(path).exists():self.reportReady.emit(Path(path).read_text('utf-8'))
             elif self.rows[index].get('error'):self.reportReady.emit(self.rows[index]['error'])
-    @Slot()
-    def help(self):self.reportReady.emit((ROOT/'使用说明.txt').read_text('utf-8-sig'))
-
 def brand_icon():
     icon = QIcon()
     hicolor = ROOT / 'launcher' / 'icons' / 'hicolor'
@@ -1208,6 +1206,9 @@ bridge = Bridge()
 engine = QQmlApplicationEngine()
 engine.rootContext().setContextProperty('bridge',bridge)
 engine.rootContext().setContextProperty('appearance',appearance)
+tutorial = Tutorial(ROOT, app)
+engine.rootContext().setContextProperty('tutorial', tutorial)
+app.aboutToQuit.connect(tutorial.stop)
 engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro and os.environ.get('WENJU_LOW_POWER')!='1' and not any(a in sys.argv for a in ('--smoke','--capture','--capture-themes','--test-convert-ui','--test-clipboard','--capture-layout')))
 engine.load(QUrl.fromLocalFile(str(ROOT/'Main.qml')))
 if not engine.rootObjects(): sys.exit(1)
@@ -1554,6 +1555,18 @@ if '--smoke' in sys.argv:
         app.quit()
     later(begin_test,700)
     QTimer.singleShot(60000,lambda:app.exit(2))
+if '--smoke-startup' in sys.argv:
+    def verify_startup():
+        if not window.isVisible():
+            app.exit(1)
+            return
+        bridge.selectTemplate('unit')
+        if bridge.selectedId != 'unit' or window.property('page') != 2:
+            app.exit(2)
+            return
+        print('PASS: window shown and template selected', flush=True)
+        app.quit()
+    QTimer.singleShot(800, verify_startup)
 if '--test-clipboard' in sys.argv:
     import traceback
     def guarded_clip(fn):
@@ -1772,5 +1785,8 @@ finally:
         identity.close()
     if session:
         session.close()
-    delete_qobject(engine)
+    if QT == '5':
+        del engine
+    else:
+        delete_qobject(engine)
 sys.exit(exit_code)

@@ -77,6 +77,85 @@ ApplicationWindow {
     Dialog {id:reportDialog;anchors.centerIn:parent;title:"工作记录与报告";width:720;height:560;modal:true;standardButtons:Dialog.Close
         ScrollView {anchors.fill:parent;TextArea{id:reportText;readOnly:true;wrapMode:TextEdit.Wrap;font.pixelSize:Math.round(13*appearance.scale);selectByMouse:true}}
     }
+    Dialog {
+        id: tutorialDialog
+        objectName: "tutorialDialog"
+        anchors.centerIn: parent
+        width: Math.min(win.width - 64, 820)
+        height: Math.min(win.height - 64, 630)
+        title: "使用教学"
+        modal: true
+        standardButtons: Dialog.Close
+        onClosed: tutorial.stop()
+        readonly property var lesson: tutorial.chapters[lessonPicker.currentIndex]
+
+        contentItem: ColumnLayout {
+            spacing: 12
+            RowLayout {
+                Layout.fillWidth: true
+                Choice {
+                    id: lessonPicker
+                    objectName: "tutorialChapterPicker"
+                    Layout.fillWidth: true
+                    model: tutorial.chapters
+                    textRole: "title"
+                    onActivated: {
+                        tutorial.stop()
+                        lessonScroll.contentItem.contentY = 0
+                    }
+                }
+                Action {
+                    text: "播放本章"
+                    primary: true
+                    implicitWidth: 116 * appearance.scale
+                    enabled: lessonPicker.currentIndex >= 0
+                    onClicked: tutorial.play(lessonPicker.currentIndex)
+                }
+                Action {
+                    text: "停止"
+                    implicitWidth: 78 * appearance.scale
+                    onClicked: tutorial.stop()
+                }
+            }
+            Txt {
+                Layout.fillWidth: true
+                text: tutorial.status
+                color: win.muted
+                wrapMode: Text.Wrap
+                visible: text.length > 0
+            }
+            ScrollView {
+                id: lessonScroll
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                contentWidth: width - 16
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                Column {
+                    width: lessonScroll.contentWidth
+                    spacing: 15
+                    Txt {
+                        width: parent.width
+                        text: tutorialDialog.lesson ? tutorialDialog.lesson.title : "教学文件缺失，请检查是否完整解压。"
+                        wrapMode: Text.Wrap
+                        font.pixelSize: Math.round(22 * appearance.scale)
+                        font.weight: Font.DemiBold
+                    }
+                    Repeater {
+                        model: tutorialDialog.lesson ? tutorialDialog.lesson.steps : []
+                        delegate: Txt {
+                            required property int index
+                            required property string modelData
+                            width: parent.width
+                            text: (index + 1) + "．" + modelData
+                            wrapMode: Text.Wrap
+                            lineHeight: 1.45
+                        }
+                    }
+                }
+            }
+        }
+    }
     Connections {target:bridge
         function onReportReady(text){reportText.text=text;reportDialog.open();}
         function onRulesChanged(){win.syncPage();}
@@ -213,8 +292,13 @@ ApplicationWindow {
         }
         Column {x:30;anchors.bottom:parent.bottom;anchors.bottomMargin:28;spacing:9
             Row {spacing:7;Rectangle{width:6;height:6;radius:3;color:appearance.palette["#8cbaa8"];anchors.verticalCenter:parent.verticalCenter} Txt{text:"离线运行 · 文档不上传";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale)}}
-            Txt {text:"3.4.1  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
-            Txt {text:"使用帮助 ↗";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale);MouseArea{anchors.fill:parent;cursorShape:Qt.PointingHandCursor;onClicked:bridge.help()}}
+            Txt {text:"3.4.2  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
+            Action {
+                objectName: "openTutorial"
+                text: "使用教学"
+                implicitWidth: 144
+                onClicked: tutorialDialog.open()
+            }
         }
     }
 

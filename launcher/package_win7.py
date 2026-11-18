@@ -1,32 +1,28 @@
 """Build the Windows 7 SP1 x64 portable zip. Does not touch the Win10/11 or Kylin layouts.
 
-Downloads are cached under the directory given by WENJU_WIN7_CACHE (default: a
-sibling of the repo is not used; pass the cache explicitly). Official pieces:
-
-- Python 3.8.10 embeddable x64, the last CPython release that supports Windows 7
-- PySide2 / shiboken2 5.15.2.1 (Qt 5.15.2), the last Qt LTS with Windows 7 support
-- Universal CRT DLLs from KB2999226 are not full files (the MSU stores PA30
-  deltas). This script instead builds api-ms-win-crt-* forwarders to the
-  ucrtbase.dll shipped inside the PySide2 wheel, and copies that DLL next to
-  pythonw.exe. vcruntime140 and msvcp140 come from the same wheel.
+Set WENJU_WIN7_CACHE to a directory with py38/ (extracted Python 3.8.10
+embeddable x64) and wheels/ (PySide2 and shiboken2 5.15.2.1, win_amd64).
+Build on Windows with Visual Studio C++ Build Tools and Windows SDK.
+The SDK's application-local x64 UCRT is bundled beside pythonw.exe.
 """
 from pathlib import Path
-import hashlib, os, shutil, struct, subprocess, sys, textwrap, zipfile, zlib
+import hashlib, os, shutil, struct, subprocess, sys, tempfile, textwrap, zipfile, zlib
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'launcher'))
 import pe_imports
+import app_files
 
-CACHE = Path(os.environ.get('WENJU_WIN7_CACHE', '/tmp/win7build'))
-PY_ZIP = CACHE / 'py.zip'
+CACHE = Path(os.environ.get('WENJU_WIN7_CACHE', Path.home() / 'AppData/Local/WenjuBuild/win7')).resolve()
 WHEEL_DIR = CACHE / 'wheels'
 OUT = ROOT / 'dist'
 STAGE = OUT / 'win7-stage' / '文矩'
-ARCHIVE = OUT / 'WenJu_3.4.1_Windows7_x64_Portable.zip'
+VERSION = '3.4.2'
+ARCHIVE = OUT / f'文矩_{VERSION}_Windows7_x64_免安装_测试版.zip'
 
 KEEP_PYD = {
     'QtCore.pyd', 'QtGui.pyd', 'QtWidgets.pyd', 'QtQml.pyd', 'QtQuick.pyd',
-    'QtQuickControls2.pyd', 'QtNetwork.pyd', 'QtOpenGL.pyd', 'QtSvg.pyd',
+    'QtQuickControls2.pyd', 'QtNetwork.pyd', 'QtOpenGL.pyd', 'QtSvg.pyd', 'QtTest.pyd',
 }
 FORCE_DLL = {
     'libegl.dll', 'libglesv2.dll', 'opengl32sw.dll', 'd3dcompiler_47.dll', 'ucrtbase.dll',
@@ -43,16 +39,7 @@ PLUGIN_PREFIXES = (
     'plugins/imageformats/qwebp.dll',
     'plugins/iconengines/qsvgicon.dll',
 )
-import app_files
 APP_FILES = app_files.names(ROOT)
-# Data exports of ucrtbase. Marking a code export DATA breaks the loader.
-UCRT_DATA = {
-    '_errno', '_doserrno', '__argc', '__argv', '__wargv', '_environ', '_wenviron', 'environ',
-    '_pgmptr', '_wpgmptr', '_pctype', '_pwctype', '__p__commode', '__p__fmode', '_wctype',
-    '_mbctype', '__initenv', '__winitenv',
-}
-
-
 def rewrite_qml(name, text):
     text = text.replace('import QtQuick.Controls\n', 'import QtQuick.Controls 2.15\n')
     text = text.replace('import QtQuick.Layouts\n', 'import QtQuick.Layouts 1.15\n')
@@ -84,62 +71,16 @@ def extract_wheel(wheel, dest):
 
 
 def install_downlevel_ucrt(runtime):
-    src = CACHE / 'ucrt-win7'
-    if not (src / 'ucrtbase.dll').exists():
-        raise SystemExit(
-            'missing ' + str(src / 'ucrtbase.dll') +
-            ' (extract api-ms-win-*.dll and ucrtbase.dll from the VS 2015 Update 3 vc_redist.x64.exe cabinet)'
-        )
-    for path in src.iterdir():
-        if not path.is_file():
-            continue
-        name = path.name
-        if name.startswith('api_ms_'):
-            name = name.replace('_', '-')
-        if name == 'ucrtbase.dll' or name.startswith('api-ms-win-'):
-            shutil.copy2(path, runtime / name)
-    if not (runtime / 'ucrtbase.dll').exists() or not (runtime / 'api-ms-win-crt-runtime-l1-1-0.dll').exists():
-        raise SystemExit('downlevel Universal CRT copy is incomplete')
-
-
-def build_forwarders(stage_runtime, symbols_by_dll):
-    """Create api-ms-win-crt forwarders next to pythonw.exe and return their paths."""
-    work = stage_runtime / '_forwarders'
-    work.mkdir(exist_ok=True)
-    built = []
-    gcc = 'x86_64-w64-mingw32-gcc'
-    for dll, names in sorted(symbols_by_dll.items()):
-        lines = ['LIBRARY ' + dll, 'EXPORTS']
-        for name in sorted(names):
-            data = ' DATA' if name in UCRT_DATA else ''
-            lines.append(f'  {name}=ucrtbase.{name}{data}')
-        def_path = work / (dll + '.def')
-        def_path.write_text('\n'.join(lines) + '\n', encoding='ascii')
-        out = stage_runtime / dll
-        c_path = work / 'empty.c'
-        c_path.write_text('void wenju_crt_forwarder(void) {}\n', encoding='ascii')
-        subprocess.check_call(
-            [gcc, '-shared', '-o', str(out), str(c_path), str(def_path), '-Wl,--enable-stdcall-fixup'],
-            stdout=subprocess.DEVNULL,
-        )
-        built.append(out)
-    shutil.rmtree(work)
-    return built
-
-
-def needed_crt(root):
-    wanted = {}
-    for path in root.rglob('*'):
-        if path.suffix.lower() not in ('.exe', '.dll', '.pyd'):
-            continue
-        parsed = pe_imports.pe_imports(path)
-        if not parsed:
-            continue
-        for block in parsed:
-            for dll, funcs in block:
-                if dll.lower().startswith('api-ms-win-crt-'):
-                    wanted.setdefault(dll.lower(), set()).update(n for n in funcs if not n.startswith('#'))
-    return wanted
+    default = Path(os.environ.get('ProgramFiles(x86)', 'C:/Program Files (x86)'))
+    default /= 'Windows Kits/10/Redist/ucrt/DLLs/x64'
+    src = Path(os.environ.get('WENJU_WIN7_UCRT', default))
+    if not (src / 'ucrtbase.dll').is_file():
+        raise SystemExit(f'Windows SDK application-local x64 UCRT not found: {src}')
+    for path in src.glob('*.dll'):
+        if path.name == 'ucrtbase.dll' or path.name.startswith('api-ms-win-'):
+            shutil.copy2(path, runtime / path.name)
+    if not (runtime / 'api-ms-win-crt-runtime-l1-1-0.dll').is_file():
+        raise SystemExit('Application-local Universal CRT copy is incomplete')
 
 
 def closure(pyside):
@@ -153,7 +94,12 @@ def closure(pyside):
         queue.append(by_name[name.lower()])
     for path in pyside.rglob('*'):
         rel = path.relative_to(pyside).as_posix().lower()
-        if rel in PLUGIN_PREFIXES or path.name.lower() in FORCE_DLL:
+        parts = path.relative_to(pyside).parts
+        qml_plugin = (
+            len(parts) > 2 and parts[0] == 'qml' and parts[1] in KEEP_QML
+            and path.suffix.lower() == '.dll'
+        )
+        if rel in PLUGIN_PREFIXES or path.name.lower() in FORCE_DLL or qml_plugin:
             queue.append(path)
     shib = pyside.parent / 'shiboken2'
     for path in shib.rglob('*'):
@@ -182,7 +128,11 @@ def copy_runtime(stage):
         shutil.rmtree(runtime)
     shutil.copytree(CACHE / 'py38', runtime)
     pth = runtime / 'python38._pth'
-    pth.write_text('python38.zip\n.\nLib\\site-packages\nimport site\n', encoding='ascii')
+    pth.write_text('python38.zip\n.\n..\nLib\\site-packages\nimport site\n', encoding='ascii')
+    (runtime / 'qt.conf').write_text(
+        '[Paths]\nPrefix=Lib/site-packages/PySide2\nPlugins=plugins\nQml2Imports=qml\n',
+        encoding='ascii',
+    )
     site = runtime / 'Lib' / 'site-packages'
     site.mkdir(parents=True)
     extract_wheel(find_wheel('PySide2-'), site)
@@ -238,19 +188,12 @@ def copy_runtime(stage):
     shib = pyside.parent / 'shiboken2'
     for dll in shib.glob('*.dll'):
         shutil.copy2(dll, pyside / dll.name)
-    ucrt = pyside / 'ucrtbase.dll'
-    if not ucrt.exists():
-        raise SystemExit('PySide2 wheel did not contain ucrtbase.dll')
-    shutil.copy2(ucrt, runtime / 'ucrtbase.dll')
     for name in ('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'concrt140.dll', 'vcomp140.dll'):
         src = pyside / name
         if src.exists() and not (runtime / name).exists():
             shutil.copy2(src, runtime / name)
-    # The ucrtbase.dll inside the PySide2 wheel is a Windows 10 build. It imports
-    # API sets that do not exist on Windows 7. Replace it with the downlevel
-    # Universal CRT from the VS 2015 Update 3 redistributable, and put every
-    # api-ms-win-* forwarder in the pythonw.exe directory. On Windows 7 those
-    # forwarders only resolve ucrtbase when they sit next to the process exe.
+    # The copy of ucrtbase.dll shipped inside the wheel targets Windows 10.
+    # Use the SDK's app-local copy and forwarders beside pythonw.exe instead.
     for path in (runtime / 'Lib').rglob('*'):
         if path.name.lower() in ('ucrtbase.dll', 'vccorlib140.dll'):
             path.unlink()
@@ -260,46 +203,37 @@ def copy_runtime(stage):
 
 
 def prepare_icons():
-    subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'make_icon.py')])
     subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'ico', str(ROOT / 'launcher' / 'WenJu.ico')])
 
 
 def build_launcher(stage):
-    gcc = 'x86_64-w64-mingw32-gcc'
-    windres = 'x86_64-w64-mingw32-windres'
-    rc = ROOT / 'launcher' / '_win7_launcher.rc'
-    rc.write_text('1 ICON "WenJu.ico"\n1 24 "app.manifest"\n', encoding='ascii')
-    res = ROOT / 'launcher' / '_win7_launcher.o'
-    subprocess.check_call([windres, '-O', 'coff', '-i', str(rc), '-o', str(res)], cwd=ROOT / 'launcher')
+    exe = stage / '文矩.exe'
     subprocess.check_call([
-        gcc, '-municode', '-mwindows', '-O2', '-s', '-o', str(stage / '文矩.exe'),
-        str(ROOT / 'launcher' / 'win7_launcher.c'), str(res),
+        'pwsh', '-NoProfile', '-File', str(ROOT / 'launcher' / 'build.ps1'),
+        '-Win7', '-OutputPath', str(exe),
     ])
-    rc.unlink()
-    res.unlink()
-    subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'exe', str(stage / '文矩.exe')])
+    pe_imports.require_native_launcher(exe)
+    subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'exe', str(exe)])
 
 
 def write_note(stage):
-    (stage / 'Windows7说明.txt').write_text(textwrap.dedent("""\
-        文矩 3.4.1 Windows 7 便携包（64 位）
+    (stage / 'Windows7说明.txt').write_text(textwrap.dedent(f"""\
+        文矩 {VERSION} Windows 7 x64 免安装测试版
 
-        适用系统：Windows 7 SP1 x64，并安装平台更新 KB2670838（提供 d3d11.dll；Qt 5.15 会直接加载它）。
-        本包自带 Python 3.8.10、PySide2 5.15.2.1（Qt 5.15.2）、vcruntime140、msvcp140、
-        以及 Windows 7 可用的 ucrtbase 和 api-ms-win-* 转发库。不需要单独安装 Python 或 VC++ 运行库。
-        不需要 .NET。解压后双击外层的「打开文矩.exe」。它会建立桌面和开始菜单快捷方式。文件夹里的「文矩.exe」是同一个程序。也可以双击「启动文矩.bat」。
-
-        这是 Win7 专用变体。Win10/11 便携包和麒麟包仍使用 PySide6，不能把两边的 runtime 混用。
-        界面用 Qt Quick Controls 2 / Fusion。显卡驱动过旧时，用「文矩.exe --safe-render」改软件渲染。
-
-        解压到当前用户可写的目录，保留 runtime、core 和程序文件。工作数据写在本目录。
-        """), encoding='utf-8')
-    bat = stage / '启动文矩.bat'
-    bat.write_text('@echo off\r\ncd /d "%~dp0"\r\nset WENJU_QT=5\r\nstart "" "runtime\\pythonw.exe" "app.py" %*\r\n', encoding='ascii')
+        适用系统：Windows 7 SP1 64 位，且已通过 KB2533623 或后续系统更新提供安全 DLL 加载接口。
+        如果启动报缺少系统组件，请记下完整提示或截图；应用不会安装系统补丁。
+        已附带 Python 3.8.10、Qt 5.15 和 VC++／通用 C 运行库。无需安装 .NET，也无需管理员权限运行。
+        请完整解压到固定、可写的目录，双击「文矩.exe」，保留旁边的 runtime、core 和 ui 等文件。
+        默认启用软件渲染和低动效模式，兼顾老显卡与驱动。不要与 Win10/11 版混用 runtime。
+        首次启动后可右键文矩任务栏图标固定。如曾固定旧入口，请手动取消旧项后重新固定。
+        移动便携目录后，旧固定项仍指向原位置，请从新目录打开并重新固定。
+        """), encoding='utf-8-sig')
 
 
 def assemble():
     prepare_icons()
+    if STAGE.resolve() != ROOT / 'dist' / 'win7-stage' / '文矩':
+        raise SystemExit('Unexpected Win7 staging path')
     if STAGE.exists():
         shutil.rmtree(STAGE)
     STAGE.mkdir(parents=True)
@@ -333,7 +267,6 @@ def assemble():
     if icon_src.exists():
         shutil.copytree(icon_src, STAGE / 'launcher' / 'icons')
     build_launcher(STAGE)
-    shutil.copy2(STAGE / '文矩.exe', STAGE.parent / '打开文矩.exe')
     checked, problems = pe_imports.scan(STAGE)
     print(f'PE files: {checked}')
     if problems:
@@ -341,20 +274,18 @@ def assemble():
             print('\t'.join(item))
         raise SystemExit(f'Windows 7 import audit failed: {len(problems)}')
     print('Import audit: no Windows 7 violations.')
+    with tempfile.TemporaryDirectory(prefix='WenJu-Win7-') as data:
+        env = dict(os.environ, WENJU_QT='5', WENJU_DATA_DIR=data)
+        subprocess.run([str(STAGE / 'runtime' / 'python.exe'), '-X', 'faulthandler', '-B',
+                        str(STAGE / 'app.py'), '--safe-render', '--smoke-startup'],
+                       cwd=STAGE, env=env, timeout=25, check=True)
     class ChineseZipInfo(zipfile.ZipInfo):
         def _encodeFilenameFlags(self):
             return self.filename.encode('gbk'), self.flag_bits & ~0x800
     if ARCHIVE.exists():
         ARCHIVE.unlink()
     files = [p for p in STAGE.rglob('*') if p.is_file()]
-    entry = STAGE.parent / '打开文矩.exe'
     with zipfile.ZipFile(ARCHIVE, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        info = ChineseZipInfo('打开文矩.exe')
-        info.compress_type = zipfile.ZIP_DEFLATED
-        raw = '打开文矩.exe'.encode('gbk')
-        extra = struct.pack('<BI', 1, zlib.crc32(raw)) + '打开文矩.exe'.encode('utf-8')
-        info.extra = struct.pack('<HH', 0x7075, len(extra)) + extra
-        z.writestr(info, entry.read_bytes())
         for path in files:
             name = '文矩/' + path.relative_to(STAGE).as_posix()
             info = ChineseZipInfo(name)
@@ -363,9 +294,12 @@ def assemble():
             extra = struct.pack('<BI', 1, zlib.crc32(raw)) + name.encode('utf-8')
             info.extra = struct.pack('<HH', 0x7075, len(extra)) + extra
             z.writestr(info, path.read_bytes())
+    with zipfile.ZipFile(ARCHIVE, metadata_encoding='gbk') as z:
+        if '文矩/文矩.exe' not in z.namelist() or z.testzip() is not None:
+            raise SystemExit('Windows 7 zip validation failed')
     digest = hashlib.sha256(ARCHIVE.read_bytes()).hexdigest()
     sums = OUT / 'SHA256SUMS-win7.txt'
-    sums.write_text(f'{digest}  {ARCHIVE.name}\n', encoding='ascii')
+    sums.write_text(f'{digest}  {ARCHIVE.name}\n', encoding='utf-8')
     print(ARCHIVE)
     print('SHA256:', digest)
     print('Bytes:', ARCHIVE.stat().st_size, 'Files:', len(files))

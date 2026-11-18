@@ -1,7 +1,7 @@
 """UI-only preferences; independent from document formatting and templates."""
 from pathlib import Path
 import json
-from qt_compat import QObject, Property, Signal, Slot, QPalette, QColor, QFont, set_color_scheme
+from qt_compat import QObject, Property, constant_property, Signal, Slot, QPalette, QColor, QFont, set_color_scheme
 from preset_store import atomic_json
 
 THEMES = [
@@ -26,7 +26,7 @@ class Appearance(QObject):
         except (OSError,ValueError,TypeError):pass
         self.state['motion']=s.get('motion',True) if 's' in locals() and isinstance(s.get('motion',True),bool) else True
         self.apply()
-    @Property('QVariantList',constant=True)
+    @constant_property('QVariantList')
     def themes(self):return THEMES
     @Property(str,notify=changed)
     def themeId(self):return self.state['theme']

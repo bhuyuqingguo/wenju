@@ -1,3 +1,4 @@
+param([string]$OutputPath, [switch]$Win7)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
@@ -6,10 +7,12 @@ if (-not $vs) { throw 'Visual Studio C++ Build Tools and a Windows SDK are requi
 $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
 $build = Join-Path $projectRoot 'build\launcher'
 New-Item -ItemType Directory -Force -Path $build | Out-Null
-$output = Join-Path $projectRoot '文矩.exe'
+$output = if ($OutputPath) { $OutputPath } else { Join-Path $projectRoot '文矩.exe' }
+$compilerFlags = if ($Win7) { '/DWENJU_WIN7 /D_WIN32_WINNT=0x0601' } else { '' }
+$subsystem = if ($Win7) { 'WINDOWS,6.01' } else { 'WINDOWS' }
 Push-Location $PSScriptRoot
 try {
-    $command = 'call "{0}" && rc.exe /nologo /fo"{1}\wenju.res" windows_launcher.rc && cl.exe /nologo /O2 /MT /EHsc /Fo"{1}\wenju.obj" windows_launcher.cpp "{1}\wenju.res" /link /SUBSYSTEM:WINDOWS /MANIFEST:NO /OUT:"{2}" shell32.lib ole32.lib uuid.lib user32.lib' -f $vcvars,$build,$output
+    $command = 'call "{0}" && rc.exe /nologo /fo"{1}\wenju.res" windows_launcher.rc && cl.exe /nologo /O2 /MT /EHsc {3} /Fo"{1}\wenju.obj" windows_launcher.cpp "{1}\wenju.res" /link /SUBSYSTEM:{4} /MANIFEST:NO /OUT:"{2}" shell32.lib ole32.lib uuid.lib user32.lib' -f $vcvars,$build,$output,$compilerFlags,$subsystem
     & cmd.exe /d /c $command
     if ($LASTEXITCODE -ne 0) { throw 'Native launcher compilation failed.' }
 } finally { Pop-Location }

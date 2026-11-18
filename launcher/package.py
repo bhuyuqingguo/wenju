@@ -4,7 +4,7 @@ import re,sys,zipfile,struct,zlib
 
 ROOT=Path(__file__).resolve().parent.parent
 OUT=ROOT/'dist';OUT.mkdir(exist_ok=True)
-ARCHIVE=OUT/'文矩_3.4.1_Windows_x64_免NET.zip'
+ARCHIVE=OUT/'文矩_3.4.2_Windows_x64_免NET.zip'
 
 class ChineseZipInfo(zipfile.ZipInfo):
     def _encodeFilenameFlags(self):

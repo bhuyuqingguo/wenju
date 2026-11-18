@@ -96,3 +96,13 @@ def failed_to_start(qprocess):
     if nested is not None and hasattr(nested, "FailedToStart"):
         return nested.FailedToStart
     return qprocess.FailedToStart
+
+
+def constant_property(kind):
+    # PySide2's decorator path rejects constant properties; passing fget
+    # directly preserves both read-only and constant flags on Qt 5 and 6.
+    return lambda getter: Property(kind, getter, constant=True)
+
+
+def font_families():
+    return QFontDatabase().families() if QT == '5' else QFontDatabase.families()

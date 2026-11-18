@@ -1,180 +1,128 @@
-"""Overlay the current sources onto the Win10/11 and Kylin runtimes and pack them.
-
-The Win7 zip is built by package_win7.py. This script does not rebuild Qt.
-Icon checks run on every tree and a missing size fails the build.
-"""
+"""Assemble a release from fresh Windows builds and the published Kylin runtimes."""
 from pathlib import Path
-import hashlib, io, os, shutil, stat, subprocess, sys, tarfile, zipfile
+import argparse
+import hashlib
+from io import BytesIO
+import re
+import shutil
+import struct
+import tarfile
+import tempfile
+import zipfile
 
-ROOT = Path(__file__).resolve().parent.parent
-OUT = ROOT / 'dist'
-sys.path.insert(0, str(ROOT / 'launcher'))
+import app_files
 import package_win7
-from pe_imports import require_native_launcher
 
-VERSION = '3.4.1'
-APP_NAMES = package_win7.APP_FILES + (
-    'launcher/打开文矩.sh', 'launcher/start-kylin.sh', 'launcher/diagnose-kylin.sh',
-    'launcher/wenju.desktop', 'launcher/win7-vm.ps1',
-)
+ROOT = app_files.ROOT
+OUT = ROOT / 'dist'
+VERSION = package_win7.VERSION
+ARCHITECTURES = {'arm64': 183, 'x86_64': 62}
+APP = '文矩'
+ENTRY = '打开文矩.sh'
 
 
-def overlay(app):
-    app.mkdir(parents=True, exist_ok=True)
-    for name in APP_NAMES:
-        src = ROOT / name
-        if not src.is_file():
-            continue
+def stage_linux(work):
+    app = work / APP
+    for name in (*app_files.names(ROOT), 'launcher/start-kylin.sh',
+                 'launcher/diagnose-kylin.sh', 'launcher/wenju.desktop'):
         dest = app / name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-        if dest.suffix == '.sh':
-            dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    for path in (ROOT / 'core').rglob('*'):
-        if not path.is_file() or '__pycache__' in path.parts or path.suffix == '.pyc':
-            continue
-        dest = app / path.relative_to(ROOT)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, dest)
-    icons = ROOT / 'launcher' / 'icons'
-    if icons.exists():
-        target = app / 'launcher' / 'icons'
-        if target.exists():
-            shutil.rmtree(target)
-        shutil.copytree(icons, target)
-    mark = icons / 'hicolor' / '256x256' / 'apps' / 'wenju.png'
-    if mark.exists():
-        shutil.copy2(mark, app / '.DirIcon')
-    package_win7.app_files.require_tree(ROOT, app)
+        shutil.copy2(ROOT / name, dest)
+
+    def excluded(_directory, entries):
+        return [name for name in entries if name == '__pycache__' or name.endswith('.pyc')
+                or re.search(r'_(?:已整理(?: \(\d+\))?\.docx|整理报告(?: \(\d+\))?\.txt)$', name)]
+
+    shutil.copytree(ROOT / 'core', app / 'core', ignore=excluded)
+    shutil.copytree(ROOT / 'launcher/icons', app / 'launcher/icons')
+    shutil.copy2(app / 'launcher/icons/hicolor/256x256/apps/wenju.png', app / '.DirIcon')
+    shutil.copy2(ROOT / 'launcher' / ENTRY, work / ENTRY)
+    app_files.require_tree(ROOT, app)
 
 
-def show_failure():
-    bad = OUT / '_bad.ico'
-    OUT.mkdir(exist_ok=True)
-    bad.write_bytes(b'\x00\x00\x01\x00\x00\x00')
-    proc = subprocess.run([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'ico', str(bad)], capture_output=True, text=True)
-    bad.unlink()
-    print('missing-icon check exit', proc.returncode)
-    print(proc.stdout or proc.stderr)
-    if proc.returncode == 0:
-        raise SystemExit('icon check did not fail on an empty ico')
+def linux_archive(source, work, dest, arch):
+    prefix = APP + '/runtime'
+    python_name = prefix + '/bin/python3'
+    saw_python = False
+    with tarfile.open(source, 'r|gz') as original, tarfile.open(dest, 'w:gz') as output:
+        def app_mode(info):
+            info.uid, info.gid = 0, 0
+            info.uname = info.gname = ''
+            info.mode = 0o755 if info.isdir() or info.name.endswith('.sh') else 0o644
+            return info
+
+        output.add(work / APP, arcname=APP, filter=app_mode)
+        output.add(work / ENTRY, arcname=ENTRY, filter=app_mode)
+        for member in original:
+            if member.name != prefix and not member.name.startswith(prefix + '/'):
+                continue
+            if member.name == python_name:
+                if not member.isfile() or not member.mode & 0o111:
+                    raise ValueError(f'Python entry is not an executable file in {source}')
+                with original.extractfile(member) as stream:
+                    header = stream.read(20)
+                    if (header[:6] != b'\x7fELF\x02\x01'
+                            or struct.unpack_from('<H', header, 18)[0] != ARCHITECTURES[arch]):
+                        raise ValueError(f'Wrong Python architecture in {source}')
+                    output.addfile(member, BytesIO(header + stream.read()))
+                    saw_python = True
+            elif member.isfile():
+                with original.extractfile(member) as stream:
+                    output.addfile(member, stream)
+            else:
+                output.addfile(member)
+    if not saw_python:
+        raise ValueError(f'Missing {python_name} in {source}')
 
 
-def pack_zip(work, archive):
-    if archive.exists():
-        archive.unlink()
-    with zipfile.ZipFile(archive, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        for path in work.rglob('*'):
-            if path.is_file():
-                z.write(path, path.relative_to(work).as_posix())
-    return hashlib.sha256(archive.read_bytes()).hexdigest()
-
-
-def pack_tar(work, archive):
-    if archive.exists():
-        archive.unlink()
-    with tarfile.open(archive, 'w:gz') as tar:
-        for path in work.rglob('*'):
-            info = tar.gettarinfo(path, path.relative_to(work).as_posix())
-            if path.is_file():
-                info.mode |= 0o644
-                if path.suffix == '.sh' or path.name.startswith('python'):
-                    info.mode |= 0o111
-                with path.open('rb') as fh:
-                    tar.addfile(info, fh)
-            elif path.is_dir():
-                tar.addfile(info)
-    return hashlib.sha256(archive.read_bytes()).hexdigest()
-
-
-def windows_tree(src_zip, work):
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
-    with zipfile.ZipFile(src_zip) as z:
-        z.extractall(work / '_raw')
-    raw_app = next(p for p in (work / '_raw').iterdir() if p.is_dir())
-    app = work / '文矩'
-    shutil.move(str(raw_app), str(app))
-    shutil.rmtree(work / '_raw')
-    overlay(app)
-    native = ROOT / '文矩.exe'
-    require_native_launcher(native)
-    shutil.copy2(native, app / '文矩.exe')
-    shutil.copy2(app / '文矩.exe', work / '打开文矩.exe')
-    subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'exe', str(work / '打开文矩.exe')])
-    subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'exe', str(app / '文矩.exe')])
-
-
-def linux_tree(src_tar, work):
-    if work.exists():
-        shutil.rmtree(work)
-    work.mkdir(parents=True)
-    with tarfile.open(src_tar) as tar:
-        tar.extractall(work / '_raw')
-    raw_app = next(p for p in (work / '_raw').iterdir() if p.is_dir())
-    app = work / '文矩'
-    shutil.move(str(raw_app), str(app))
-    shutil.rmtree(work / '_raw')
-    overlay(app)
-    entry = work / '打开文矩.sh'
-    shutil.copy2(ROOT / 'launcher' / '打开文矩.sh', entry)
-    entry.chmod(0o755)
-    subprocess.check_call([sys.executable, str(ROOT / 'launcher' / 'check_icons.py'), 'linux', str(work)])
+def verify_tutorial(archive_names):
+    chapters = ('quick', 'templates', 'pagination', 'convert', 'filesize', 'output', 'appearance')
+    expected = {APP + '/tutorial.py', APP + '/core/tutorial/chapters.json'}
+    expected.update(f'{APP}/core/tutorial/{chapter}.wav' for chapter in chapters)
+    missing = expected.difference(archive_names)
+    if missing:
+        raise ValueError('Release is missing: ' + ', '.join(sorted(missing)))
 
 
 def main():
-    show_failure()
-    package_win7.assemble()
-    cache = Path('/tmp/wenju-release')
-    cache.mkdir(exist_ok=True)
-    win = cache / 'win.zip'
-    if not win.exists():
-        shutil.copy2('/tmp/wenju-audit/win.zip', win)
-    windows_tree(win, OUT / 'win10-root')
-    digest = pack_zip(OUT / 'win10-root', OUT / f'WenJu_{VERSION}_Windows_Portable.zip')
-    sums = [f'{digest}  WenJu_{VERSION}_Windows_Portable.zip']
-    win7 = OUT / f'WenJu_{VERSION}_Windows7_x64_Portable.zip'
-    sums.append(f'{hashlib.sha256(win7.read_bytes()).hexdigest()}  {win7.name}')
-    for arch, name in (('x86_64', 'WenJu_3.3.0_KylinV10_x86_64.tar.gz'), ('arm64', 'WenJu_3.3.0_KylinV10_arm64.tar.gz')):
-        src = cache / name
-        if not src.exists():
-            subprocess.check_call(['curl', '-fL', '-o', str(src), f'https://github.com/bhuyuqingguo/wenju/releases/download/v3.3.0/{name}'])
-        linux_tree(src, OUT / f'kylin-{arch}')
-        out_name = f'WenJu_{VERSION}_KylinV10_{arch}.tar.gz'
-        digest = pack_tar(OUT / f'kylin-{arch}', OUT / out_name)
-        sums.append(f'{digest}  {out_name}')
-    text = '\n'.join(sums) + '\n'
-    (OUT / 'SHA256SUMS').write_text(text, encoding='ascii')
-    for line in sums:
-        digest, name = line.split('  ')
-        path = OUT / name
-        blob = path.read_bytes()
-        if hashlib.sha256(blob).hexdigest() != digest:
-            raise SystemExit('checksum mismatch ' + name)
-        if VERSION not in name:
-            raise SystemExit('filename has no version ' + name)
-        note = b''
-        if name.endswith('.zip'):
-            with zipfile.ZipFile(path) as z:
-                note = z.read('文矩/使用说明.txt')
-                roots = {n.split('/')[0] for n in z.namelist()}
-        else:
-            with tarfile.open(path) as tar:
-                member = tar.extractfile('文矩/使用说明.txt')
-                note = member.read()
-                roots = {n.split('/')[0] for n in tar.getnames() if n}
-        if VERSION.encode() not in note:
-            raise SystemExit(name + ' content version is not ' + VERSION)
-        if roots != {'文矩', '打开文矩.exe'} and roots != {'文矩', '打开文矩.sh'}:
-            raise SystemExit(name + ' outer entries are ' + ' '.join(sorted(roots)))
-    art = Path('/opt/cursor/artifacts')
-    art.mkdir(parents=True, exist_ok=True)
-    for line in sums:
-        name = line.split('  ', 1)[1]
-        shutil.copy2(OUT / name, art / name)
-    shutil.copy2(OUT / 'SHA256SUMS', art / 'SHA256SUMS')
-    print(text)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--kylin-cache', required=True, type=Path,
+                        help='directory containing both published v3.3.0 Kylin portable archives')
+    args = parser.parse_args()
+    modern = OUT / f'文矩_{VERSION}_Windows_x64_免NET.zip'
+    windows = {
+        modern: f'WenJu_{VERSION}_Windows_x64_Portable.zip',
+        package_win7.ARCHIVE: f'WenJu_{VERSION}_Windows7_SP1_x64_Portable_Test.zip',
+    }
+    published = []
+    for source, target in windows.items():
+        with zipfile.ZipFile(source, metadata_encoding='gbk') as archive:
+            verify_tutorial(archive.namelist())
+            if APP + '/文矩.exe' not in archive.namelist() or archive.testzip() is not None:
+                raise ValueError(f'Windows ZIP verification failed: {source}')
+        dest = OUT / target
+        shutil.copy2(source, dest)
+        published.append(dest)
+    with tempfile.TemporaryDirectory(prefix='wenju-kylin-') as directory:
+        work = Path(directory)
+        stage_linux(work)
+        for arch in ARCHITECTURES:
+            source = args.kylin_cache / f'WenJu_3.3.0_KylinV10_{arch}.tar.gz'
+            dest = OUT / f'WenJu_{VERSION}_KylinV10_{arch}_Portable.tar.gz'
+            linux_archive(source, work, dest, arch)
+            with tarfile.open(dest, 'r|gz') as archive:
+                names = [item.name for item in archive]
+            verify_tutorial(names)
+            if ENTRY not in names or len(names) != len(set(names)):
+                raise ValueError(f'Kylin archive verification failed: {dest}')
+            published.append(dest)
+    sums = []
+    for path in published:
+        with path.open('rb') as stream:
+            checksummed = hashlib.file_digest(stream, 'sha256').hexdigest()
+        sums.append(f'{checksummed}  {path.name}')
+    (OUT / 'SHA256SUMS').write_text('\n'.join(sums) + '\n', encoding='ascii')
+    print('\n'.join(sums))
 
 
 if __name__ == '__main__':
