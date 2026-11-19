@@ -84,6 +84,29 @@ def normalize(raw):
     if '统一字体' not in pn:out['页码']['统一字体']=False # preserve original Chinese font choice
     return out
 
+
+def validate_inferred(rules, base, review):
+    """Keep the base value when a sample uses a format the rule editor cannot express."""
+    def validate_group(group, defaults, fallback, parent=()):
+        for key, value in group.items():
+            if key.startswith('_') or key not in defaults:
+                continue
+            path = parent + (key,)
+            if isinstance(defaults[key], dict):
+                validate_group(value, defaults[key], fallback[key], path)
+                continue
+            try:
+                checked('.'.join(path), value, defaults[key])
+            except ValueError:
+                group[key] = fallback[key]
+                review.append({
+                    'section': path[0], 'label': ' / '.join(path), 'status': '未识别',
+                    'detail': f'样文值「{value}」超出可设置范围，保留当前方案值「{fallback[key]}」。',
+                })
+
+    validate_group(rules, BASE, normalize(base))
+    return normalize(rules)
+
 def sections(rules):
     rows=[]
     for group,obj in rules.items():
@@ -121,7 +144,7 @@ class PresetStore:
             rules['页码'].update({'左侧字符':a,'右侧字符':b,'统一字体':True,'字体':'Times New Roman' if not a else '宋体','中文字体':'宋体','起始位置':'全文' if item['category'] in ('公文办公','红头文件') else '目录后'})
             self.builtins[item['id']]={**item,'rules':rules,'builtin':True}
         for i,path in enumerate(sorted((ROOT/'core/预设').glob('*.json'))):
-            item={'id':'legacy-'+str(i),'name':'原版 · '+path.stem,'category':'原版预设','desc':'完整保留 2.1.0 随包规则，可编辑后另存。','builtin':True,'rules':normalize(json.loads(path.read_text('utf-8-sig')))}
+            item={'id':'legacy-'+str(i),'name':'原版 · '+path.stem,'category':'原版预设','desc':'基于 2.1.0 随包规则，可编辑后另存。','builtin':True,'rules':normalize(json.loads(path.read_text('utf-8-sig')))}
             self.builtins[item['id']]=item
         custom_path=self.data/'templates.json'
         if custom_path.exists():
@@ -131,6 +154,13 @@ class PresetStore:
         current=self.data/'current.json'
         if current.exists():
             x=json.loads(current.read_text('utf-8-sig'));self.rules=normalize(x['rules']);self.selected=x.get('selected',DEFAULT_TEMPLATE);self.dirty=x.get('dirty',False)
+            if not self.dirty and self.selected in self.builtins and self.rules['字体嵌入']['启用']:
+                # Older releases saved the built-in default as enabled.
+                # Migrate only snapshots that otherwise exactly match the built-in.
+                updated = copy.deepcopy(self.rules)
+                updated['字体嵌入']['启用'] = False
+                if updated == self.builtins[self.selected]['rules']:
+                    self.rules = updated
     def persist(self):atomic_json(self.data/'current.json',{'selected':self.selected,'rules':self.rules,'dirty':self.dirty})
     def items(self):return list(self.builtins.values())+self.custom
     def find(self,id):
@@ -139,13 +169,19 @@ class PresetStore:
         t=self.find(id)
         if not t:raise ValueError('模板不存在')
         self.rules=copy.deepcopy(t['rules']);self.selected=id;self.dirty=False;self.persist()
-    def save_as(self,name):
+    def _create_personal_template(self, name, rules, description):
         name=name.strip()
         if not name or len(name)>80:raise ValueError('模板名称请填写 1～80 个字符')
         if any(t['name']==name for t in self.items()):raise ValueError('已有同名模板，请换一个名称，或使用“保存修改”')
-        item={'id':'user-'+uuid.uuid4().hex,'name':name,'category':'我的模板','desc':'个人模板 · 可编辑、导入和导出','builtin':False,'rules':normalize(self.rules)}
+        item={'id':'user-'+uuid.uuid4().hex,'name':name,'category':'我的模板','desc':description,'builtin':False,'rules':normalize(rules)}
         atomic_json(self.data/'templates.json',self.custom+[item]);self.custom.append(item)
+        return item
+    def save_as(self,name):
+        item = self._create_personal_template(name, self.rules, '个人模板 · 可编辑、导入和导出')
         self.selected=item['id'];self.dirty=False;self.persist();return item['id']
+    def save_inferred(self, name, rules):
+        item = self._create_personal_template(name, rules, '从样文识别的个人模板')
+        return item['id']
     def save(self):
         item=self.find(self.selected)
         if not item or item.get('builtin'):raise ValueError('内置模板请使用“另存为模板”保存为个人版本')

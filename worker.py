@@ -4,7 +4,7 @@ ROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT/'core'))
 import docx_fmt
 from templates import apply_template
-from preset_store import normalize
+from preset_store import BASE, normalize, validate_inferred
 
 def _progress(job, payload):
     path = job.get('progress')
@@ -29,11 +29,18 @@ def execute(job):
     if job.get('action')=='infer':
         import infer
         source=job['source']
-        if not source.lower().endswith('.docx'):
+        if Path(source).suffix.lower() not in ('.docx', '.dotx'):
             source=docx_fmt.convert_to_docx(source)
             if not source:raise ValueError('无法转换样本：请安装 Word 或 LibreOffice，或先另存为 .docx')
-        rules,notes=infer.infer(source)
-        return {'ok':True,'rules':normalize(rules),'notes':notes}
+        base = normalize(job.get('rules') or BASE)
+        rules,notes,review=infer.infer_review(source, base)
+        return {'ok':True,'rules':validate_inferred(rules, base, review),'notes':notes,'review':review,
+                'name':Path(job['source']).stem}
+    if job.get('action')=='audit':
+        import audit
+        result = audit.audit(job['source'], normalize(job['rules']))
+        result['reportText'] = '校核方案：' + job.get('templateName', '当前方案') + '\n\n' + result['reportText']
+        return {'ok':True, **result}
     if job.get('action')=='environment':
         import fontembed, platform, shutil
         from platform_support import data_directory
@@ -78,8 +85,20 @@ def execute(job):
             '字间距':float(s['spacing']),'位置':s['alignment'],'起始位置':s['start']})
     def tick(pct):
         _progress(job, {'percent': pct})
-    output, report=docx_fmt.process_file(job['source'], rules, tick)
+    source = Path(job['source'])
+    markdown_warnings = []
+    if source.suffix.lower() in ('.md', '.markdown'):
+        import convert
+        staged = source.with_suffix('.docx')
+        markdown_warnings = convert.markdown_to_docx(source, staged, reference_dir=job.get('referenceDir'))
+        source = staged
+    output, report=docx_fmt.process_file(str(source), rules, tick)
     if not output:raise ValueError(report or '文档处理失败')
+    if markdown_warnings:
+        report_path = Path(report) if report else Path(output).with_name(source.stem + '_整理报告.txt')
+        with report_path.open('a', encoding='utf-8') as stream:
+            stream.write('\n【Markdown 识别提示】\n' + '\n'.join(markdown_warnings) + '\n')
+        report = str(report_path)
     return {'ok':True,'output':output,'report':report}
 
 if __name__=='__main__':

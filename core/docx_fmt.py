@@ -8,6 +8,7 @@ import sys, os, re, json, zipfile, shutil, copy, io
 import xml.etree.ElementTree as ET
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fontembed
+from markdown_ooxml import INLINE_CODE, STYLES as MARKDOWN_STYLES
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W}
@@ -44,7 +45,8 @@ def serialize(root, root_tag):
     # 原根标签的 xmlns 声明为准，再补上 ET 汇集到根上的、原根标签没有的声明（文内局部声明的命名空间）
     have = set(re.findall(r'xmlns:([\w\-]+)=', root_tag))
     extra = [d for d in re.findall(r'\sxmlns:[\w\-]+="[^"]+"', m.group(0)) if re.search(r'xmlns:([\w\-]+)', d).group(1) not in have]
-    tag = root_tag[:-1] + "".join(extra) + ">"
+    opening = root_tag[:-1].rstrip().rstrip("/").rstrip()
+    tag = opening + "".join(extra) + ("/>" if m.group(0).endswith("/>") else ">")
     body = tag + body[m.end():]
     return ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n' + body).encode("utf-8")
 
@@ -148,6 +150,11 @@ def para_text(p):
 
 def runs(p):
     return [r for r in p.iter(q("r"))]
+
+
+def markdown_code_run(run):
+    style = run.find("w:rPr/w:rStyle", NS)
+    return style is not None and style.get(q("val")) == INLINE_CODE
 
 def has_image(p):
     WP = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
@@ -284,6 +291,36 @@ def heading_numbering_xml(H, abstract_id, num_id):
     num = '<w:num w:numId="%d"><w:abstractNumId w:val="%d"/></w:num>' % (num_id, abstract_id)
     return abstract, num
 
+def _package_xml(root, namespace):
+    # Keep the package namespace as the default, with unqualified attributes.
+    xml = ET.tostring(root, encoding="unicode")
+    prefix = re.match(r"<([\w.-]+):", xml)
+    if prefix:
+        name = prefix.group(1)
+        xml = xml.replace('xmlns:' + name + '="' + namespace + '"', 'xmlns="' + namespace + '"')
+        xml = xml.replace('<' + name + ':', '<').replace('</' + name + ':', '</')
+    return xml.encode("utf-8")
+
+
+def add_document_part(items, filename, relationship_id, kind):
+    rel_path = "word/_rels/document.xml.rels"
+    rels = ET.fromstring(items[rel_path])
+    attributes = {"Id": relationship_id, "Type":
+                  "http://schemas.openxmlformats.org/officeDocument/2006/relationships/" + kind,
+                  "Target": filename}
+    if not any(node.get("Target") == filename for node in rels):
+        ET.SubElement(rels, "{http://schemas.openxmlformats.org/package/2006/relationships}Relationship", attributes)
+        items[rel_path] = _package_xml(rels, "http://schemas.openxmlformats.org/package/2006/relationships")
+    types_path = "[Content_Types].xml"
+    types = ET.fromstring(items[types_path])
+    part = "/word/" + filename
+    if not any(node.get("PartName") == part for node in types):
+        ET.SubElement(types, "{http://schemas.openxmlformats.org/package/2006/content-types}Override",
+                      {"PartName": part, "ContentType":
+                       "application/vnd.openxmlformats-officedocument.wordprocessingml." + kind + "+xml"})
+        items[types_path] = _package_xml(types, "http://schemas.openxmlformats.org/package/2006/content-types")
+
+
 def ensure_heading_numbering(items, H, sid_map):
     """在 numbering.xml 中写入标题编号定义，返回 numId。"""
     W_ = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -292,14 +329,7 @@ def ensure_heading_numbering(items, H, sid_map):
         xml = items[path].decode("utf-8")
     else:
         xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<w:numbering xmlns:w="%s"></w:numbering>' % W_)
-        rels = items["word/_rels/document.xml.rels"].decode("utf-8")
-        if "numbering.xml" not in rels:
-            rels = rels.replace("</Relationships>", '<Relationship Id="rIdNumberingH" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/></Relationships>')
-            items["word/_rels/document.xml.rels"] = rels.encode("utf-8")
-        ct = items["[Content_Types].xml"].decode("utf-8")
-        if "/word/numbering.xml" not in ct:
-            ct = ct.replace("</Types>", '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/></Types>')
-            items["[Content_Types].xml"] = ct.encode("utf-8")
+        add_document_part(items, "numbering.xml", "rIdNumberingH", "numbering")
     # 清除旧的标题关联（其他列表若挂了 Heading 样式，会与新定义冲突）
     for k in range(1, 10):
         xml = re.sub(r'<w:pStyle w:val="%s"\s*/>' % re.escape(sid_map.get("Heading%d" % k, "Heading%d" % k)), "", xml)
@@ -541,6 +571,8 @@ class Formatter:
     def clean_runs(self, p, size_pt=None, font=None, keep_bi=True, west=None):
         F = self.R["字体"]; west = west or F["西文"]
         for r in runs(p):
+            if markdown_code_run(r):
+                continue
             rp = r.find("w:rPr", NS)
             if rp is None:
                 continue
@@ -572,7 +604,9 @@ class Formatter:
     # ---------- 括号内改楷体
     def bracket_font(self, p):
         F = self.R["字体"]; west = F["西文"]
-        for r in runs(p):
+        for r in p.findall("w:r", NS):
+            if markdown_code_run(r):
+                continue
             ts = [t for t in r.findall("w:t", NS)]
             if len(ts) != 1: continue
             t = ts[0]; s = t.text or ""
@@ -601,7 +635,10 @@ class Formatter:
         if not S.get("启用", True): return
         full_ctx = self.CJK + self.CJK_PUNCT
         changed = 0
+        code_texts = {t for r in runs(p) if markdown_code_run(r) for t in r.iter(q("t"))}
         for t in p.iter(q("t")):
+            if t in code_texts:
+                continue
             s0 = t.text or ""
             s = s0
             # 1 全角字母数字 → 半角（型号、数字须半角）
@@ -819,14 +856,8 @@ class Formatter:
         while "word/footer%d.xml" % n in items: n += 1
         part = "word/footer%d.xml" % n
         items[part] = xml.encode("utf-8")
-        rels = items["word/_rels/document.xml.rels"].decode("utf-8")
         rid = "rIdFooterPN%d" % n
-        rels = rels.replace("</Relationships>", '<Relationship Id="%s" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer%d.xml"/></Relationships>' % (rid, n))
-        items["word/_rels/document.xml.rels"] = rels.encode("utf-8")
-        ct = items["[Content_Types].xml"].decode("utf-8")
-        if ("/word/footer%d.xml" % n) not in ct:
-            ct = ct.replace("</Types>", '<Override PartName="/word/footer%d.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/></Types>' % n)
-            items["[Content_Types].xml"] = ct.encode("utf-8")
+        add_document_part(items, "footer%d.xml" % n, rid, "footer")
         return rid
 
     def make_caption_para(self, body, ref, before=True, keep_next=None):
@@ -938,6 +969,16 @@ class Formatter:
                 self.do_table(k); prev_img = False; last_cls = "tbl"; continue
             if k.tag != q("p"): continue
             p = k
+            if style_id(p) in MARKDOWN_STYLES.values():
+                kind = style_id(p)
+                if kind != MARKDOWN_STYLES["code"]:
+                    if B["清除直接字体格式"]:
+                        self.clean_runs(p, B["字号"], F["正文"], keep_bi=B["保留加粗斜体下划线"])
+                    self.punct(p, "正文")
+                self.note("Markdown 结构段数")
+                prev_img = False
+                last_cls = "body"
+                continue
             if id(p) in special:
                 sid, prefix = special[id(p)]
                 self.para_reset(p, sid, keep_next=True)

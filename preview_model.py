@@ -30,6 +30,7 @@ def present(doc, asset_dir, display_font, charts=0, limit=40):
     fallbacks = []
     seen = set()
     image_seq = 0
+    list_counts = {}
     for block in list(getattr(doc, "blocks", None) or []):
         if len(blocks) >= limit:
             blocks.append(_placeholder("还有内容", "预览只列出前面一部分，后面的块没有画在这里。"))
@@ -39,12 +40,24 @@ def present(doc, asset_dir, display_font, charts=0, limit=40):
             runs, used = _runs(block.get("runs") or [], display_font)
             fallbacks.extend(used)
             level = int(block.get("level") or (1 if kind == "heading" else 0) or 0)
+            markdown_kind = block.get("markdown_kind", "")
+            numbering = block.get("markdown_list") or {}
+            marker = ""
+            if markdown_kind == "list":
+                marker = "• "
+                if numbering.get("ordered"):
+                    key = numbering.get("id"), numbering.get("level", 0)
+                    number = list_counts.get(key, int(numbering.get("start", 1)))
+                    marker = "%d. " % number
+                    list_counts[key] = number + 1
             blocks.append({
                 "kind": "heading" if kind == "heading" else "paragraph",
                 "level": level,
                 "align": _align(block),
                 "text": "".join(run["text"] for run in runs),
-                "html": _html(runs, _paint_size(runs, level if kind == "heading" else 0)),
+                "html": marker + _html(runs, _paint_size(runs, level if kind == "heading" else 0)),
+                "markdownKind": markdown_kind,
+                "indent": int(numbering.get("level") or 0) * 18 + (12 if markdown_kind == "quote" else 0),
                 "path": "",
                 "w": 0,
                 "h": 0,

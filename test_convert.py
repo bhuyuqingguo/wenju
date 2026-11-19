@@ -419,13 +419,15 @@ def test_kept_content(tmp):
     two = tmp / "b" / "pixel.png"
     one.parent.mkdir()
     two.parent.mkdir()
-    one.write_bytes(b"AAA")
-    two.write_bytes(b"BBB")
+    metadata = b"tEXtDescription\0A second PNG"
+    second_png = PNG[:-12] + struct.pack(">I", len(metadata) - 4) + metadata + struct.pack(">I", zlib.crc32(metadata)) + PNG[-12:]
+    one.write_bytes(PNG)
+    two.write_bytes(second_png)
     md = tmp / "pics.md"
     md.write_text("![](a/pixel.png)\n\n![](b/pixel.png)\n", encoding="utf-8")
     pictures = convert.convert_path(str(md), "preserve")
-    assert pictures.assets["pixel.png"] == b"AAA"
-    assert pictures.assets["pixel-2.png"] == b"BBB"
+    assert pictures.assets["pixel.png"] == PNG
+    assert pictures.assets["pixel-2.png"] == second_png
     assert [block["asset"] for block in pictures.blocks] == ["pixel.png", "pixel-2.png"]
 
     sheet = tmp / "abs.xlsx"
@@ -559,6 +561,58 @@ def test_edges(tmp):
     assert doc.blocks[2]["asset"] == "pixel.png"
     assert doc.blocks[3]["rows"][0][0]["runs"][0]["text"] == "甲 | 乙"
     assert doc.blocks[3]["rows"][0][1]["runs"][0]["text"] == "丙"
+
+
+def test_markdown_formatting(tmp):
+    import docx_fmt
+
+    source = tmp / "staged.md"
+    assets = tmp / "reference pictures"
+    assets.mkdir()
+    (assets / "图片.png").write_bytes(PNG)
+    source.write_text(
+        "# 一级\n\n## 二级\n\n### 三级\n\n"
+        "介绍 **重点**、*例子*、[说明](https://example.org/manual) 与 `样例(foo)...`。\n\n"
+        "2. 第一项\n   - 子项目\n3. 第二项\n\n"
+        "> 第一层引用\n>> 第二层引用\n\n"
+        "```python\nif condition:\n\t 中文(foo)...\n\n    pass\n```\n\n"
+        "| 案例 | **数值** |\n| --- | --- |\n| A | 1 |\n\n"
+        "![样本](图片.png)\n\n![缺图](missing.png)\n\n![网络图](https://example.org/p.png)\n",
+        encoding="utf-8",
+    )
+    draft = tmp / "markdown.docx"
+    warnings = convert.markdown_to_docx(source, draft, reference_dir=assets)
+    assert len(warnings) == 2 and "missing.png" in warnings[0] and "未下载" in warnings[1]
+    rules = json.loads((ROOT / "core" / "rules.json").read_text(encoding="utf-8-sig"))
+    rules["字体嵌入"]["启用"] = False
+    rules["页码"]["启用"] = True
+    result, _ = docx_fmt.process_file(str(draft), rules)
+    ns = {"w": W}
+    with zipfile.ZipFile(result) as z:
+        document = ET.fromstring(z.read("word/document.xml"))
+        links = ET.fromstring(z.read("word/_rels/document.xml.rels"))
+        numbering = ET.fromstring(z.read("word/numbering.xml"))
+        ET.fromstring(z.read("word/styles.xml"))
+        content_types = ET.fromstring(z.read("[Content_Types].xml"))
+        for ref in document.findall(".//w:footerReference", ns):
+            rel_id = ref.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id")
+            footer = next(node for node in links if node.get("Id") == rel_id)
+            path = "word/" + footer.get("Target")
+            assert b" PAGE " in z.read(path)
+            assert any(node.get("PartName") == "/" + path for node in content_types)
+        assert document.findall(".//w:footerReference", ns)
+        levels = [node.get("{%s}val" % W) for node in document.findall(".//w:numPr/w:ilvl", ns)]
+        assert levels[:3] == ["0", "1", "0"]
+        list_ids = [node.get("{%s}val" % W) for node in document.findall(".//w:numPr/w:numId", ns)]
+        assert list_ids[0] == list_ids[2] and list_ids[0] != list_ids[1]
+        assert len({node.get("{%s}numId" % W) for node in numbering.findall("w:num", ns)}) >= 2
+        assert document.find(".//w:tbl", ns) is not None
+        assert any(name.startswith("word/media/") for name in z.namelist())
+        assert any(rel.get("Target") == "https://example.org/manual" and rel.get("TargetMode") == "External" for rel in links)
+        assert any(p.find("w:r/w:tab", ns) is not None and len(p.findall("w:r/w:br", ns)) >= 3
+                   for p in document.findall(".//w:p", ns))
+        strings = [node.text for node in document.findall(".//w:t", ns)]
+        assert " 中文(foo)..." in strings and "样例(foo)..." in strings and "    pass" in strings
 
 
 def write_rich_xlsx(path):
@@ -1017,6 +1071,7 @@ def main():
         test_vertical_merge(tmp)
         test_kept_content(tmp)
         test_edges(tmp)
+        test_markdown_formatting(tmp)
         test_contract(tmp)
         test_keep_fangsong_name(tmp)
         test_xlsx_image_and_merge(tmp)

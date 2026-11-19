@@ -9,10 +9,12 @@ from qt_compat import (
     QTest, QPoint, QPointF, exec_app, delete_qobject, set_color_scheme, quick_style,
     failed_to_start, font_families, QT,
 )
-from templates import CATALOG
+from templates import CATALOG, DEFAULT_TEMPLATE
 from preset_store import PresetStore, normalize, checked, sections, fields, SIZES, BASE
 from appearance import Appearance
 from tutorial import Tutorial
+from inference_draft import InferenceDraft
+import offline_update_ui
 
 ROOT = Path(__file__).resolve().parent
 DATA = data_directory(ROOT)
@@ -107,6 +109,12 @@ class _ClipboardParse(QThread):
 class Bridge(QObject):
     changed = Signal()
     reportReady = Signal(str)
+    inferenceReady = Signal(str, 'QVariantList')
+    auditReady = Signal(str)
+    offlineUpgradeReady = Signal('QVariantMap')
+    offlineUpgradeResult = Signal(bool, str)
+    markdownPreviewReady = Signal('QVariantList', str, bool)
+    tutorialOutputReady = Signal(str)
     batchFinished = Signal(str)
     rulesChanged = Signal()
     libraryChanged = Signal()
@@ -118,6 +126,7 @@ class Bridge(QObject):
     def __init__(self):
         super().__init__()
         self.rows = []
+        self.offline_upgrade_job = None
         self.message = '准备就绪 · 文件仅在本机处理'
         self.running = False
         self.proc = None
@@ -346,18 +355,136 @@ class Bridge(QObject):
     @Slot()
     def inferTemplate(self):
         if self.running:return
-        path,_=QFileDialog.getOpenFileName(None,'选择已排好版的样本文档','','文档 (*.docx *.doc *.wps *.rtf)')
+        path,_=QFileDialog.getOpenFileName(None,'选择已排好版的样本文档','','文档 (*.docx *.dotx *.doc *.wps *.rtf)')
         if path:self.start_tool('infer',path)
+
+    @Slot(str, result=str)
+    def saveInferredTemplate(self, name):
+        try:
+            self.store.save_inferred(name, self.inferenceDraft.rules)
+            self.message = '已保存到我的模板：' + name.strip()
+            self.libraryChanged.emit()
+            self.changed.emit()
+            return ''
+        except (OSError, ValueError) as exc:
+            return str(exc)
     @Slot()
     def environment(self):
         if not self.running:return self.start_tool('environment')
-    def start_tool(self,kind,source=None):
+
+    @Slot()
+    def chooseOfflineUpgrade(self):
+        if self.busy:
+            return
+        package, _ = QFileDialog.getOpenFileName(None, '选择文矩离线升级包', '', '离线升级包 (*.zip)')
+        if package:
+            self.loadOfflineUpgrade(package)
+
+    @Slot(str)
+    def loadOfflineUpgrade(self, package):
+        if self.busy:
+            return
+        self.discardOfflineUpgrade()
+        try:
+            if ROOT.name != '文矩':
+                raise ValueError('请在已解压的文矩便携版中使用离线升级。')
+            self.offline_upgrade_job, summary = offline_update_ui.prepare(ROOT.parent, DATA, package)
+            self.offlineUpgradeReady.emit(summary)
+        except KeyError:
+            self.offlineUpgradeResult.emit(False, '无法识别此 ZIP。请选择与当前系统对应的文矩离线升级包。')
+        except offline_update_ui.PACKAGE_ERRORS as exc:
+            self.offlineUpgradeResult.emit(False, str(exc))
+
+    @Slot()
+    def discardOfflineUpgrade(self):
+        if self.offline_upgrade_job is not None:
+            shutil.rmtree(self.offline_upgrade_job, ignore_errors=True)
+            self.offline_upgrade_job = None
+
+    @Slot(result=bool)
+    def confirmOfflineUpgrade(self):
+        if self.busy or self.offline_upgrade_job is None:
+            return False
+        try:
+            offline_update_ui.launch_worker(ROOT.parent, DATA, self.offline_upgrade_job)
+            self.offline_upgrade_job = None
+            QTimer.singleShot(0, app.quit)
+            return True
+        except (OSError, ValueError, StopIteration) as exc:
+            self.discardOfflineUpgrade()
+            self.offlineUpgradeResult.emit(False, '无法启动离线升级。' + str(exc))
+            return False
+
+    def reportOfflineUpgrade(self):
+        receipt = offline_update_ui.result_file(ROOT.parent, DATA)
+        if not receipt.is_file():
+            return
+        try:
+            message = json.loads(receipt.read_text(encoding='utf-8'))
+            receipt.unlink()
+            self.offlineUpgradeResult.emit(message['ok'], message['message'])
+            job = receipt.parent / message['job']
+            if job.parent == receipt.parent and job.name.startswith('任务-') and not job.is_symlink():
+                QTimer.singleShot(1800, lambda: shutil.rmtree(job, ignore_errors=True))
+        except (OSError, ValueError, KeyError):
+            return
+
+    @Slot()
+    def auditFormatting(self):
+        if self.running:
+            return
+        candidates = [row['path'] for row in self.rows if Path(row['path']).suffix.lower() == '.docx']
+        if len(candidates) == 1:
+            path = candidates[0]
+        else:
+            path, _ = QFileDialog.getOpenFileName(None, '选择要校核的原始文档', '', 'Word 文档 (*.docx)')
+        if path:
+            self.start_tool('audit', path)
+
+    @Slot(int, result=bool)
+    def startTutorialCase(self, index):
+        if self.running:
+            return False
+        try:
+            action, source = tutorial.copy_case(index, DATA/'教学练习')
+            if action == 'markdown':
+                return self.show_markdown_preview(str(source), practice=True)
+            if action == 'audit':
+                self.start_tool('audit', source, self.store.builtins[DEFAULT_TEMPLATE])
+            else:
+                self.start_tool('infer', source)
+            return self.running
+        except (OSError, ValueError) as exc:
+            self.error(exc)
+            return False
+
+    @Slot()
+    def formatTutorialMarkdown(self):
+        if not self.running and getattr(self, 'tutorial_markdown_source', None):
+            self.start_tool('practice-markdown', self.tutorial_markdown_source, self.store.builtins[DEFAULT_TEMPLATE])
+
+    def start_tool(self,kind,source=None,template=None):
         self.task_kind=kind;self.running=True;self.queue=[]
-        jobdir=DATA/'任务'/uuid.uuid4().hex;jobdir.mkdir(parents=True)
-        job={'action':kind,'rules':copy.deepcopy(self.store.rules)}
+        jobdir=self._scratch_dir()
+        job={'action':kind,'rules':copy.deepcopy(self.store.rules),'templateName':self.selectedName}
+        if template:
+            job.update(rules=copy.deepcopy(template['rules']), templateName=template['name'])
+        if kind == 'practice-markdown':
+            self.practice_output_directory = Path(source).parent
+            job['referenceDir'] = str(self.practice_output_directory)
         if source:
-            dst=jobdir/Path(source).name;shutil.copy2(source,dst);job['source']=str(dst)
-        self.message='正在识别样本文档…' if kind=='infer' else '正在检测运行环境和字体…'
+            if kind == 'audit' or Path(source).suffix.lower() in ('.docx', '.dotx'):
+                job['source'] = str(source)
+            else:
+                try:
+                    dst=jobdir/Path(source).name;shutil.copy2(source,dst);job['source']=str(dst)
+                except OSError as exc:
+                    self.running = False
+                    self._drop_scratch()
+                    self.error(exc)
+                    return
+        self.message={'infer':'正在识别样本文档…','audit':'正在按指定规则校核文档…',
+                      'practice-markdown':'正在排版 Markdown 练习…'}.get(kind,'正在检测运行环境和字体…')
         self.launch(jobdir,job);self.changed.emit()
 
     def add(self, paths):
@@ -366,14 +493,14 @@ class Bridge(QObject):
         known = {r['path'] for r in self.rows}
         for p in paths:
             p = str(Path(p).resolve())
-            if p not in known and Path(p).suffix.lower() in ('.docx','.doc','.wps','.rtf','.wenju') and Path(p).is_file():
+            if p not in known and Path(p).suffix.lower() in import_drop.ORGANIZE_SUFFIXES and Path(p).is_file():
                 self.rows.append(dict(path=p, name=Path(p).name, state='等待整理', output='', report='', percent=0))
                 known.add(p)
         self.changed.emit()
 
     @Slot()
     def choose(self):
-        paths, _ = QFileDialog.getOpenFileNames(None, '选择文档', '', '文档 (*.docx *.doc *.wps *.rtf *.wenju)')
+        paths, _ = QFileDialog.getOpenFileNames(None, '选择文档', '', '文档 (*.docx *.doc *.wps *.rtf *.wenju *.md *.markdown)')
         self.add(paths)
 
     def _set_import_progress(self, value):
@@ -476,7 +603,17 @@ class Bridge(QObject):
 
     def _write_row(self, index, dest):
         if not 0 <= index < len(self.rows): raise IndexError('没有这份文档')
-        wenju_api().convert_file(source_document(self.rows[index]['path']), dest)
+        source = self.rows[index]['path']
+        if Path(source).suffix.lower() in import_drop.MARKDOWN_SUFFIXES:
+            import convert
+            api = wenju_api()
+            doc = convert.convert_path(source)
+            if Path(dest).suffix.lower() == '.wenju':
+                api.save(doc, dest)
+            else:
+                api.to_docx(doc, dest)
+        else:
+            wenju_api().convert_file(source_document(source), dest)
         self.rows[index]['output'] = dest
         self.rows[index]['state'] = '已保存 · 点击打开'
         self.message = '已保存 ' + Path(dest).name
@@ -866,6 +1003,11 @@ class Bridge(QObject):
         try:
             self._preview_folder.mkdir(parents=True, exist_ok=True)
             blocks, note = preview_model.present(doc, self._preview_folder, self._display_font, self._preview_charts, self._preview_limit)
+            warnings = (doc.source or {}).get('warnings') or []
+            if warnings:
+                note += '\n' + '\n'.join(warnings[:3])
+                if len(warnings) > 3:
+                    note += '\n另有 %d 条提示，完整内容见整理报告。' % (len(warnings) - 3)
             total = len(getattr(doc, 'blocks', None) or [])
             if total > len(blocks):
                 note += ' 已显示前 %d 块，共 %d 块。继续往下滚动可再加载。' % (self._preview_limit, total)
@@ -910,6 +1052,39 @@ class Bridge(QObject):
             self._base_blocks=[preview_model.hold('还不能预览', message)]
             self._base_note=message
             self._publish_preview()
+
+    @Slot(int, result=bool)
+    def previewMarkdown(self, index):
+        if self.running or not 0 <= index < len(self.rows):
+            return False
+        source = self.rows[index]['path']
+        if Path(source).suffix.lower() not in import_drop.MARKDOWN_SUFFIXES:
+            return False
+        return self.show_markdown_preview(source)
+
+    def show_markdown_preview(self, source, practice=False):
+        try:
+            import convert
+            doc = convert.convert_path(source)
+            folder = DATA/'预览'/uuid.uuid4().hex[:8]
+            folder.mkdir(parents=True, exist_ok=True)
+            limit = 80
+            blocks, note = preview_model.present(doc, folder, self._display_font, limit=limit)
+            if len(doc.blocks) > limit:
+                note += ' 已显示前 %d 块，共 %d 块。' % (limit, len(doc.blocks))
+            warnings = (doc.source or {}).get('warnings') or []
+            if warnings:
+                note += '\n' + '\n'.join(warnings[:3])
+                if len(warnings) > 3:
+                    note += '\n另有 %d 条提示，完整内容见整理报告。' % (len(warnings) - 3)
+            if practice:
+                self.tutorial_markdown_source = source
+                note = '练习模板：无敌公文体。' + note
+            self.markdownPreviewReady.emit(blocks, note, practice)
+            return True
+        except Exception as exc:
+            self.error(exc)
+            return False
 
     def _merge_from_convert(self):
         if self.running: return
@@ -1016,7 +1191,8 @@ class Bridge(QObject):
         try:shutil.copy2(row['path'], source)
         except OSError as exc:
             row['state']='失败：无法读取源文件';row['error']=str(exc);self._drop_scratch();self.changed.emit();QTimer.singleShot(0,self.next_file);return
-        self.launch(jobdir,{'source':str(source), 'rules':self.batch_rules})
+        self.launch(jobdir,{'source':str(source), 'rules':self.batch_rules,
+                            'referenceDir':str(Path(row['path']).parent)})
         self.changed.emit()
 
     def _scratch_dir(self):
@@ -1070,6 +1246,8 @@ class Bridge(QObject):
             self._convert_finish()
             return
         self.running=False;self.error('后台进程启动失败，请检查运行库')
+        if self.task_kind in ('infer', 'audit', 'environment'):
+            self._drop_scratch()
 
     def _finish_merge(self):
         self.progress_timer.stop(); self.running=False
@@ -1106,15 +1284,33 @@ class Bridge(QObject):
             self._apply_convert_result(); return
         if self.task_kind!='process':
             self.progress_timer.stop()
+            if self._poll: self._poll.stop()
             try:
                 result=json.loads(self.result_file.read_text('utf-8'))
                 if not result['ok']:raise ValueError(result['error'])
                 if self.task_kind=='infer':
-                    self.store.rules=normalize(result['rules']);self.store.dirty=True;self.rule_update()
-                    self.reportReady.emit('识别结果已载入当前工作方案，请复核后另存为模板。\n\n'+'\n'.join(result['notes']))
-                else:self.reportReady.emit(result['reportText'])
-                self.message='识别完成，请复核并另存为模板' if self.task_kind=='infer' else '环境检测完成'
+                    self.inferenceDraft.load(normalize(result['rules']))
+                    self.inferenceReady.emit(result['name'], result['review'])
+                    self.message = '识别完成，请复核后保存'
+                elif self.task_kind=='audit':
+                    self.auditReady.emit(result['reportText'])
+                    self.message = '排版校核完成'
+                elif self.task_kind=='practice-markdown':
+                    import convert
+                    produced = Path(result['output'])
+                    output = convert.place_output(self.practice_output_directory, produced.stem, produced.suffix)
+                    shutil.move(str(produced), str(output))
+                    if result.get('report'):
+                        report = Path(result['report'])
+                        target = convert.place_output(output.parent, report.stem, report.suffix)
+                        shutil.move(str(report), str(target))
+                    self.tutorialOutputReady.emit(str(output))
+                    self.message = 'Markdown 练习已生成 Word'
+                else:
+                    self.reportReady.emit(result['reportText'])
+                    self.message = '环境检测完成'
             except Exception as exc:self.error(exc)
+            self._drop_scratch()
             self.running=False;self.proc.deleteLater();self.changed.emit();return
         row = self.rows[self.current]
         try:
@@ -1138,6 +1334,10 @@ class Bridge(QObject):
         self._drop_scratch()
         self.proc.deleteLater()
         self.next_file()
+
+    @Slot(str)
+    def openTutorialOutput(self, path):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     @Slot(int)
     def openFile(self, index):
@@ -1176,6 +1376,11 @@ if sys.platform == 'win32':
     import windows_identity
     windows_identity.initialize()
 app = QApplication(sys.argv)
+upgrade_transaction = ROOT.parent / '.wenju-update-transaction'
+if upgrade_transaction.is_dir() and not (upgrade_transaction / 'done').is_file():
+    from qt_compat import load
+    load()[2].QMessageBox.warning(None, '文矩', '离线升级尚未完成。请关闭此窗口，重新运行离线升级包。')
+    sys.exit(1)
 incoming = [str(Path(arg).resolve()) for arg in sys.argv[1:] if not arg.startswith('--') and Path(arg).is_file()]
 session = None
 if sys.platform == 'win32' and not any(arg.startswith(('--test-', '--capture', '--smoke')) for arg in sys.argv[1:]):
@@ -1203,12 +1408,16 @@ app.setWindowIcon(brand_icon())
 app.setFont(QFont('Microsoft YaHei UI',10))
 appearance=Appearance(DATA,app)
 bridge = Bridge()
+bridge.inferenceDraft = InferenceDraft(bridge)
 engine = QQmlApplicationEngine()
 engine.rootContext().setContextProperty('bridge',bridge)
+engine.rootContext().setContextProperty('inferenceDraft', bridge.inferenceDraft)
 engine.rootContext().setContextProperty('appearance',appearance)
 tutorial = Tutorial(ROOT, app)
 engine.rootContext().setContextProperty('tutorial', tutorial)
 app.aboutToQuit.connect(tutorial.stop)
+app.aboutToQuit.connect(bridge.discardOfflineUpgrade)
+QTimer.singleShot(300, bridge.reportOfflineUpgrade)
 engine.rootContext().setContextProperty('startupAnimation',appearance.showIntro and os.environ.get('WENJU_LOW_POWER')!='1' and not any(a in sys.argv for a in ('--smoke','--capture','--capture-themes','--test-convert-ui','--test-clipboard','--capture-layout')))
 engine.load(QUrl.fromLocalFile(str(ROOT/'Main.qml')))
 if not engine.rootObjects(): sys.exit(1)
@@ -1544,8 +1753,11 @@ if '--smoke' in sys.argv:
         later(wait_inference)
     def wait_inference():
         if bridge.busy:return later(wait_inference)
+        assert bridge.inferenceDraft.rules['正文']['字号']==19
+        assert bridge.inferenceDraft.rules['页码']['左侧字符']=='第 <& '
         assert bridge.store.rules['正文']['字号']==19
-        assert bridge.store.rules['页码']['左侧字符']=='第 <& '
+        assert not bridge.saveInferredTemplate('识别结果测试模板')
+        assert bridge.store.find(bridge.selectedId)['name'] != '识别结果测试模板'
         bridge.environment()
         later(wait_environment)
     def wait_environment():

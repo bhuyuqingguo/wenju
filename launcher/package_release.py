@@ -2,6 +2,7 @@
 from pathlib import Path
 import argparse
 import hashlib
+import json
 from io import BytesIO
 import re
 import shutil
@@ -25,11 +26,18 @@ ENTRY = '打开文矩.sh'
 
 def stage_linux(work):
     app = work / APP
+
+    def copy_launcher(source, dest):
+        if source.suffix == '.sh':
+            dest.write_bytes(source.read_bytes().replace(b'\r\n', b'\n'))
+        else:
+            shutil.copy2(source, dest)
+
     for name in (*app_files.names(ROOT), 'launcher/start-kylin.sh',
                  'launcher/diagnose-kylin.sh', 'launcher/wenju.desktop'):
         dest = app / name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / name, dest)
+        copy_launcher(ROOT / name, dest)
 
     def excluded(_directory, entries):
         return [name for name in entries if name == '__pycache__' or name.endswith('.pyc')
@@ -38,7 +46,7 @@ def stage_linux(work):
     shutil.copytree(ROOT / 'core', app / 'core', ignore=excluded)
     shutil.copytree(ROOT / 'launcher/icons', app / 'launcher/icons')
     shutil.copy2(app / 'launcher/icons/hicolor/256x256/apps/wenju.png', app / '.DirIcon')
-    shutil.copy2(ROOT / 'launcher' / ENTRY, work / ENTRY)
+    copy_launcher(ROOT / 'launcher' / ENTRY, work / ENTRY)
     app_files.require_tree(ROOT, app)
 
 
@@ -84,9 +92,13 @@ def linux_archive(source, work, dest, arch):
 
 
 def verify_tutorial(archive_names):
-    chapters = ('quick', 'templates', 'pagination', 'convert', 'filesize', 'output', 'appearance')
+    chapters = json.loads((ROOT / 'core/tutorial/chapters.json').read_text(encoding='utf-8'))
     expected = {APP + '/tutorial.py', APP + '/core/tutorial/chapters.json'}
-    expected.update(f'{APP}/core/tutorial/{chapter}.wav' for chapter in chapters)
+    expected.update(f"{APP}/core/tutorial/{chapter['id']}.wav" for chapter in chapters)
+    expected.update(f'{APP}/{path.relative_to(ROOT).as_posix()}'
+                    for path in (ROOT / 'core/tutorial/cases').rglob('*') if path.is_file())
+    expected.update(f"{APP}/core/tutorial/cases/{case['directory']}/{case['file']}"
+                    for case in (chapter.get('case') for chapter in chapters) if case)
     missing = expected.difference(archive_names)
     if missing:
         raise ValueError('Release is missing: ' + ', '.join(sorted(missing)))
@@ -106,7 +118,11 @@ def main():
     for source, target in windows.items():
         with zipfile.ZipFile(source, metadata_encoding='gbk') as archive:
             verify_tutorial(archive.namelist())
-            if APP + '/文矩.exe' not in archive.namelist() or archive.testzip() is not None:
+            names = archive.namelist()
+            if ({name.split('/', 1)[0] for name in names} != {APP, '打开文矩.exe'}
+                    or APP + '/文矩.exe' not in names
+                    or archive.read('打开文矩.exe') != archive.read(APP + '/文矩.exe')
+                    or archive.testzip() is not None):
                 raise ValueError(f'Windows ZIP verification failed: {source}')
         dest = OUT / target
         if not dest.exists() or dest.read_bytes() != source.read_bytes():
@@ -122,7 +138,8 @@ def main():
             with tarfile.open(dest, 'r|gz') as archive:
                 names = [item.name for item in archive]
             verify_tutorial(names)
-            if ENTRY not in names or len(names) != len(set(names)):
+            if ({name.split('/', 1)[0] for name in names} != {APP, ENTRY}
+                    or ENTRY not in names or len(names) != len(set(names))):
                 raise ValueError(f'Kylin archive verification failed: {dest}')
             published.append(dest)
     sums = []

@@ -276,6 +276,8 @@ def from_docx(path):
 
 
 def to_docx(doc, path, template=None):
+    import markdown_ooxml
+
     errors = validate(doc)
     if errors:
         raise ValueError("文矩文档无效：%s" % "；".join(errors))
@@ -300,6 +302,7 @@ def to_docx(doc, path, template=None):
     image_rels = []
     extra_files = {}
     extra_overrides = []
+    markdown_layout = markdown_ooxml.Layout()
     chart_seq = 1
     body = ET.Element(q(W, "body"))
     picture_id = 1
@@ -316,10 +319,11 @@ def to_docx(doc, path, template=None):
             open_section = section
         kind = block["type"]
         if kind in ("heading", "paragraph"):
-            _write_paragraph(body, block, styles, style_ids, brush)
+            _write_paragraph(body, block, styles, style_ids, brush, markdown_layout, image_rels, image_start)
             last_p = body[-1]
         elif kind == "table":
-            picture_id = _write_table(body, block, styles, style_ids, brush, doc.assets, image_rels, extra_files, image_start, picture_id)
+            picture_id = _write_table(body, block, styles, style_ids, brush, doc.assets, image_rels, extra_files,
+                                      image_start, picture_id, markdown_layout)
             last_p = None
         elif kind == "image":
             rel_id, used = _place_media(block, doc.assets, image_rels, extra_files, image_start, picture_id)
@@ -368,12 +372,17 @@ def to_docx(doc, path, template=None):
         for index, section in enumerate(sections):
             part_files["word/header%d.xml" % (index + 1)] = _header_xml(section.get("header") or "")
             part_files["word/footer%d.xml" % (index + 1)] = _footer_xml(section.get("footer") or "", _footer_has_page(section, sections))
+    if markdown_layout.lists:
+        extra_files["word/numbering.xml"] = _xml(ET.ElementTree(markdown_layout.numbering()))
+        extra_overrides.append(("/word/numbering.xml",
+                                "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"))
+        image_rels.append(("rId%d" % (image_start + len(image_rels)), "numbering.xml", R + "/numbering"))
     files = {
         "[Content_Types].xml": _content_types(doc.assets, len(sections) if active else 0, extra_overrides, list(extra_files)),
         "_rels/.rels": _package_rels(),
         "docProps/core.xml": _core_xml(doc.title),
         "word/document.xml": _xml(ET.ElementTree(_document_root(body))),
-        "word/styles.xml": _styles_xml(styles, style_ids),
+        "word/styles.xml": _styles_xml(styles, style_ids, markdown_layout),
         "word/_rels/document.xml.rels": _document_rels(image_rels, header_ids if active else None, footer_ids if active else None),
     }
     files.update(part_files)
@@ -2368,7 +2377,7 @@ def _first_size(block):
     return None
 
 
-def _write_paragraph(body, block, styles, style_ids, brush):
+def _write_paragraph(body, block, styles, style_ids, brush, markdown_layout, rels, first_id):
     linked = styles.get(block.get("style") or "", {})
     overlay = _brush_style(block, brush, True) if brush else {}
     geom = {}
@@ -2386,11 +2395,12 @@ def _write_paragraph(body, block, styles, style_ids, brush):
     if block.get("type") == "heading" and not sid:
         sid = "Heading%d" % block["level"]
     _write_ppr(paragraph, sid, geom, block.get("level") if block.get("type") == "heading" else None)
+    markdown_layout.paragraph(paragraph[0], block)
     runs = block.get("runs") or []
     if not runs:
         runs = [{"text": ""}]
     for run in runs:
-        _write_run(paragraph, _effective_run(run, overlay, bool(overlay)))
+        _write_markdown_run(paragraph, _effective_run(run, overlay, bool(overlay)), markdown_layout, rels, first_id)
 
 
 def _write_ppr(paragraph, style_id, geom, level):
@@ -2427,9 +2437,22 @@ def _write_ppr(paragraph, style_id, geom, level):
         ET.SubElement(ppr, q(W, "outlineLvl")).set(q(W, "val"), str(int(level) - 1))
 
 
+def _write_markdown_run(paragraph, run, layout, relationships, first_id):
+    if layout is not None:
+        if run.get("link"):
+            paragraph = layout.link(paragraph, run["link"], relationships, first_id)
+        if run.get("markdown_code"):
+            layout.inline_code = True
+    _write_run(paragraph, run)
+
+
 def _write_run(paragraph, run):
     node = ET.SubElement(paragraph, q(W, "r"))
     rpr = ET.SubElement(node, q(W, "rPr"))
+    if run.get("markdown_code"):
+        from markdown_ooxml import INLINE_CODE, MONOSPACE
+        ET.SubElement(rpr, q(W, "rStyle")).set(q(W, "val"), INLINE_CODE)
+        run = {**run, "ascii": MONOSPACE, "hAnsi": MONOSPACE}
     _fill_rpr(rpr, run, for_run=True)
     if run.get("italic"):
         ET.SubElement(rpr, q(W, "i"))
@@ -2437,9 +2460,15 @@ def _write_run(paragraph, run):
         ET.SubElement(rpr, q(W, "u")).set(q(W, "val"), "single")
     if run.get("color"):
         ET.SubElement(rpr, q(W, "color")).set(q(W, "val"), run["color"])
-    text = ET.SubElement(node, q(W, "t"))
-    text.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-    text.text = run.get("text") or ""
+    value = run.get("text") or ""
+    pieces = re.split(r"([\t\n])", value) if run.get("markdown_code") else [value]
+    for piece in pieces:
+        if piece in ("\t", "\n") and run.get("markdown_code"):
+            ET.SubElement(node, q(W, "tab" if piece == "\t" else "br"))
+        else:
+            text = ET.SubElement(node, q(W, "t"))
+            text.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+            text.text = piece
 
 
 def _place_media(block, assets, image_rels, extra_files, image_start, picture_id):
@@ -2463,7 +2492,7 @@ def _place_media(block, assets, image_rels, extra_files, image_start, picture_id
     return rel_id, picture_id
 
 
-def _write_table(body, block, styles, style_ids, brush, assets=None, image_rels=None, extra_files=None, image_start=1, picture_id=1):
+def _write_table(body, block, styles, style_ids, brush, assets=None, image_rels=None, extra_files=None, image_start=1, picture_id=1, markdown_layout=None):
     table = ET.SubElement(body, q(W, "tbl"))
     grid_pr = ET.SubElement(table, q(W, "tblGrid"))
     width = len(block["rows"][0])
@@ -2504,7 +2533,8 @@ def _write_table(body, block, styles, style_ids, brush, assets=None, image_rels=
             else:
                 for run in runs:
                     cell_overlay = _brush_style({"type": "paragraph", "style": "正文"}, brush, True) if brush else {}
-                    _write_run(paragraph, _effective_run(run, cell_overlay, bool(cell_overlay)))
+                    _write_markdown_run(paragraph, _effective_run(run, cell_overlay, bool(cell_overlay)),
+                                        markdown_layout, image_rels, image_start)
             if not cover and assets is not None and image_rels is not None:
                 for image in cell.get("images") or []:
                     if not isinstance(image, dict) or not image.get("asset"):
@@ -2794,6 +2824,8 @@ def _rel(root, rel_id, rel_type, target):
     node.set("Id", rel_id)
     node.set("Type", rel_type)
     node.set("Target", target)
+    if rel_type == R + "/hyperlink":
+        node.set("TargetMode", "External")
 
 
 def _core_xml(title):
@@ -2802,7 +2834,7 @@ def _core_xml(title):
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 
-def _styles_xml(styles, style_ids):
+def _styles_xml(styles, style_ids, markdown_layout=None):
     root = ET.Element(q(W, "styles"))
     for name, style in styles.items():
         node = ET.SubElement(root, q(W, "style"))
@@ -2814,6 +2846,8 @@ def _styles_xml(styles, style_ids):
         _write_ppr(node, None, style, None)
         rpr = ET.SubElement(node, q(W, "rPr"))
         _fill_rpr(rpr, style, for_run=False)
+    if markdown_layout is not None:
+        markdown_layout.styles(root)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 

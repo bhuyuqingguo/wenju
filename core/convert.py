@@ -11,7 +11,7 @@ from copy import deepcopy
 from pathlib import Path
 
 import image_size
-from wenju_format import WenjuDoc, from_docx, load, save, to_docx
+from wenju_format import WenjuDoc, from_docx, image_kind, load, save, to_docx
 
 SS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 OFFICE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -530,8 +530,27 @@ def _read_txt(path):
 
 
 def _read_md(path):
-    text = _read_text(path)
-    return _document_from_blocks(_markdown_blocks(text, Path(path).parent), Path(path).name)
+    return _markdown_document(path)
+
+
+def _markdown_document(path, reference_dir=None):
+    warnings = []
+    folder = Path(reference_dir) if reference_dir is not None else Path(path).parent
+    doc = _document_from_blocks(_markdown_blocks(_read_text(path), folder, warnings), Path(path).name)
+    doc.source.update(kind="markdown", warnings=warnings)
+    return doc
+
+
+def markdown_to_docx(path, destination, reference_dir=None):
+    """Create the DOCX source for the normal formatting pipeline."""
+    doc = _finish(_markdown_document(path, reference_dir), "preserve", None, None)
+    to_docx(doc, destination)
+    return doc.source["warnings"]
+
+
+def preview_markdown(path):
+    doc = convert_path(path)
+    return {"blocks": doc.blocks, "warnings": doc.source["warnings"]}
 
 
 def _read_text(path):
@@ -546,52 +565,140 @@ def _read_text(path):
     raise ConvertError("无法识别 %s 的编码。请另存为 UTF-8 后再转换。" % Path(path).name)
 
 
-def _markdown_blocks(text, folder):
+_MD_LIST = re.compile(r"^([ \t]*)([-+*]|\d{1,9}[.)])[ \t]+(.+)$")
+_MD_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_MD_INLINE = re.compile(
+    r"\\([^\w\s])|(`+)(.+?)\2"
+    r"|(?<!!)\[([^\[\]\n]+)\]\((<[^>]+>|[^()\s]+)(?:\s+[\"'][^\"']*[\"'])?\)"
+    r"|(?<!\w)(\*\*\*|___|\*\*|__|\*|_)(?=\S)(.+?)(?<=\S)\6"
+)
+
+
+def _markdown_runs(text, markers=None, depth=0):
+    markers = markers or {}
+    if depth >= 8:
+        return [{"text": text, **markers}]
+    runs = []
+    pos = 0
+    for match in _MD_INLINE.finditer(text):
+        if match.start() > pos:
+            runs.append({"text": text[pos:match.start()], **markers})
+        literal, fence, code, label, target, delimiter, styled = match.groups()
+        if literal:
+            runs.append({"text": literal, **markers})
+        elif fence:
+            runs.append({"text": code, "markdown_code": True, **markers})
+        elif target:
+            target = target.strip("<>")
+            if re.match(r"^(?:https?://\S+|mailto:[^\s@]+@\S+)$", target, re.I):
+                runs.extend(_markdown_runs(label, {**markers, "link": target}, depth + 1))
+            else:
+                runs.append({"text": match.group(), **markers})
+        else:
+            style = dict(markers)
+            if len(delimiter) >= 2:
+                style["bold"] = True
+            if len(delimiter) % 2:
+                style["italic"] = True
+            runs.extend(_markdown_runs(styled, style, depth + 1))
+        pos = match.end()
+    if pos < len(text) or not runs:
+        runs.append({"text": text[pos:], **markers})
+    return runs
+
+
+def _markdown_blocks(text, folder, warnings=None):
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     blocks = []
     paragraph = []
     index = 0
-    fenced = False
+    warnings = warnings if warnings is not None else []
+    list_levels = []
+    list_seq = 0
 
     def flush():
         if paragraph:
             body = "\n".join(paragraph).strip("\n")
             if body.strip():
-                blocks.append({"type": "paragraph", "style": "Normal", "runs": [{"text": body}]})
+                blocks.append({"type": "paragraph", "style": "Normal", "runs": _markdown_runs(body)})
             paragraph.clear()
 
     while index < len(lines):
         line = lines[index]
         stripped = line.strip()
-        if stripped.startswith("```"):
-            fenced = not fenced
-            paragraph.append(line)
+        fence = _MD_FENCE.match(line)
+        if fence:
+            flush()
+            list_levels.clear()
+            fence_chars = fence.group(1)
+            start = index
+            content = []
+            index += 1
+            closing = re.compile(r"^ {0,3}" + re.escape(fence_chars[0]) + "{%d,}\\s*$" % len(fence_chars))
+            while index < len(lines) and not closing.fullmatch(lines[index]):
+                content.append(lines[index])
+                index += 1
+            if index == len(lines):
+                warnings.append("第 %d 行：代码围栏未闭合，已保留至文件末尾。" % (start + 1))
+            else:
+                index += 1
+            blocks.append({"type": "paragraph", "style": "Normal", "markdown_kind": "code",
+                           "runs": [{"text": "\n".join(content), "markdown_code": True}]})
+            continue
+        list_match = _MD_LIST.match(line)
+        if list_match:
+            flush()
+            whitespace, marker, body = list_match.groups()
+            indent = len(whitespace.expandtabs(4))
+            ordered = marker[0].isdigit()
+            while list_levels and list_levels[-1]["indent"] > indent:
+                list_levels.pop()
+            if list_levels and list_levels[-1]["indent"] == indent and list_levels[-1]["marker"] != marker[-1]:
+                list_levels.pop()
+            if not list_levels or list_levels[-1]["indent"] != indent:
+                list_seq += 1
+                list_levels.append({"indent": indent, "marker": marker[-1], "id": list_seq,
+                                    "level": min(len(list_levels), 8), "ordered": ordered,
+                                    "start": int(marker[:-1]) if ordered else 1})
+            blocks.append({"type": "paragraph", "style": "Normal", "markdown_kind": "list",
+                           "markdown_list": dict(list_levels[-1]), "runs": _markdown_runs(body)})
             index += 1
             continue
-        if not fenced and stripped in ("<!-- pagebreak -->",):
+        if stripped:
+            list_levels.clear()
+        quote = re.match(r"^ {0,3}((?:>[ \t]*)+)(.*)$", line)
+        if quote:
+            flush()
+            level = min(quote.group(1).count(">"), 8)
+            blocks.append({"type": "paragraph", "style": "Normal", "markdown_kind": "quote",
+                           "markdown_depth": level, "runs": _markdown_runs(quote.group(2))})
+            index += 1
+            continue
+        if stripped == "<!-- pagebreak -->":
             flush()
             blocks.append({"type": "pagebreak"})
             index += 1
             continue
-        if not fenced and stripped in ("[TOC]", "[[TOC]]"):
+        if stripped in ("[TOC]", "[[TOC]]"):
             flush()
             blocks.append({"type": "toc"})
             index += 1
             continue
-        heading = re.match(r"^ {0,3}(#{1,6})\s+(.*)$", line) if not fenced else None
+        heading = re.match(r"^ {0,3}(#{1,6})\s+(.*)$", line)
         if heading:
             flush()
             title = re.sub(r"\s+#+\s*$", "", heading.group(2).strip()).strip()
-            blocks.append({"type": "heading", "level": len(heading.group(1)), "runs": [{"text": title}]})
+            blocks.append({"type": "heading", "level": len(heading.group(1)), "runs": _markdown_runs(title)})
             index += 1
             continue
-        image = re.fullmatch(r"!\[([^\]]*)\]\((.+)\)", stripped) if not fenced else None
+        image = re.fullmatch(r"!\[([^\]]*)\]\((.+)\)", stripped)
         if image:
             flush()
-            blocks.extend(_markdown_image(image.group(1), _markdown_target(image.group(2).strip()), folder))
+            blocks.extend(_markdown_image(image.group(1), _markdown_target(image.group(2).strip()), folder,
+                                           warnings, index + 1))
             index += 1
             continue
-        if not fenced and _looks_like_table(lines, index):
+        if _looks_like_table(lines, index):
             flush()
             table, index = _markdown_table(lines, index)
             blocks.append(table)
@@ -613,15 +720,27 @@ def _markdown_target(body):
     return body.split()[0] if body.split() else body
 
 
-def _markdown_image(alt, target, folder):
-    if re.match(r"^[a-z]+://", target, re.I):
-        return [{"type": "paragraph", "style": "Normal", "runs": [{"text": alt or target}]}]
-    path = Path(target)
+def _markdown_image(alt, target, folder, warnings, line):
+    from urllib.parse import unquote
+    if re.match(r"^[a-z]+://", target, re.I) or target.startswith("//"):
+        warnings.append("第 %d 行：远程图片未下载：%s" % (line, target))
+        run = {"text": "%s（%s）" % (alt, target) if alt else target}
+        if re.match(r"^https?://\S+$", target, re.I):
+            run["link"] = target
+        return [{"type": "paragraph", "style": "Normal", "markdown_kind": "image_notice", "runs": [run]}]
+    path = folder / unquote(target)
     if not path.is_file():
-        path = folder / target
-    if not path.is_file():
-        return [{"type": "paragraph", "style": "Normal", "runs": [{"text": alt or target}]}]
-    payload = path.read_bytes()
+        warnings.append("第 %d 行：找不到图片：%s" % (line, target))
+        return [{"type": "paragraph", "style": "Normal", "markdown_kind": "image_notice",
+                 "runs": [{"text": "[缺失图片：%s%s]" % (alt + " " if alt else "", target)}]}]
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        payload = b""
+    if not image_kind(payload):
+        warnings.append("第 %d 行：图片不可读取或格式不受支持：%s" % (line, target))
+        return [{"type": "paragraph", "style": "Normal", "markdown_kind": "image_notice",
+                 "runs": [{"text": "[无法读取图片：%s%s]" % (alt + " " if alt else "", target)}]}]
     width, height = image_size.display_size(payload)
     return [{"type": "image", "asset": path.name, "w": width, "h": height, "_bytes": payload}]
 
@@ -672,11 +791,11 @@ def _split_row(line):
 def _markdown_table(lines, index):
     header = _split_row(lines[index])
     index += 2
-    rows = [[_cell(text) for text in header]]
+    rows = [[{"runs": _markdown_runs(text)} for text in header]]
     while index < len(lines) and "|" in lines[index] and lines[index].strip():
         values = _split_row(lines[index])
         values += [""] * (len(header) - len(values))
-        rows.append([_cell(text) for text in values[:len(header)]])
+        rows.append([{"runs": _markdown_runs(text)} for text in values[:len(header)]])
         index += 1
     return {"type": "table", "rows": rows, "merges": []}, index
 

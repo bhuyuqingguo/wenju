@@ -122,27 +122,62 @@ def para_fmt(r, pp):
     return out
 
 # ---------------------------------------------------------------- 主识别
-def infer(path, base_rules=None):
+def infer_review(path, base_rules=None):
+    """Infer rules and provide a separate review of the evidence in the sample."""
     with zipfile.ZipFile(path) as z:
-        items = {i.filename: z.read(i.filename) for i in z.infolist()}
-    doc = ET.fromstring(items["word/document.xml"]); sty = ET.fromstring(items["word/styles.xml"])
+        xml_parts = ('word/document.xml', 'word/styles.xml')
+        items = {
+            name: z.read(name) for name in z.namelist()
+            if name in xml_parts or re.fullmatch(r'word/footer\d*\.xml', name)
+        }
+    if 'word/document.xml' not in items:
+        raise ValueError('样本文档缺少正文部件')
+    doc = ET.fromstring(items["word/document.xml"])
+    sty = ET.fromstring(items["word/styles.xml"]) if "word/styles.xml" in items else ET.Element(q('styles'))
     styles = Styles(sty)
     body = doc.find("w:body", NS)
-    R = copy.deepcopy(base_rules) if base_rules else D.normalize_rules(json.load(open(__import__("paths").rules_path(), encoding="utf-8")))
+    if body is None:
+        raise ValueError('样本文档没有正文可供识别')
+    if base_rules is None:
+        with open(__import__("paths").rules_path(), encoding="utf-8-sig") as source:
+            base_rules = json.load(source)
+    R = copy.deepcopy(base_rules)
     R = D.normalize_rules(R)
     R["标题"]["级数"] = 9  # 识别阶段允许全部 9 级，识别后按实际最大级别收敛
     notes = []
+    review = []
+
+    def evidence(section, status, detail, label=None):
+        review.append(dict(section=section, label=label or section, status=status, detail=detail))
 
     # ---- 页面
     sects = list(body.iter(q("sectPr")))
     if sects:
         sp = sects[-1]
-        sz = sp.find("w:pgSz", NS); mar = sp.find("w:pgMar", NS)
+        mar = sp.find("w:pgMar", NS)
         if mar is not None:
             for k, a in (("上边距", "top"), ("下边距", "bottom"), ("左边距", "left"), ("右边距", "right"), ("页眉距", "header"), ("页脚距", "footer")):
                 v = mar.get(q(a))
                 if v: R["页面"][k] = round(abs(int(v)) / 1440 * 2.54, 2)
-        notes.append("页面：页边距取自末节")
+        margins = ('top', 'bottom', 'left', 'right', 'header', 'footer')
+        signatures = {
+            tuple(section.find('w:pgMar', NS).get(q(key)) for key in margins)
+            for section in sects if section.find('w:pgMar', NS) is not None
+        }
+        if len(signatures) > 1:
+            detail = '共 %d 节，检测到 %d 套页边距。拟采用末节的页边距，请复核。' % (len(sects), len(signatures))
+            if mar is None:
+                detail = '共 %d 节，检测到 %d 套页边距，且末节没有明确页边距。保留基础规则。' % (len(sects), len(signatures))
+            evidence('页面', '存在冲突', detail)
+        elif mar is not None:
+            detail = '从末节读取页边距，共 %d 节。纸张方向与分节仍由整理规则决定。' % len(sects)
+            evidence('页面', '已读取', detail)
+        else:
+            detail = '末节未明确页边距，保留基础规则。'
+            evidence('页面', '未识别', detail)
+        notes.append('页面：' + detail)
+    else:
+        evidence('页面', '未识别', '样文没有分节属性，保留基础规则。')
 
     # ---- 分类段落
     fm = D.Formatter(R)
@@ -186,19 +221,26 @@ def infer(path, base_rules=None):
         elif cls == "body" and len(txt) > 8: buckets["body"].append(k)
         prev_img = False
 
-    def dominant(paras):
+    def dominant(paras, section, label=None):
         """多段落取众数格式。"""
-        if not paras: return None, None
+        if not paras:
+            evidence(section, '未识别', '样文没有足够的对应段落，保留该项的基础格式。', label)
+            return None, None
         votes = Counter(); samples = {}
         for p in paras:
             r, pp, sid = effective(styles, p)
-            key = json.dumps({"f": r.get("eastAsia"), "sz": r.get("sz"), "line": pp.get("line"), "rule": pp.get("lineRule"), "jc": pp.get("jc"), "b": r.get("b")}, sort_keys=True)
+            key = (r.get('eastAsia'), r.get('ascii'), tuple(sorted(para_fmt(r, pp).items())))
             votes[key] += 1; samples.setdefault(key, (r, pp))
-        key = votes.most_common(1)[0][0]
+        key, count = votes.most_common(1)[0]
+        if len(votes) > 1:
+            evidence(section, '存在冲突', '共 %d 段，有 %d 套代表格式。拟采用出现 %d 次的格式。'
+                     % (len(paras), len(votes), count), label)
+        else:
+            evidence(section, '推断', '根据 %d 个段落的有效格式推断。' % len(paras), label)
         return samples[key]
 
     # ---- 正文
-    r, pp = dominant(buckets["body"])
+    r, pp = dominant(buckets["body"], '正文')
     if r:
         R["正文"].update(para_fmt(r, pp))
         if r.get("eastAsia"): R["字体"]["正文"] = r["eastAsia"]
@@ -211,17 +253,21 @@ def infer(path, base_rules=None):
     R["标题"]["级数"] = max(1, min(9, max(heads))) if heads else 4
     if heads:
         for lvl, ps in sorted(heads.items()):
-            r, pp = dominant(ps)
             key = D.LEVEL_KEYS[lvl - 1]
+            r, pp = dominant(ps, '标题', key + '标题')
             if r:
                 R["标题"][key].update(para_fmt(r, pp))
                 if r.get("eastAsia"): R["字体"][key + "标题"] = r["eastAsia"]
             fv = Counter(f for f in (fmt_of(D.para_text(p)) for p in ps) if f)
             if fv: R["标题"][key]["格式"] = fv.most_common(1)[0][0]
             notes.append("%s标题：%d 段（%s，%s，格式 %s）" % (key, len(ps), r.get("eastAsia") if r else "-", R["标题"][key].get("字号"), R["标题"][key].get("格式")))
+    for lvl in range(1, max(3, max(heads, default=0)) + 1):
+        if lvl not in heads:
+            evidence('标题', '未识别', '样文未识别到该级标题，保留该级的基础格式。',
+                     D.LEVEL_KEYS[lvl - 1] + '标题')
     # ---- 题注
     caps = buckets["figcap"] + buckets["tabcap"]
-    r, pp = dominant(caps)
+    r, pp = dominant(caps, '题注')
     if r:
         R["题注"].update({k: v for k, v in para_fmt(r, pp).items() if k in ("字号", "加粗", "对齐", "行距类型", "行距值", "段前", "段后")})
         if r.get("eastAsia"): R["字体"]["题注"] = r["eastAsia"]
@@ -231,7 +277,10 @@ def infer(path, base_rules=None):
         r, pp = effective(styles, first_table_cell)[:2]
         R["表格"].update({k: v for k, v in para_fmt(r, pp).items() if k in ("字号", "对齐", "行距类型", "行距值")})
         if r.get("eastAsia"): R["字体"]["表格"] = r["eastAsia"]
-        notes.append("表格：取首张表第二行")
+        notes.append("表格：取首张有文字表格的一个样本单元格")
+        evidence('表格', '推断', '依据首张有文字表格的样本单元格；合并、行高等复杂设置需复核。')
+    else:
+        evidence('表格', '未识别', '样文没有可用的表格文字，保留基础格式。')
     # ---- 封面
     cov = [p for p in buckets["cover"] if D.para_text(p).strip()]
     if cov:
@@ -243,32 +292,23 @@ def infer(path, base_rules=None):
             R["封面"]["落款"].update({k: v for k, v in para_fmt(r2, pp2).items() if k in ("字号", "对齐")})
             if r2.get("eastAsia"): R["字体"]["封面落款"] = r2["eastAsia"]
         notes.append("封面：%d 段（标题 %s %s）" % (len(cov), R["字体"]["封面标题"], R["封面"]["标题"].get("字号")))
+        evidence('封面', '推断', '根据首个分节符之前的 %d 个候选段落推断，请确认这些段落是封面。' % len(cov))
     else:
         R["封面"]["启用"] = False; notes.append("封面：未识别到，已关闭")
+        evidence('封面', '未识别', '未找到封面候选段落，封面规则关闭。')
     # ---- 页码
-    has_pn = False
-    for name, data in items.items():
-        if re.match(r"word/footer\d*\.xml", name) and re.search(r"\bPAGE\b", data.decode("utf-8", "ignore")):
-            has_pn = True
-            x = data.decode("utf-8", "ignore")
-            jc = re.search(r'<w:jc w:val="(\w+)"', x)
-            R["页码"]["位置"] = {"center": "底部居中", "right": "底部右侧", "left": "底部左侧", "both": "底部两端对齐"}.get(jc.group(1) if jc else "center", "底部居中")
-            f = re.search(r'w:ascii="([^"]+)"', x); s = re.search(r'<w:sz w:val="(\d+)"', x)
-            if f: R["页码"]["字体"] = f.group(1)
-            if s: R["页码"]["字号"] = pt_name(int(s.group(1)) / 2)
-            break
-    R["页码"]["启用"] = has_pn
     # Read complete PAGE decoration with XML, including non-w namespace prefixes.
+    page_formats = []
     for name,data in items.items():
         if not re.match(r"word/footer\d*\.xml$",name):continue
         footer=ET.fromstring(data)
         for p in footer.findall('.//w:p',NS):
             children=list(p);start=end=None;format_run=None
             for i,node in enumerate(children):
-                if node.tag==q('fldSimple') and re.search(r'\bPAGE\b',node.get(q('instr'),'')):
+                if node.tag==q('fldSimple') and re.match(r'\s*PAGE\b',node.get(q('instr'),''), re.I):
                     start=end=i;format_run=node.find('w:r',NS);break
                 instr=node.find('w:instrText',NS)
-                if instr is not None and re.search(r'\bPAGE\b',instr.text or ''):
+                if instr is not None and re.match(r'\s*PAGE\b',instr.text or '', re.I):
                     start=i;end=i;format_run=node
                     for j in range(i-1,-1,-1):
                         f=children[j].find('w:fldChar',NS)
@@ -278,7 +318,8 @@ def infer(path, base_rules=None):
                         if f is not None and f.get(q('fldCharType'))=='end':end=j;break
                     break
             if start is None:continue
-            pn=R['页码'];pn['启用']=has_pn=True
+            pn=copy.deepcopy(R['页码'])
+            pn['启用']=True
             pn['左侧字符']=''.join(t.text or '' for c in children[:start] for t in c.iter(q('t')))
             pn['右侧字符']=''.join(t.text or '' for c in children[end+1:] for t in c.iter(q('t')))
             jc=p.find('w:pPr/w:jc',NS)
@@ -291,12 +332,28 @@ def infer(path, base_rules=None):
                     pn['统一字体']=pn['字体']==pn['中文字体']
                 if size is not None:pn['字号']=pt_name(int(size.get(q('val')))/2)
                 pn['字间距']=int(spacing.get(q('val')))/20 if spacing is not None else 0
-            notes.append('页码：已读取左右字符与字符格式；起始位置仍需人工复核')
-            break
-        if has_pn and '左侧字符' in R['页码']:break
+            if pn not in page_formats:
+                page_formats.append(pn)
+    has_pn = bool(page_formats)
+    if has_pn:
+        R['页码'] = page_formats[0]
+        notes.append('页码：已读取左右字符与字符格式；起始位置仍需人工复核')
+    else:
+        R['页码']['启用'] = False
     notes.append("页码：%s" % ("页脚含 PAGE 域，已启用" if has_pn else "未发现页脚页码，已关闭"))
+    if len(page_formats) > 1:
+        evidence('页码', '存在冲突', '检测到 %d 种页码版式，拟采用首个识别结果。请复核起始位置和分节规则。' % len(page_formats))
+    elif has_pn:
+        evidence('页码', '已读取', '从页脚读取 PAGE 域及可获得的格式，页码起始位置和分节规则需复核。')
+    else:
+        evidence('页码', '未识别', '未发现页脚 PAGE 域，页码规则关闭。')
     R["_识别说明"] = "由「%s」反向识别；以下为识别依据，请复核后保存为预设：%s" % (os.path.basename(path), "；".join(notes))
-    return R, notes
+    return R, notes, review
+
+
+def infer(path, base_rules=None):
+    rules, notes, _ = infer_review(path, base_rules)
+    return rules, notes
 
 def main():
     if len(sys.argv) < 2:

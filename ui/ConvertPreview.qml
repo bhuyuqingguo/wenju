@@ -5,6 +5,7 @@ import QtQuick.Layouts
 Item {
     id: root
     property var blocks: []
+    property bool loadMore: true
     property color ink: appearance.palette["#22344a"]
     property color muted: appearance.palette["#7b8899"]
     property color line: appearance.palette["#dce3eb"]
@@ -31,7 +32,7 @@ Item {
         model: root.blocks
         boundsBehavior: Flickable.StopAtBounds
         onContentYChanged: {
-            if (contentHeight > height + 4 && contentY > contentHeight - height - 120)
+            if (root.loadMore && contentHeight > height + 4 && contentY > contentHeight - height - 120)
                 bridge.morePreview()
         }
         ScrollBar.vertical: ScrollBar {
@@ -46,13 +47,14 @@ Item {
             Text {
                 width: row.width
                 visible: row.modelData.kind === "heading" || row.modelData.kind === "paragraph"
-                textFormat: Text.RichText
-                text: "<span style=\"color:" + root.ink + "\">" + (row.modelData.html || "") + "</span>"
-                wrapMode: Text.WordWrap
+                property bool code: row.modelData.markdownKind === "code"
+                textFormat: code ? Text.PlainText : Text.RichText
+                text: code ? row.modelData.text : "<span style=\"color:" + root.ink + "\">" + (row.modelData.html || "") + "</span>"
+                wrapMode: code ? Text.WrapAnywhere : Text.WordWrap
                 color: root.ink
-                font.family: appearance.fontFamily
+                font.family: code ? "monospace" : appearance.fontFamily
                 font.pixelSize: row.modelData.kind === "heading" ? Math.round(16 * appearance.scale) : Math.round(13 * appearance.scale)
-                leftPadding: row.modelData.kind === "heading" ? Math.max(0, (row.modelData.level - 1) * 12) : 0
+                leftPadding: row.modelData.kind === "heading" ? Math.max(0, (row.modelData.level - 1) * 12) : (row.modelData.indent || 0)
                 horizontalAlignment: row.modelData.align === "center" ? Text.AlignHCenter : row.modelData.align === "right" ? Text.AlignRight : Text.AlignLeft
             }
 

@@ -4,7 +4,7 @@ import re,sys,zipfile,struct,zlib
 
 ROOT=Path(__file__).resolve().parent.parent
 OUT=ROOT/'dist';OUT.mkdir(exist_ok=True)
-ARCHIVE=OUT/'文矩_3.4.2_Windows_x64_免NET.zip'
+ARCHIVE=OUT/'文矩_3.4.7_Windows_x64_免NET.zip'
 
 class ChineseZipInfo(zipfile.ZipInfo):
     def _encodeFilenameFlags(self):
@@ -29,8 +29,9 @@ files += [ROOT / name for name in app_files.names(ROOT)]
 files += [p for p in (ROOT/'docs').glob('*.png')]
 assert all(p.is_file() for p in files)
 with zipfile.ZipFile(ARCHIVE,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=6) as z:
-    for p in files:
-        name='文矩/'+p.relative_to(ROOT).as_posix()
+    entries = [('打开文矩.exe', ROOT / '文矩.exe')]
+    entries.extend(('文矩/' + p.relative_to(ROOT).as_posix(), p) for p in files)
+    for name, p in entries:
         info=ChineseZipInfo(name);info.compress_type=zipfile.ZIP_DEFLATED
         # Unicode Path extra field for tools that support it; GBK bytes for old Chinese Windows tools.
         raw=name.encode('gbk');extra=struct.pack('<BI',1,zlib.crc32(raw))+name.encode('utf-8')
@@ -39,6 +40,8 @@ with zipfile.ZipFile(ARCHIVE,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=
 with zipfile.ZipFile(ARCHIVE,metadata_encoding='gbk') as z:
     assert z.testzip() is None
     assert '文矩/文矩.exe' in z.namelist()
+    assert {name.split('/', 1)[0] for name in z.namelist()} == {'打开文矩.exe', '文矩'}
+    assert z.read('打开文矩.exe') == z.read('文矩/文矩.exe')
     assert not any('/工作数据/' in n for n in z.namelist())
 print(ARCHIVE)
 print('Files:',len(files),'Bytes:',ARCHIVE.stat().st_size)

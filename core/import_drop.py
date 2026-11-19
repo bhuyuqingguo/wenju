@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-ORGANIZE_SUFFIXES = ('.docx', '.doc', '.wps', '.rtf', '.wenju')
-CONVERT_SUFFIXES = ORGANIZE_SUFFIXES + ('.xlsx', '.xls', '.txt', '.md', '.markdown')
+MARKDOWN_SUFFIXES = ('.md', '.markdown')
+ORGANIZE_SUFFIXES = ('.docx', '.doc', '.wps', '.rtf', '.wenju') + MARKDOWN_SUFFIXES
+CONVERT_SUFFIXES = ORGANIZE_SUFFIXES + ('.xlsx', '.xls', '.txt')
 TEMPLATE_PROMPT = '已加入文档。请先选择模板，再开始整理。'
 
 

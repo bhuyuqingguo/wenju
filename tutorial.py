@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import shutil
 import sys
+import tempfile
 
 from qt_compat import QObject, Property, QProcess, Signal, Slot, constant_property, process_failed
 
@@ -34,6 +35,20 @@ class Tutorial(QObject):
     def _set_status(self, text):
         self._status = text
         self.statusChanged.emit()
+
+    def copy_case(self, index, destination):
+        if not 0 <= index < len(self._chapters):
+            raise ValueError('未找到教学章节。')
+        case = self._chapters[index].get('case')
+        if not case:
+            raise ValueError('本章没有练习案例。')
+        source = self.directory / 'cases' / case['directory']
+        if not (source / case['file']).is_file():
+            raise ValueError('练习案例缺失，请检查程序是否完整解压。')
+        destination.mkdir(parents=True, exist_ok=True)
+        folder = Path(tempfile.mkdtemp(prefix=case['directory'] + '-', dir=str(destination)))
+        shutil.copytree(source, folder, dirs_exist_ok=True)
+        return case['action'], folder / case['file']
 
     def _audio_error(self, error):
         if process_failed(error):

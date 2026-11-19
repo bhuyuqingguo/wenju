@@ -35,6 +35,7 @@ ApplicationWindow {
     property bool pageEnabled: true
     property bool pageUniform: true
     property bool dropHot: false
+    property bool practiceAudio: false
     property string pendingTemplate: ""
     property int pendingPage: 0
     function syncPage() {
@@ -74,8 +75,142 @@ ApplicationWindow {
         Text {width:600;wrapMode:Text.Wrap;text:bridge.fontNotice;color:win.ink}}
     Dialog {id:closeNotice; anchors.centerIn:parent;width:620;title:"文档正在整理";modal:true;standardButtons:Dialog.Ok
         Label {text:"请等待当前文档完成后再关闭。可先点击「停止后续任务」。"}}
+    Dialog {
+        id: offlineUpgradeDialog
+        objectName: "offlineUpgradeDialog"
+        title: "离线升级"
+        anchors.centerIn: parent
+        width: Math.min(610, win.width - 56)
+        modal: true
+        property var summary: null
+        onClosed: {
+            bridge.discardOfflineUpgrade()
+            summary = null
+        }
+        contentItem: ColumnLayout {
+            spacing: 16
+            Txt {
+                text: offlineUpgradeDialog.summary ? "准备好升级到 " + offlineUpgradeDialog.summary.target : "从本机选择升级包"
+                font.pixelSize: Math.round(22 * appearance.scale)
+                font.weight: Font.DemiBold
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            Txt {
+                text: offlineUpgradeDialog.summary
+                      ? "当前版本 " + offlineUpgradeDialog.summary.current + " · "
+                        + offlineUpgradeDialog.summary.count + " 个文件待更新\n"
+                        + offlineUpgradeDialog.summary.platform + " · " + offlineUpgradeDialog.summary.name
+                      : "选择与本机系统对应的文矩离线升级 ZIP，直接选原文件即可。"
+                color: win.muted
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            Txt {
+                visible: !!offlineUpgradeDialog.summary
+                text: "版本和平台已核对。开始后，文矩会退出并重新打开，个人模板和工作数据会保留。"
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Action { text: "取消"; implicitWidth: 88; onClicked: offlineUpgradeDialog.close() }
+                Action {
+                    text: offlineUpgradeDialog.summary ? "退出并升级" : "选择升级包"
+                    primary: true
+                    enabled: !bridge.busy
+                    onClicked: {
+                        if (offlineUpgradeDialog.summary) {
+                            if (bridge.confirmOfflineUpgrade()) offlineUpgradeDialog.close()
+                        } else bridge.chooseOfflineUpgrade()
+                    }
+                }
+            }
+        }
+    }
+    Dialog {
+        id: offlineUpgradeResult
+        objectName: "offlineUpgradeResult"
+        anchors.centerIn: parent
+        width: Math.min(610, win.width - 56)
+        modal: true
+        standardButtons: Dialog.Ok
+        property string message: ""
+        contentItem: Txt { text: offlineUpgradeResult.message; wrapMode: Text.Wrap }
+    }
     Dialog {id:reportDialog;anchors.centerIn:parent;title:"工作记录与报告";width:720;height:560;modal:true;standardButtons:Dialog.Close
         ScrollView {anchors.fill:parent;TextArea{id:reportText;readOnly:true;wrapMode:TextEdit.Wrap;font.pixelSize:Math.round(13*appearance.scale);selectByMouse:true}}
+    }
+    Dialog {
+        id: auditDialog
+        objectName: "auditDialog"
+        anchors.centerIn: parent
+        title: "排版校核结果"
+        width: Math.min(840, win.width - 48)
+        height: Math.min(620, win.height - 48)
+        modal: true
+        standardButtons: Dialog.Close
+        ScrollView {
+            anchors.fill: parent
+            TextArea {
+                id: auditText
+                readOnly: true
+                selectByMouse: true
+                wrapMode: TextEdit.Wrap
+                font.family: appearance.fontFamily
+                font.pixelSize: Math.round(14 * appearance.scale)
+            }
+        }
+    }
+    Dialog {
+        id: markdownPreview
+        objectName: "markdownPreview"
+        title: "Markdown · 结构预览"
+        anchors.centerIn: parent
+        width: Math.min(840, win.width - 48)
+        height: Math.min(630, win.height - 48)
+        modal: true
+        standardButtons: Dialog.Close
+        property var blocks: []
+        property string note: ""
+        property bool practice: false
+        onClosed: { blocks = []; note = "" }
+        contentItem: ColumnLayout {
+            Txt {
+                text: markdownPreview.note
+                color: win.muted
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            ConvertPreview {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                blocks: markdownPreview.blocks
+                loadMore: false
+            }
+            Action {
+                visible: markdownPreview.practice
+                text: "排版练习"
+                primary: true
+                Layout.alignment: Qt.AlignRight
+                onClicked: { markdownPreview.close(); bridge.formatTutorialMarkdown() }
+            }
+        }
+    }
+    Dialog {
+        id: tutorialOutputDialog
+        objectName: "tutorialOutputDialog"
+        anchors.centerIn: parent
+        title: "Markdown 练习完成"
+        modal: true
+        width: 540
+        standardButtons: Dialog.Close
+        property string outputPath: ""
+        contentItem: ColumnLayout {
+            Txt { text: "Word 已生成，可打开检查列表、图片和代码缩进。"; Layout.fillWidth: true; wrapMode: Text.Wrap }
+            Action { text: "打开练习结果"; primary: true; onClicked: bridge.openTutorialOutput(tutorialOutputDialog.outputPath) }
+        }
     }
     Dialog {
         id: tutorialDialog
@@ -86,7 +221,11 @@ ApplicationWindow {
         title: "使用教学"
         modal: true
         standardButtons: Dialog.Close
-        onClosed: tutorial.stop()
+        property bool takingExercise: false
+        onClosed: {
+            if (!takingExercise) { tutorial.stop(); win.practiceAudio = false }
+            takingExercise = false
+        }
         readonly property var lesson: tutorial.chapters[lessonPicker.currentIndex]
 
         contentItem: ColumnLayout {
@@ -101,6 +240,7 @@ ApplicationWindow {
                     textRole: "title"
                     onActivated: {
                         tutorial.stop()
+                        win.practiceAudio = false
                         lessonScroll.contentItem.contentY = 0
                     }
                 }
@@ -114,7 +254,20 @@ ApplicationWindow {
                 Action {
                     text: "停止"
                     implicitWidth: 78 * appearance.scale
-                    onClicked: tutorial.stop()
+                    onClicked: { tutorial.stop(); win.practiceAudio = false }
+                }
+                Action {
+                    text: "开始语音练习"
+                    visible: !!(tutorialDialog.lesson && tutorialDialog.lesson.case)
+                    enabled: !bridge.busy
+                    implicitWidth: 142 * appearance.scale
+                    onClicked: {
+                        if (!bridge.startTutorialCase(lessonPicker.currentIndex)) return
+                        tutorial.play(lessonPicker.currentIndex)
+                        win.practiceAudio = true
+                        tutorialDialog.takingExercise = true
+                        tutorialDialog.close()
+                    }
                 }
             }
             Txt {
@@ -141,6 +294,13 @@ ApplicationWindow {
                         font.pixelSize: Math.round(22 * appearance.scale)
                         font.weight: Font.DemiBold
                     }
+                    Txt {
+                        width: parent.width
+                        visible: !!(tutorialDialog.lesson && tutorialDialog.lesson.case)
+                        text: visible ? "练习案例 · " + tutorialDialog.lesson.case.file : ""
+                        color: win.muted
+                        wrapMode: Text.Wrap
+                    }
                     Repeater {
                         model: tutorialDialog.lesson ? tutorialDialog.lesson.steps : []
                         delegate: Txt {
@@ -157,7 +317,34 @@ ApplicationWindow {
         }
     }
     Connections {target:bridge
+        function onOfflineUpgradeReady(summary) {
+            offlineUpgradeDialog.summary = summary
+            offlineUpgradeDialog.open()
+        }
+        function onOfflineUpgradeResult(ok, message) {
+            offlineUpgradeResult.title = ok ? "升级完成" : "离线升级提示"
+            offlineUpgradeResult.message = message
+            offlineUpgradeResult.open()
+        }
         function onReportReady(text){reportText.text=text;reportDialog.open();}
+        function onAuditReady(text){auditText.text=text;auditDialog.open();}
+        function onMarkdownPreviewReady(blocks, note, practice){
+            markdownPreview.blocks = blocks
+            markdownPreview.note = note
+            markdownPreview.practice = practice
+            markdownPreview.open()
+        }
+        function onTutorialOutputReady(path) {
+            tutorialOutputDialog.outputPath = path
+            tutorialOutputDialog.open()
+        }
+        function onInferenceReady(name, review){
+            inferReview.review = review
+            inferReview.editing = false
+            inferReview.problem = ""
+            inferredName.text = name.slice(0, 80)
+            inferReview.open()
+        }
         function onRulesChanged(){win.syncPage();}
         function onErrorRaised(text){clipProgress.close();errorText.text=text;errorDialog.open();}
         function onBatchFinished(text){doneText.text=text;doneDialog.open();}
@@ -194,9 +381,89 @@ ApplicationWindow {
         TextArea{id:pathInput;width:600;height:180;placeholderText:"每行一个文档完整路径";selectByMouse:true}
         onAccepted:bridge.addPaths(pathInput.text)
     }
-    Dialog{id:inferConfirm;anchors.centerIn:parent;width:560;title:"识别模板";modal:true;standardButtons:Dialog.Ok|Dialog.Cancel
-        Txt{text:"识别结果将替换当前工作方案。\n如需保留修改，请先另存为模板。"}
-        onAccepted:bridge.inferTemplate()
+    Dialog {
+        id: inferReview
+        objectName: "inferReview"
+        anchors.centerIn: parent
+        width: Math.min(880, win.width - 48)
+        height: Math.min(660, win.height - 48)
+        title: "从样文创建模板"
+        modal: true
+        property var review: []
+        property bool editing: false
+        property string problem: ""
+        Connections {
+            target: inferenceDraft
+            function onError(text) { inferReview.problem = text }
+        }
+        contentItem: ColumnLayout {
+            spacing: 10
+            Txt {
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+                color: win.muted
+                text: "核对识别结果和未识别项目的处理说明，可在保存前调整规则。"
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Action { text: "识别结果"; primary: !inferReview.editing; onClicked: inferReview.editing = false }
+                Action { text: "编辑规则"; primary: inferReview.editing; onClicked: inferReview.editing = true }
+                Item { Layout.fillWidth: true }
+            }
+            StackLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                currentIndex: inferReview.editing ? 1 : 0
+                ListView {
+                    clip: true
+                    spacing: 7
+                    model: inferReview.review
+                    delegate: Rectangle {
+                        required property var modelData
+                        width: ListView.view.width
+                        height: summary.implicitHeight + 20
+                        radius: 7
+                        color: appearance.colors.soft
+                        Txt {
+                            id: summary
+                            x: 12; y: 10
+                            width: parent.width - 24
+                            wrapMode: Text.Wrap
+                            text: modelData.status + " · " + modelData.label + "\n" + modelData.detail
+                        }
+                    }
+                }
+                Advanced { controller: inferenceDraft; editingDraft: true }
+            }
+            Txt {
+                visible: inferReview.problem.length > 0
+                text: inferReview.problem
+                color: win.blue
+                Layout.fillWidth: true
+                wrapMode: Text.Wrap
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                Entry {
+                    id: inferredName
+                    Layout.fillWidth: true
+                    placeholderText: "模板名称"
+                    maximumLength: 80
+                }
+                Action { text: "取消"; implicitWidth: 78; onClicked: inferReview.close() }
+                Action {
+                    text: "保存到我的模板"
+                    primary: true
+                    implicitWidth: 160 * appearance.scale
+                    enabled: inferredName.text.trim().length > 0
+                    onClicked: {
+                        inferredName.forceActiveFocus()
+                        inferReview.problem = bridge.saveInferredTemplate(inferredName.text)
+                        if (!inferReview.problem) inferReview.close()
+                    }
+                }
+            }
+        }
     }
     Dialog{id:clipProgress;objectName:"clipProgress";anchors.centerIn:parent;width:420;title:"正在从剪贴板导入";modal:true;closePolicy:Popup.NoAutoClose
         ColumnLayout{width:380;spacing:12
@@ -215,7 +482,7 @@ ApplicationWindow {
                 Action{text:"导入模板";Layout.fillWidth:true;onClicked:{manageDialog.close();bridge.importTemplates();}}
                 Action{text:"导出当前方案";Layout.fillWidth:true;onClicked:bridge.exportTemplates(false)}
                 Action{text:"导出全部模板";Layout.fillWidth:true;onClicked:bridge.exportTemplates(true)}
-                Action{text:"从文档识别";Layout.fillWidth:true;enabled:!bridge.busy;onClicked:{manageDialog.close();inferConfirm.open();}}
+                Action{text:"从样文创建模板";Layout.fillWidth:true;enabled:!bridge.busy;onClicked:{manageDialog.close();bridge.inferTemplate();}}
                 Action{text:"另存当前方案";Layout.fillWidth:true;onClicked:{manageDialog.close();saveDialog.open();}}
                 Action{text:"删除当前模板";Layout.fillWidth:true;enabled:bridge.personal;onClicked:{manageDialog.close();deleteDialog.open();}}
             }
@@ -292,12 +559,18 @@ ApplicationWindow {
         }
         Column {x:30;anchors.bottom:parent.bottom;anchors.bottomMargin:28;spacing:9
             Row {spacing:7;Rectangle{width:6;height:6;radius:3;color:appearance.palette["#8cbaa8"];anchors.verticalCenter:parent.verticalCenter} Txt{text:"离线运行 · 文档不上传";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale)}}
-            Txt {text:"3.4.2  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
+            Txt {text:"3.4.7  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
             Action {
                 objectName: "openTutorial"
                 text: "使用教学"
                 implicitWidth: 144
                 onClicked: tutorialDialog.open()
+            }
+            Action {
+                text: "停止练习语音"
+                visible: win.practiceAudio
+                implicitWidth: 144
+                onClicked: { tutorial.stop(); win.practiceAudio = false }
             }
         }
     }
@@ -343,7 +616,7 @@ ApplicationWindow {
                 }
                 ColumnLayout {Layout.fillWidth:true;spacing:1
                     Txt {text:"把文档拖到这里导入";font.pixelSize:Math.round(15*appearance.scale);font.weight:Font.DemiBold;Layout.fillWidth:true;elide:Text.ElideRight}
-                    Txt {text:"DOCX / DOC / WPS / RTF / 文矩 · 先选模板再导入";color:muted;font.pixelSize:Math.round(12*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
+                    Txt {text:"DOCX / DOC / WPS / RTF / 文矩 / Markdown";color:muted;font.pixelSize:Math.round(12*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
                 }
                 Action {text:"选择文档";primary:true;onClicked:bridge.choose()}
             }
@@ -353,6 +626,7 @@ ApplicationWindow {
             Action{text:"格式规则";primary:page===3;onClicked:page=3}
             Action{text:"页码设计";primary:page===1;onClicked:page=1}
             Action{text:"外观与皮肤";primary:page===4;onClicked:page=4}
+            Action{text:"离线升级";enabled:!bridge.busy;onClicked:offlineUpgradeDialog.open()}
             Item{Layout.fillWidth:true}
         }
         Item {id:pageArea
@@ -365,6 +639,7 @@ ApplicationWindow {
                         Rectangle {width:38;height:38;radius:8;color:appearance.palette["#f1f4f8"];Txt{anchors.centerIn:parent;text:"Aa";color:blue;font.pixelSize:Math.round(17*appearance.scale)}}
                         Column {spacing:5;Txt{text:win.templateName+(bridge.dirty?" · 已修改":"");font.weight:Font.Medium}Txt{text:"页码："+prefix+"1"+suffix+"  ·  "+pageFont+"  "+pageSize+" 磅";color:muted;font.pixelSize:Math.round(12*appearance.scale)}}
                         Item {Layout.fillWidth:true}
+                        Action {text:"校核格式";implicitWidth:102;enabled:!bridge.busy;onClicked:{win.contentItem.forceActiveFocus();bridge.auditFormatting();}}
                         Action {text:"选择模板";implicitWidth:100;onClicked:page=2}
                         Action {text:"高级设置";implicitWidth:100;onClicked:page=3}
                     }
@@ -394,7 +669,15 @@ ApplicationWindow {
                                         }
                                         MouseArea{anchors.fill:parent;anchors.leftMargin:52;anchors.rightMargin:290;onClicked:bridge.openFile(index)}
                                         Row {anchors.right:parent.right;anchors.rightMargin:8;anchors.verticalCenter:parent.verticalCenter;spacing:6
-                                            Action {text:"存为文矩";implicitWidth:96;implicitHeight:32;enabled:!bridge.busy;onClicked:bridge.saveWenju(index)}
+                                            Action {
+                                                property bool isMarkdown: /\.md$|\.markdown$/i.test(modelData.name)
+                                                text: isMarkdown ? "结构预览" : "存为文矩"
+                                                implicitWidth: 96; implicitHeight: 32; enabled: !bridge.busy
+                                                onClicked: {
+                                                    if (!isMarkdown) bridge.saveWenju(index)
+                                                    else bridge.previewMarkdown(index)
+                                                }
+                                            }
                                             Action {text:"导出DOCX";implicitWidth:108;implicitHeight:32;enabled:!bridge.busy;onClicked:bridge.exportDocx(index)}
                                             Action {text:"报告";implicitWidth:64;implicitHeight:32;visible:!!modelData.output||!!modelData.error;onClicked:bridge.showReport(index)}
                                         }
@@ -568,7 +851,7 @@ ApplicationWindow {
                 RowLayout{Layout.fillWidth:true
                     Txt{text:bridge.selectedName+(bridge.dirty?" · 已修改":"");font.pixelSize:Math.round(14*appearance.scale);color:win.blue;Layout.fillWidth:true;elide:Text.ElideRight}
                     Action{text:"环境检测";implicitWidth:110;enabled:!bridge.busy;onClicked:bridge.environment()}
-                    Action{text:"从文档识别";implicitWidth:125;enabled:!bridge.busy;onClicked:inferConfirm.open()}
+                    Action{text:"从样文创建模板";implicitWidth:152;enabled:!bridge.busy;onClicked:bridge.inferTemplate()}
                 }
                 Advanced{Layout.fillWidth:true;Layout.fillHeight:true;controller:bridge}
                 RowLayout{Layout.fillWidth:true;Txt{text:"内置模板修改后请另存，个人模板可直接保存。";font.pixelSize:Math.round(11*appearance.scale);color:muted}Item{Layout.fillWidth:true}Action{text:"返回整理 →";primary:true;onClicked:{win.contentItem.forceActiveFocus();page=0;}}}

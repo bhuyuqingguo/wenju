@@ -17,7 +17,7 @@ CACHE = Path(os.environ.get('WENJU_WIN7_CACHE', Path.home() / 'AppData/Local/Wen
 WHEEL_DIR = CACHE / 'wheels'
 OUT = ROOT / 'dist'
 STAGE = OUT / 'win7-stage' / '文矩'
-VERSION = '3.4.2'
+VERSION = '3.4.7'
 ARCHIVE = OUT / f'文矩_{VERSION}_Windows7_x64_免安装_测试版.zip'
 
 KEEP_PYD = {
@@ -223,7 +223,7 @@ def write_note(stage):
         适用系统：Windows 7 SP1 64 位，且已通过 KB2533623 或后续系统更新提供安全 DLL 加载接口。
         如果启动报缺少系统组件，请记下完整提示或截图；应用不会安装系统补丁。
         已附带 Python 3.8.10、Qt 5.15 和 VC++／通用 C 运行库。无需安装 .NET，也无需管理员权限运行。
-        请完整解压到固定、可写的目录，双击「文矩.exe」，保留旁边的 runtime、core 和 ui 等文件。
+        请完整解压到固定、可写的目录，双击「打开文矩.exe」，保留同级的「文矩」文件夹。
         默认启用软件渲染和低动效模式，兼顾老显卡与驱动。不要与 Win10/11 版混用 runtime。
         首次启动后可右键文矩任务栏图标固定。如曾固定旧入口，请手动取消旧项后重新固定。
         移动便携目录后，旧固定项仍指向原位置，请从新目录打开并重新固定。
@@ -286,8 +286,9 @@ def assemble():
         ARCHIVE.unlink()
     files = [p for p in STAGE.rglob('*') if p.is_file()]
     with zipfile.ZipFile(ARCHIVE, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as z:
-        for path in files:
-            name = '文矩/' + path.relative_to(STAGE).as_posix()
+        entries = [('打开文矩.exe', STAGE / '文矩.exe')]
+        entries.extend(('文矩/' + path.relative_to(STAGE).as_posix(), path) for path in files)
+        for name, path in entries:
             info = ChineseZipInfo(name)
             info.compress_type = zipfile.ZIP_DEFLATED
             raw = name.encode('gbk')
@@ -295,7 +296,10 @@ def assemble():
             info.extra = struct.pack('<HH', 0x7075, len(extra)) + extra
             z.writestr(info, path.read_bytes())
     with zipfile.ZipFile(ARCHIVE, metadata_encoding='gbk') as z:
-        if '文矩/文矩.exe' not in z.namelist() or z.testzip() is not None:
+        if ({name.split('/', 1)[0] for name in z.namelist()} != {'打开文矩.exe', '文矩'}
+                or '文矩/文矩.exe' not in z.namelist()
+                or z.read('打开文矩.exe') != z.read('文矩/文矩.exe')
+                or z.testzip() is not None):
             raise SystemExit('Windows 7 zip validation failed')
     digest = hashlib.sha256(ARCHIVE.read_bytes()).hexdigest()
     sums = OUT / 'SHA256SUMS-win7.txt'

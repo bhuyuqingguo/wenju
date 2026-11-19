@@ -5,6 +5,7 @@ import QtQuick.Layouts
 Rectangle {
     id: root
     required property var controller
+    property bool editingDraft: false
     color: appearance.colors.surface;radius:12;border.color:appearance.palette["#e0e6ee"]
     Rectangle {width:156;anchors.top:parent.top;anchors.bottom:parent.bottom;radius:12;color:appearance.palette["#edf2f7"]
         ListView {id:sectionList;anchors.fill:parent;anchors.margins:10;clip:true;spacing:3;model:root.controller.ruleSections
@@ -39,8 +40,8 @@ Rectangle {
             }
         }
         RowLayout {Layout.fillWidth:true
-            Text {text:"有效修改自动保留在当前方案；任务使用启动时的规则。";color:appearance.palette["#7b8899"];font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;wrapMode:Text.WordWrap}
-            Button {visible:root.controller.sectionName==="字体嵌入";text:"添加字体目录";onClicked:root.controller.fontDirectory()}
+            Text {text:root.editingDraft?"点击「保存到我的模板」保留本次修改。":"有效修改自动保留在当前方案；任务使用启动时的规则。";color:appearance.palette["#7b8899"];font.pixelSize:Math.round(11*appearance.scale);Layout.fillWidth:true;wrapMode:Text.WordWrap}
+            Button {visible:!root.editingDraft&&root.controller.sectionName==="字体嵌入";text:"添加字体目录";onClicked:root.controller.fontDirectory()}
         }
     }
     Component {id:booleanEditor

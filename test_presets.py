@@ -3,6 +3,7 @@ from pathlib import Path
 import xml.etree.ElementTree as ET
 from preset_store import PresetStore,normalize,BASE,sections,fields,checked
 from worker import execute
+from infer import infer_review
 
 ROOT=Path(__file__).resolve().parent
 def expect_error(fn):
@@ -76,5 +77,30 @@ with tempfile.TemporaryDirectory(prefix='wenju-presets-') as tmp:
     assert inferred['ok'] and inferred['notes'] and inferred['rules']['正文']['字号']==19
     assert inferred['rules']['页码']['左侧字符']=='第 <& '
     assert inferred['rules']['页码']['字间距']==1.25
+    rules, _, review = infer_review(r['output'])
+    assert any(item['section'] == '页码' and item['status'] == '已读取' for item in review)
+    current_before = (d/'data/current.json').read_bytes()
+    saved = s.save_inferred('从样文创建', rules)
+    restarted = PresetStore(d/'data')
+    assert restarted.find(saved)['rules']['正文']['字号'] == 19
+    assert s.selected == personal and restarted.selected == personal
+    assert s.rules == snapshot and (d/'data/current.json').read_bytes() == current_before
+    expect_error(lambda:s.save_inferred('从样文创建', rules))
+
+    mixed = d/'mixed.dotx'
+    with zipfile.ZipFile(mixed, 'w') as z:
+        z.writestr('word/document.xml', (
+            '<w:document xmlns:w="%s"><w:body><w:p><w:pPr><w:sectPr>'
+            '<w:pgMar w:top="1440"/></w:sectPr></w:pPr></w:p>'
+            '<w:sectPr><w:pgMar w:top="2160"/></w:sectPr>'
+            '</w:body></w:document>'
+        ) % ns['w'])
+        z.writestr('word/footer1.xml',
+                   '<w:ftr xmlns:w="%s"><w:p><w:r><w:t>PAGE</w:t></w:r></w:p></w:ftr>' % ns['w'])
+    mixed_rules, _, review = infer_review(mixed)
+    assert mixed_rules['页面']['上边距'] == 3.81
+    assert not mixed_rules['页码']['启用']
+    assert any(item['section'] == '页面' and item['status'] == '存在冲突' for item in review)
+    assert any(item['label'] == '二级标题' and item['status'] == '未识别' for item in review)
     s.delete(personal);assert not s.find(personal) and s.selected=='wudi-official'
-    print('PASS: actual DOCX margins/footer/output suffix, sample inference, template deletion')
+    print('PASS: DOCX formatting, sample inference review, preserving the working preset, and template deletion')
