@@ -61,10 +61,35 @@ exec "$app/runtime/bin/python3" -B -I "$root/update/apply.py" "$root"
 '''
 
 
+def open_zip(file, mode='r', metadata_encoding=None, **kwargs):
+    """Open a zip. Python 3.11+ accepts metadata_encoding; 3.8 decodes cp437 names itself."""
+    if metadata_encoding and sys.version_info >= (3, 11):
+        kwargs['metadata_encoding'] = metadata_encoding
+    archive = zipfile.ZipFile(file, mode, **kwargs)
+    if metadata_encoding and sys.version_info < (3, 11) and 'r' in mode:
+        renamed = []
+        for info in archive.infolist():
+            if info.flag_bits & 0x800:
+                continue
+            try:
+                name = info.filename.encode('cp437').decode(metadata_encoding)
+            except UnicodeError:
+                continue
+            if name != info.filename:
+                renamed.append((info, name))
+        for info, name in renamed:
+            archive.NameToInfo.pop(info.filename, None)
+            # orig_filename stays the cp437 form. ZipFile.open compares the
+            # local header against it; filename is the path extractall writes.
+            info.filename = name
+            archive.NameToInfo[name] = info
+    return archive
+
+
 @contextmanager
 def members(path):
     if path.suffix == '.zip':
-        with zipfile.ZipFile(path, metadata_encoding='gbk') as archive:
+        with open_zip(path, metadata_encoding='gbk') as archive:
             yield ((entry.filename, archive.read(entry), None, None)
                    for entry in archive.infolist() if not entry.is_dir())
     else:

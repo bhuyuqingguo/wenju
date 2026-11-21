@@ -17,6 +17,7 @@ from contextlib import contextmanager
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import app_files
 import package_win7
+from package_update import open_zip
 
 ROOT = app_files.ROOT
 OUT = ROOT / 'dist'
@@ -24,6 +25,18 @@ VERSION = package_win7.VERSION
 ARCHITECTURES = {'arm64': 183, 'x86_64': 62}
 APP = '文矩'
 ENTRY = '打开文矩.sh'
+
+
+def sha256_file(stream):
+    digest = getattr(hashlib, 'file_digest', None)
+    if digest is not None:
+        return digest(stream, 'sha256').hexdigest()
+    total = hashlib.sha256()
+    while True:
+        chunk = stream.read(1024 * 1024)
+        if not chunk:
+            return total.hexdigest()
+        total.update(chunk)
 
 
 def stage_linux(work):
@@ -138,7 +151,7 @@ def main():
     }
     published = []
     for source, target in windows.items():
-        with zipfile.ZipFile(source, metadata_encoding='gbk') as archive:
+        with open_zip(source, metadata_encoding='gbk') as archive:
             verify_tutorial(archive.namelist())
             names = archive.namelist()
             if ({name.split('/', 1)[0] for name in names} != {APP, '打开文矩.exe'}
@@ -167,7 +180,7 @@ def main():
     sums = []
     for path in published:
         with path.open('rb') as stream:
-            checksummed = hashlib.file_digest(stream, 'sha256').hexdigest()
+            checksummed = sha256_file(stream)
         sums.append(f'{checksummed}  {path.name}')
     (OUT / 'SHA256SUMS').write_text('\n'.join(sums) + '\n', encoding='ascii')
     print('\n'.join(sums))

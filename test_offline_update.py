@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent/'launcher'))
 from offline_update import MARKER, apply
-from package_update import build
+from package_update import PortableZipInfo, build, open_zip
 
 
 class OfflineUpgradeTests(unittest.TestCase):
@@ -28,7 +28,7 @@ class OfflineUpgradeTests(unittest.TestCase):
                     if changed:
                         z.writestr(stem+'obsolete.py', b'delete')
             pack = build(archives, home, 'windows-x64', '3.5.0', ['3.4.5','3.4.6'])
-            with zipfile.ZipFile(pack, metadata_encoding='gbk') as z:
+            with open_zip(pack, metadata_encoding='gbk') as z:
                 z.extractall(home/'patch')
             payload = home/'patch/update/update.zip'
             with zipfile.ZipFile(payload) as z:
@@ -64,6 +64,19 @@ class OfflineUpgradeTests(unittest.TestCase):
                 self.assertEqual((app/'runtime/python.exe').read_bytes(), b'original')
                 self.assertFalse((app/'obsolete.py').exists())
                 self.assertEqual((data/'自定义模板.txt').read_bytes(), b'keep')
+
+
+class LegacyZipTests(unittest.TestCase):
+    def test_gbk_names_roundtrip_without_python_311(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'names.zip'
+            with zipfile.ZipFile(path, 'w') as archive:
+                info = PortableZipInfo('文矩/Main.qml')
+                archive.writestr(info, b'ok')
+            with open_zip(path, metadata_encoding='gbk') as archive:
+                self.assertEqual(archive.read('文矩/Main.qml'), b'ok')
+                archive.extractall(Path(d) / 'out')
+            self.assertEqual((Path(d) / 'out' / '文矩' / 'Main.qml').read_bytes(), b'ok')
 
 
 class DeterministicTarTests(unittest.TestCase):

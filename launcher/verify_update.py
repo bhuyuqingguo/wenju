@@ -11,7 +11,7 @@ import tempfile
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from package_update import PLATFORMS, inventory
+from package_update import PLATFORMS, inventory, open_zip
 from offline_update import MINIMUM, version
 
 APP = '文矩'
@@ -38,7 +38,7 @@ def verify_routes(directory, platform, target):
     require(sources and version(sources[0]) == MINIMUM, f'{platform} 缺少 3.4.5 基线归档。')
     patch = directory / f'文矩_{target}_{platform}_离线升级.zip'
     windows = platform.startswith('win')
-    with zipfile.ZipFile(patch, metadata_encoding='gbk' if windows else None) as outer:
+    with open_zip(patch, metadata_encoding='gbk' if windows else None) as outer:
         script = '升级文矩.bat' if windows else '升级文矩.sh'
         require(set(outer.namelist()) == {script, 'update/apply.py', 'update/update.zip'},
                 f'{patch.name} 缺少升级入口或包含额外文件。')
@@ -79,10 +79,10 @@ def verify_routes(directory, platform, target):
 def representative_upgrade(directory, target, patch, baseline):
     with tempfile.TemporaryDirectory(prefix='文矩 升级验收 ') as tmp:
         root = Path(tmp)
-        with zipfile.ZipFile(full_archive(directory, REPRESENTATIVE, baseline),
-                             metadata_encoding='gbk') as base:
+        with open_zip(full_archive(directory, REPRESENTATIVE, baseline),
+                       metadata_encoding='gbk') as base:
             base.extractall(root)
-        with zipfile.ZipFile(patch, metadata_encoding='gbk') as update:
+        with open_zip(patch, metadata_encoding='gbk') as update:
             update.extractall(root)
         data = root / APP / '工作数据'
         data.mkdir(exist_ok=True)
