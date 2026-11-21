@@ -100,7 +100,6 @@ ApplicationWindow {
                 model: bridge.templateFonts
                 ScrollBar.vertical: ScrollBar {}
                 delegate: Rectangle {
-                    required property var modelData
                     width: ListView.view.width - 12; height: 44; radius: 6
                     color: appearance.colors.surface
                     RowLayout {
