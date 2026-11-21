@@ -66,5 +66,25 @@ class OfflineUpgradeTests(unittest.TestCase):
                 self.assertEqual((data/'自定义模板.txt').read_bytes(), b'keep')
 
 
+class DeterministicTarTests(unittest.TestCase):
+    def test_kylin_gzip_mtime_does_not_change_digest(self):
+        import hashlib, io, time
+        from package_release import deterministic_tar_gz
+        def digest(path):
+            with deterministic_tar_gz(path) as tar:
+                info = __import__('tarfile').TarInfo('文矩/runtime/bin/python3')
+                info.type = __import__('tarfile').SYMTYPE
+                info.linkname = 'python3.11'
+                info.mtime = 1700000000
+                info.mode = 0o777
+                tar.addfile(info)
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        with tempfile.TemporaryDirectory() as d:
+            first = digest(Path(d)/'a.tar.gz')
+            time.sleep(2)
+            second = digest(Path(d)/'b.tar.gz')
+        self.assertEqual(first, second)
+
+
 if __name__ == '__main__':
     unittest.main()

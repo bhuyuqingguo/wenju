@@ -86,11 +86,19 @@ def out_dir():
     return data("输出")
 
 def font_dirs(extra=None):
-    """规则里写的相对字体目录：工具目录下的中/英文名 + 用户数据目录下的「字体」。"""
+    """规则里写的相对字体目录，加上用户数据里的「字体」和模板字体下载目录。"""
     out = []
     for d in (extra or ["字体"]):
         out.append(d if os.path.isabs(d) else res(d))
     if not PORTABLE: out.append(data("字体"))
+    # app.py stores OFL packs under data_directory(repo)/开源字体. paths.py lives in core/.
+    try:
+        from platform_support import data_directory
+        managed = os.path.join(str(data_directory(os.path.dirname(HERE))), "开源字体")
+    except OSError:
+        managed = ""
+    if managed and managed not in out:
+        out.append(managed)
     return out
 
 def log_path(name):

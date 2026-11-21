@@ -8,9 +8,11 @@ import re
 import shutil
 import struct
 import sys
+import gzip
 import tarfile
 import tempfile
 import zipfile
+from contextlib import contextmanager
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import app_files
@@ -50,16 +52,36 @@ def stage_linux(work):
     app_files.require_tree(ROOT, app)
 
 
+@contextmanager
+def deterministic_tar_gz(dest):
+    """gzip stores the current time unless mtime is fixed, so two identical trees differ."""
+    raw = open(dest, 'wb')
+    gz = tar = None
+    try:
+        gz = gzip.GzipFile(filename='', mode='wb', fileobj=raw, mtime=0)
+        tar = tarfile.open(fileobj=gz, mode='w')
+        yield tar
+    finally:
+        if tar is not None:
+            tar.close()
+        if gz is not None:
+            gz.close()
+        raw.close()
+
+
 def linux_archive(source, work, dest, arch):
     prefix = APP + '/runtime'
     python_name = prefix + '/bin/python3'
     python_binary = python_name + '.11'
     saw_python = False
     saw_launcher = False
-    with tarfile.open(source, 'r|gz') as original, tarfile.open(dest, 'w:gz') as output:
+    with tarfile.open(source, 'r|gz') as original, deterministic_tar_gz(dest) as output:
         def app_mode(info):
             info.uid, info.gid = 0, 0
             info.uname = info.gname = ''
+            info.mtime = 0
+            for key in ('mtime', 'atime', 'ctime'):
+                info.pax_headers.pop(key, None)
             info.mode = 0o755 if info.isdir() or info.name.endswith('.sh') else 0o644
             return info
 
