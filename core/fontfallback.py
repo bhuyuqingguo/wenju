@@ -45,6 +45,7 @@ LICENSE = {
 }
 
 _INDEX = None
+_MANAGED_ONLY = set()
 
 
 def chain_for(name):
@@ -60,12 +61,16 @@ def per_user_os_fonts():
     """Windows 10 and later can register a font for the current user. Windows 7 cannot."""
     if not sys.platform.startswith('win'):
         return True
-    return sys.getwindowsversion().major >= 10
+    win = sys.getwindowsversion()
+    return win.major > 10 or (win.major == 10 and win.build >= 17763)
 
 
-def optional_font_dirs(root):
+def optional_font_dirs(root, data=None):
     root = Path(root)
-    return [root / '可选字体', root / '字体']
+    if data is None:
+        from platform_support import data_directory
+        data = data_directory(root)
+    return [root / '可选字体', root / '字体', Path(data) / '开源字体' / 'sans', Path(data) / '开源字体' / 'serif']
 
 
 def _index():
@@ -74,8 +79,12 @@ def _index():
         import fontembed
         extra = []
         here = Path(__file__).resolve().parent.parent
-        extra += [str(p) for p in optional_font_dirs(here)]
+        paths = optional_font_dirs(here)
+        extra += [str(p) for p in paths]
+        managed = {str(p) for p in paths[2:]}
         _INDEX = {}
+        public = set()
+        _MANAGED_ONLY.clear()
         for folder in fontembed.font_dirs(extra):
             for dirpath, _, files in os.walk(folder):
                 for fn in files:
@@ -91,7 +100,10 @@ def _index():
                         if not display and fams:
                             display = sorted(fams)[0]
                         for fam in fams:
-                            _INDEX.setdefault(fam.casefold(), display or fam)
+                            key = fam.casefold()
+                            _INDEX.setdefault(key, display or fam)
+                            (_MANAGED_ONLY if folder in managed else public).add(key)
+        _MANAGED_ONLY.difference_update(public)
     return _INDEX
 
 
@@ -100,13 +112,24 @@ def reset_index():
     _INDEX = None
 
 
+def exact_font(name):
+    return bool(_index().get(str(name).strip().casefold()))
+
+
 def choose(name):
     """Return (written_name, found). written_name is what goes into the docx."""
     if not name or not str(name).strip():
         return name, False
     index = _index()
-    for candidate in chain_for(str(name).strip()):
-        hit = index.get(candidate.casefold())
+    from font_library import FAMILIES
+    preferred = str(name).strip()
+    if preferred in FAMILIES.values() and preferred.casefold() in index:
+        return preferred, True
+    for candidate in chain_for(preferred):
+        key = candidate.casefold()
+        if key in _MANAGED_ONLY and key != preferred.casefold():
+            continue
+        hit = index.get(key)
         if hit:
             return hit, True
     return str(name).strip(), False
@@ -173,7 +196,7 @@ def install_user_font(src):
         shutil.copy2(src, dest)
         import winreg
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r'Software\Microsoft\Windows NT\CurrentVersion\Fonts') as key:
-            winreg.SetValueEx(key, src.stem + ' (TrueType)', 0, winreg.REG_SZ, str(dest))
+            winreg.SetValueEx(key, src.stem + (' (OpenType)' if src.suffix.lower() == '.otf' else ' (TrueType)'), 0, winreg.REG_SZ, str(dest))
         reset_index()
         return '已安装到当前用户字体目录'
     if sys.platform.startswith('win'):
@@ -182,18 +205,18 @@ def install_user_font(src):
         shutil.copy2(src, dest_dir / src.name)
         reset_index()
         return 'Windows 7 已复制到「可选字体」。界面会加载该文件；系统字体列表不会出现它。'
-    dest_dir = Path.home() / '.local' / 'share' / 'fonts' / 'wenju'
+    dest_dir = Path(os.environ.get('XDG_DATA_HOME') or Path.home() / '.local' / 'share') / 'fonts' / 'wenju'
     dest_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest_dir / src.name)
     if shutil.which('fc-cache'):
-        subprocess.run(['fc-cache', '-f', str(dest_dir)], check=False)
+        subprocess.run(['fc-cache', '-f', str(dest_dir)], check=True, timeout=30)
     reset_index()
     return '已安装到 ~/.local/share/fonts/wenju'
 
 
-def application_font_files(root):
+def application_font_files(root, data=None):
     files = []
-    for folder in optional_font_dirs(root):
+    for folder in optional_font_dirs(root, data):
         if not folder.is_dir():
             continue
         for path in folder.rglob('*'):

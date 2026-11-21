@@ -17,7 +17,7 @@ CACHE = Path(os.environ.get('WENJU_WIN7_CACHE', Path.home() / 'AppData/Local/Wen
 WHEEL_DIR = CACHE / 'wheels'
 OUT = ROOT / 'dist'
 STAGE = OUT / 'win7-stage' / '文矩'
-VERSION = '3.4.7'
+VERSION = '3.4.8'
 ARCHIVE = OUT / f'文矩_{VERSION}_Windows7_x64_免安装_测试版.zip'
 
 KEEP_PYD = {

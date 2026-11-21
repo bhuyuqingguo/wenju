@@ -69,10 +69,76 @@ ApplicationWindow {
         return ""
     }
     function navOn(p) { return p===3 ? (page===1||page===3||page===4) : page===p }
-    Component.onCompleted: {syncPage();opening.playing=startupAnimation;if(bridge.fontNotice) fontNotice.open();}
+    Component.onCompleted: {syncPage();opening.playing=startupAnimation;}
     onClosing: function(close) { if(bridge.busy) {close.accepted=false; closeNotice.open();} }
-    Dialog {id:fontNotice;anchors.centerIn:parent;width:640;title:"需要安装字体";modal:true;standardButtons:Dialog.Ok
-        Text {width:600;wrapMode:Text.Wrap;text:bridge.fontNotice;color:win.ink}}
+    Dialog {
+        id: fontCenter
+        objectName: "fontCenter"
+        anchors.centerIn: parent
+        width: Math.min(730, win.width - 48)
+        title: "模板字体"
+        modal: true
+        standardButtons: Dialog.Close
+        property string statusText: ""
+        onOpened: statusText = ""
+        Connections {
+            target: bridge
+            function onFontTaskFinished(message) { fontCenter.statusText = message }
+        }
+        ColumnLayout {
+            width: parent.width
+            spacing: 10
+            Txt {text: bridge.selectedName + " · 当前方案";font.weight: Font.DemiBold}
+            Txt {
+                Layout.fillWidth: true; wrapMode: Text.WordWrap; color: win.muted
+                text: "查看模板需要的字体，下载可分发的开源替代，或把字体包带到离线电脑。原有字体和模板不会被覆盖。"
+            }
+            ListView {
+                clip: true
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(220, Math.max(44, count * 44))
+                model: bridge.templateFonts
+                ScrollBar.vertical: ScrollBar {}
+                delegate: Rectangle {
+                    required property var modelData
+                    width: ListView.view.width - 12; height: 44; radius: 6
+                    color: appearance.colors.surface
+                    RowLayout {
+                        anchors.fill: parent; anchors.margins: 8
+                        Txt {text: modelData.name; Layout.fillWidth: true; elide: Text.ElideRight}
+                        Txt {
+                            color: modelData.present ? win.blue : win.muted
+                            text: modelData.present ? "本机可用" :
+                                  !modelData.group ? "缺失 · 请自行提供授权字体" :
+                                  (modelData.ready ? "可选用 · " : "可下载 · ") + modelData.alternative
+                        }
+                    }
+                }
+            }
+            Flow {
+                Layout.fillWidth: true; spacing: 8
+                Action {text:"下载缺失字体的替代";primary:true;enabled:!bridge.busy&&!bridge.fontBusy;onClicked:{fontCenter.statusText="正在连接官方字体源…";bridge.downloadTemplateFonts("")}}
+                Action {text:"下载黑体";enabled:!bridge.busy&&!bridge.fontBusy;onClicked:{fontCenter.statusText="正在下载黑体…";bridge.downloadTemplateFonts("sans")}}
+                Action {text:"下载宋体";enabled:!bridge.busy&&!bridge.fontBusy;onClicked:{fontCenter.statusText="正在下载宋体…";bridge.downloadTemplateFonts("serif")}}
+                Action {text:"应用开源替代";enabled:!bridge.busy&&!bridge.fontBusy&&bridge.managedFonts;onClicked:bridge.applyManagedFonts()}
+            }
+            Flow {
+                Layout.fillWidth: true; spacing: 8
+                Action {text:"导入字体包";enabled:!bridge.busy&&!bridge.fontBusy;onClicked:bridge.importFontPack()}
+                Action {text:"导出字体包";enabled:!bridge.busy&&!bridge.fontBusy&&bridge.managedFonts;onClicked:bridge.exportFontPack()}
+                Action {text:"安装到当前用户";visible:bridge.canInstallFontForUser;enabled:!bridge.busy&&!bridge.fontBusy&&bridge.managedFonts;onClicked:bridge.installManagedFonts()}
+                Action {text:"取消操作";visible:bridge.fontBusy;onClicked:bridge.cancelFontTask()}
+            }
+            ProgressBar {Layout.fillWidth:true;visible:bridge.fontBusy;indeterminate:true}
+            Txt {
+                Layout.fillWidth:true;wrapMode:Text.WordWrap;color:win.muted
+                text: bridge.canInstallFontForUser
+                    ? "文矩可直接使用导入的字体。让 Word / WPS 也能找到字体，请安装到当前用户后重开文档应用。"
+                    : "本系统可在文矩中预览导入的字体。Word / WPS 需要系统中已有该字体，或由管理员安装。"
+            }
+            Txt {Layout.fillWidth:true;wrapMode:Text.Wrap;visible:text!=="";text:fontCenter.statusText;color:win.blue}
+        }
+    }
     Dialog {id:closeNotice; anchors.centerIn:parent;width:620;title:"文档正在整理";modal:true;standardButtons:Dialog.Ok
         Label {text:"请等待当前文档完成后再关闭。可先点击「停止后续任务」。"}}
     Dialog {
@@ -559,7 +625,7 @@ ApplicationWindow {
         }
         Column {x:30;anchors.bottom:parent.bottom;anchors.bottomMargin:28;spacing:9
             Row {spacing:7;Rectangle{width:6;height:6;radius:3;color:appearance.palette["#8cbaa8"];anchors.verticalCenter:parent.verticalCenter} Txt{text:"离线运行 · 文档不上传";color:appearance.palette["#adc1d0"];font.pixelSize:Math.round(11*appearance.scale)}}
-            Txt {text:"3.4.7  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
+            Txt {text:"3.4.8  /  文档格式整理";color:appearance.palette["#738fa6"];font.pixelSize:Math.round(11*appearance.scale)}
             Action {
                 objectName: "openTutorial"
                 text: "使用教学"
@@ -584,6 +650,7 @@ ApplicationWindow {
                 Txt {text:win.titleOf(win.page);font.pixelSize:Math.round(26*appearance.scale);font.weight:Font.DemiBold;Layout.fillWidth:true;elide:Text.ElideRight}
                 Txt {text:win.blurbOf(win.page);color:muted;font.pixelSize:Math.round(13*appearance.scale);Layout.fillWidth:true;elide:Text.ElideRight}
             }
+            Action {visible:page===2||page===0;text:"模板字体";onClicked:fontCenter.open()}
             Action {visible:page===2;text:"管理模板";onClicked:manageDialog.open()}
             Action {visible:page!==2&&page<4;text:page===0?"体验样例":"另存为模板";onClicked:{win.contentItem.forceActiveFocus();if(page===0)bridge.sample();else saveDialog.open();}}
             Action {visible:(page===1||page===3);text:"保存修改";primary:true;enabled:bridge.personal&&bridge.dirty;onClicked:{win.contentItem.forceActiveFocus();bridge.saveTemplate();}}
@@ -626,6 +693,7 @@ ApplicationWindow {
             Action{text:"格式规则";primary:page===3;onClicked:page=3}
             Action{text:"页码设计";primary:page===1;onClicked:page=1}
             Action{text:"外观与皮肤";primary:page===4;onClicked:page=4}
+            Action{text:"模板字体";onClicked:fontCenter.open()}
             Action{text:"离线升级";enabled:!bridge.busy;onClicked:offlineUpgradeDialog.open()}
             Item{Layout.fillWidth:true}
         }

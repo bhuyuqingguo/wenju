@@ -1,3 +1,5 @@
+import subprocess
+import zipfile
 import sys, json, shutil, uuid, os, copy, re, datetime, tempfile
 from pathlib import Path
 from platform_support import data_directory, configure_rendering
@@ -15,6 +17,7 @@ from appearance import Appearance
 from tutorial import Tutorial
 from inference_draft import InferenceDraft
 import offline_update_ui
+import font_library
 
 ROOT = Path(__file__).resolve().parent
 DATA = data_directory(ROOT)
@@ -106,6 +109,42 @@ class _ClipboardParse(QThread):
             self.failed.emit(message or '无法读取剪贴板')
 
 
+class _FontJob(QThread):
+    result = Signal(bool, str)
+
+    def __init__(self, action, value):
+        super().__init__()
+        self.action, self.value = action, value
+
+    def run(self):
+        root = font_library.storage(DATA)
+        try:
+            cancel = self.isInterruptionRequested
+            if self.action == 'download':
+                font_library.download(root, self.value, cancel)
+                message = '已下载。可选用开源替代，也可以导出字体包。'
+            elif self.action == 'import':
+                font_library.import_pack(root, self.value, cancel)
+                message = '离线字体包已导入。'
+            elif self.action == 'system':
+                for group in font_library.FILES:
+                    if font_library.files_on_disk(root, group):
+                        for filename in font_library.FILES[group][1]:
+                            if cancel():
+                                raise InterruptedError('已取消安装。')
+                            if filename.endswith('.otf'):
+                                path = root / group / filename
+                                font_library.verify_local(path, group)
+                                fontfallback.install_user_font(path)
+                message = '已安装到当前用户。请重开 Word 或 WPS。'
+            else:
+                font_library.export_pack(root, self.value, cancel)
+                message = '字体包已导出：' + str(self.value)
+            self.result.emit(True, message)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError, zipfile.BadZipFile) as exc:
+            self.result.emit(False, '字体操作未完成：' + str(exc))
+
+
 class Bridge(QObject):
     changed = Signal()
     reportReady = Signal(str)
@@ -123,9 +162,13 @@ class Bridge(QObject):
     importProgressChanged = Signal()
     clipboardStarted = Signal()
     clipboardFinished = Signal(str)
+    fontsChanged = Signal()
+    fontTaskFinished = Signal(str)
     def __init__(self):
         super().__init__()
         self.rows = []
+        self._font_job = None
+        self._loaded_font_paths = {str(p) for p in fontfallback.application_font_files(ROOT, DATA)}
         self.offline_upgrade_job = None
         self.message = '准备就绪 · 文件仅在本机处理'
         self.running = False
@@ -135,8 +178,8 @@ class Bridge(QObject):
         try: self.settings = json.loads((DATA/'page.json').read_text('utf-8'))
         except (OSError, ValueError): pass
         self.store=PresetStore(DATA)
+        self.rulesChanged.connect(self.fontsChanged.emit)
         self.template_ready=(DATA/'current.json').exists()
-        self.font_notice=fontfallback.guidance(self.store.rules)
         self.section='页面'
         self.task_kind='process'
         self.overall_value=0
@@ -233,16 +276,115 @@ class Bridge(QObject):
                 'pageSummary':page+' · '+p['位置'].replace('底部','') if p['启用'] else page,
                 'marginSummary':'上 '+str(r['页面']['上边距'])+' / 下 '+str(r['页面']['下边距'])+' / 左 '+str(r['页面']['左边距'])+' / 右 '+str(r['页面']['右边距'])+' cm'})
         return rows
-    @constant_property(str)
-    def fontNotice(self): return self.font_notice
+    @Property(bool, notify=fontsChanged)
+    def fontBusy(self):
+        return self._font_job is not None
+
+    def _font_fields(self):
+        for group in ('字体', '页码', '公文', '红头', '封面'):
+            block = self.store.rules.get(group, {})
+            if group != '字体' and not block.get('启用', True):
+                continue
+            for key, val in block.items():
+                if (key != '模式' and not key.startswith('_') and isinstance(val, str) and val.strip()
+                        and (group == '字体' or key.endswith('字体'))):
+                    yield block, key, val
+
+    @Property('QVariantList', notify=fontsChanged)
+    def templateFonts(self):
+        names = sorted({name for _, _, name in self._font_fields()})
+        root = font_library.storage(DATA)
+        out = []
+        for name in names:
+            exact = fontfallback.exact_font(name)
+            group = font_library.font_group(name)
+            ready = bool(group and font_library.files_on_disk(root, group))
+            out.append(dict(name=name, present=exact, group=group, ready=ready,
+                            alternative=font_library.FAMILIES.get(group, '')))
+        return out
+
+    @Property(bool, notify=fontsChanged)
+    def managedFonts(self):
+        return any(font_library.files_on_disk(font_library.storage(DATA), g) for g in font_library.FILES)
+
+    @constant_property(bool)
+    def canInstallFontForUser(self):
+        return fontfallback.per_user_os_fonts()
+
+    def _start_font_job(self, action, value):
+        if self._font_job is not None or self.running:
+            return
+        job = self._font_job = _FontJob(action, value)
+        job.result.connect(self._font_result)
+        job.finished.connect(self._font_finished)
+        self.fontsChanged.emit()
+        job.start()
+
+    @Slot(bool, str)
+    def _font_result(self, ok, message):
+        for path in fontfallback.application_font_files(ROOT, DATA):
+            if str(path) not in self._loaded_font_paths and QFontDatabase.addApplicationFont(str(path)) != -1:
+                self._loaded_font_paths.add(str(path))
+        fontfallback.reset_index()
+        self.fontsChanged.emit()
+        self.rulesChanged.emit()
+        self.libraryChanged.emit()
+        self.fontTaskFinished.emit(message)
+
+    @Slot()
+    def _font_finished(self):
+        job, self._font_job = self._font_job, None
+        if job: job.deleteLater()
+        self.fontsChanged.emit()
+
     @Slot(str)
-    def installFont(self, path):
-        try:
-            self.message = fontfallback.install_user_font(path)
-            self.font_notice = fontfallback.guidance(self.store.rules)
-        except Exception as exc:
-            self.message = '字体未能安装：' + str(exc)
-        self.changed.emit()
+    def downloadTemplateFonts(self, group):
+        groups = ({group} if group in font_library.FILES else
+                  {row['group'] for row in self.templateFonts
+                   if not row['present'] and row['group'] and not row['ready']})
+        if groups:
+            self._start_font_job('download', sorted(groups))
+        else:
+            self.fontTaskFinished.emit('当前模板没有可自动下载的缺失字体。可手动选择思源风格的黑体或宋体。')
+
+    @Slot()
+    def cancelFontTask(self):
+        if self._font_job:
+            self._font_job.requestInterruption()
+
+    @Slot()
+    def installManagedFonts(self):
+        if self.canInstallFontForUser and self.managedFonts:
+            self._start_font_job('system', None)
+
+    @Slot()
+    def importFontPack(self):
+        path, _ = QFileDialog.getOpenFileName(None, '选择文矩字体包', '', '文矩字体包 (*.zip)')
+        if path:
+            self._start_font_job('import', path)
+
+    @Slot()
+    def exportFontPack(self):
+        path, _ = QFileDialog.getSaveFileName(None, '导出文矩字体包', '文矩_离线字体包.zip', '文矩字体包 (*.zip)')
+        if path:
+            self._start_font_job('export', path if path.lower().endswith('.zip') else path + '.zip')
+
+    @Slot()
+    def applyManagedFonts(self):
+        if self.fontBusy or self.running:
+            return
+        root = font_library.storage(DATA)
+        updated = 0
+        for block, key, name in self._font_fields():
+            group = font_library.font_group(name)
+            if not fontfallback.exact_font(name) and group and font_library.files_on_disk(root, group):
+                block[key] = font_library.FAMILIES[group]
+                updated += 1
+        if updated:
+            self.store.dirty = True
+            self.rule_update()
+        self.fontTaskFinished.emit(f'已替换 {updated} 项缺失的字体规则。需要重复使用时，请另存为模板。' if updated else '没有可替换的缺失字体。')
+
     @Property(str,notify=rulesChanged)
     def selectedId(self):return self.store.selected
     @Property(str,notify=rulesChanged)
@@ -266,7 +408,7 @@ class Bridge(QObject):
             if row['kind']=='choice' and row['editable'] and not row['path'].endswith('.字号'):
                 row['values']=list(dict.fromkeys(row['values']+font_families()));row['labels']=row['values']
         return rows
-    @constant_property('QStringList')
+    @Property('QStringList', notify=fontsChanged)
     def fontNames(self):return list(dict.fromkeys(['宋体','仿宋','黑体','楷体','Times New Roman','Arial']+font_families()))
     @Slot(str, result=str)
     def paintFont(self, name):
@@ -566,6 +708,9 @@ class Bridge(QObject):
         self.error(message or '无法读取剪贴板')
 
     def _stop_background(self):
+        if self._font_job and self._font_job.isRunning():
+            self._font_job.requestInterruption()
+            self._font_job.wait()
         thread = self._clip_thread
         if thread is not None and thread.isRunning():
             thread.wait()
@@ -1399,7 +1544,7 @@ palette=QPalette()
 for role,color in [(QPalette.Window,'#f4f6f9'),(QPalette.WindowText,'#22344a'),(QPalette.Base,'#f9fafc'),(QPalette.Text,'#22344a'),(QPalette.Button,'#ffffff'),(QPalette.ButtonText,'#22344a'),(QPalette.Highlight,'#245a83'),(QPalette.HighlightedText,'#ffffff')]:
     palette.setColor(role,QColor(color))
 app.setPalette(palette)
-for font_file in fontfallback.application_font_files(ROOT):
+for font_file in fontfallback.application_font_files(ROOT, DATA):
     QFontDatabase.addApplicationFont(str(font_file))
 fontfallback.reset_index()
 app.setApplicationName('wenju')
@@ -1767,6 +1912,27 @@ if '--smoke' in sys.argv:
         app.quit()
     later(begin_test,700)
     QTimer.singleShot(60000,lambda:app.exit(2))
+if '--smoke-font-library' in sys.argv:
+    def verify_font_center():
+        try:
+            center = window.findChild(QObject, 'fontCenter')
+            assert center is not None and bridge.templateFonts
+            assert QMetaObject.invokeMethod(center, 'open')
+            assert center.property('visible')
+            chapter = next(i for i, row in enumerate(tutorial.chapters) if row['id'] == 'font-library')
+            tutorial.play(chapter)
+            assert not tutorial.status, tutorial.status
+            QTimer.singleShot(350, stop_font_lesson)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            app.exit(1)
+    def stop_font_lesson():
+        tutorial.stop()
+        print('PASS: font center opens and font lesson audio starts and stops', flush=True)
+        app.quit()
+    QTimer.singleShot(800, verify_font_center)
+    QTimer.singleShot(15000, lambda: app.exit(2))
 if '--smoke-startup' in sys.argv:
     def verify_startup():
         if not window.isVisible():
