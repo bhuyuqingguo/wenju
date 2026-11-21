@@ -8,13 +8,16 @@ import re
 import shutil
 import struct
 import sys
+import gzip
 import tarfile
 import tempfile
 import zipfile
+from contextlib import contextmanager
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import app_files
 import package_win7
+from package_update import open_zip
 
 ROOT = app_files.ROOT
 OUT = ROOT / 'dist'
@@ -22,6 +25,18 @@ VERSION = package_win7.VERSION
 ARCHITECTURES = {'arm64': 183, 'x86_64': 62}
 APP = '文矩'
 ENTRY = '打开文矩.sh'
+
+
+def sha256_file(stream):
+    digest = getattr(hashlib, 'file_digest', None)
+    if digest is not None:
+        return digest(stream, 'sha256').hexdigest()
+    total = hashlib.sha256()
+    while True:
+        chunk = stream.read(1024 * 1024)
+        if not chunk:
+            return total.hexdigest()
+        total.update(chunk)
 
 
 def stage_linux(work):
@@ -50,16 +65,36 @@ def stage_linux(work):
     app_files.require_tree(ROOT, app)
 
 
+@contextmanager
+def deterministic_tar_gz(dest):
+    """gzip stores the current time unless mtime is fixed, so two identical trees differ."""
+    raw = open(dest, 'wb')
+    gz = tar = None
+    try:
+        gz = gzip.GzipFile(filename='', mode='wb', fileobj=raw, mtime=0)
+        tar = tarfile.open(fileobj=gz, mode='w')
+        yield tar
+    finally:
+        if tar is not None:
+            tar.close()
+        if gz is not None:
+            gz.close()
+        raw.close()
+
+
 def linux_archive(source, work, dest, arch):
     prefix = APP + '/runtime'
     python_name = prefix + '/bin/python3'
     python_binary = python_name + '.11'
     saw_python = False
     saw_launcher = False
-    with tarfile.open(source, 'r|gz') as original, tarfile.open(dest, 'w:gz') as output:
+    with tarfile.open(source, 'r|gz') as original, deterministic_tar_gz(dest) as output:
         def app_mode(info):
             info.uid, info.gid = 0, 0
             info.uname = info.gname = ''
+            info.mtime = 0
+            for key in ('mtime', 'atime', 'ctime'):
+                info.pax_headers.pop(key, None)
             info.mode = 0o755 if info.isdir() or info.name.endswith('.sh') else 0o644
             return info
 
@@ -116,7 +151,7 @@ def main():
     }
     published = []
     for source, target in windows.items():
-        with zipfile.ZipFile(source, metadata_encoding='gbk') as archive:
+        with open_zip(source, metadata_encoding='gbk') as archive:
             verify_tutorial(archive.namelist())
             names = archive.namelist()
             if ({name.split('/', 1)[0] for name in names} != {APP, '打开文矩.exe'}
@@ -145,7 +180,7 @@ def main():
     sums = []
     for path in published:
         with path.open('rb') as stream:
-            checksummed = hashlib.file_digest(stream, 'sha256').hexdigest()
+            checksummed = sha256_file(stream)
         sums.append(f'{checksummed}  {path.name}')
     (OUT / 'SHA256SUMS').write_text('\n'.join(sums) + '\n', encoding='ascii')
     print('\n'.join(sums))

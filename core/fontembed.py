@@ -106,7 +106,7 @@ def index_fonts(dirs):
     for d in dirs:
         for root, _, files in os.walk(d):
             for fn in files:
-                if not fn.lower().endswith((".ttf", ".ttc")): continue
+                if not fn.lower().endswith((".ttf", ".ttc", ".otf")): continue
                 p = os.path.join(root, fn)
                 try:
                     for fi, fams, sub, b, i in font_faces(p):

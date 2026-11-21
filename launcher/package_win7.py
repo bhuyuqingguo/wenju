@@ -295,7 +295,8 @@ def assemble():
             extra = struct.pack('<BI', 1, zlib.crc32(raw)) + name.encode('utf-8')
             info.extra = struct.pack('<HH', 0x7075, len(extra)) + extra
             z.writestr(info, path.read_bytes())
-    with zipfile.ZipFile(ARCHIVE, metadata_encoding='gbk') as z:
+    from package_update import open_zip
+    with open_zip(ARCHIVE, metadata_encoding='gbk') as z:
         if ({name.split('/', 1)[0] for name in z.namelist()} != {'打开文矩.exe', '文矩'}
                 or '文矩/文矩.exe' not in z.namelist()
                 or z.read('打开文矩.exe') != z.read('文矩/文矩.exe')

@@ -18,6 +18,7 @@ def include(p):
 
 sys.path.insert(0, str(ROOT / 'launcher'))
 import app_files
+from package_update import open_zip
 from pe_imports import require_native_launcher
 from check_icons import check_exe
 require_native_launcher(ROOT / "文矩.exe")
@@ -37,7 +38,7 @@ with zipfile.ZipFile(ARCHIVE,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=
         raw=name.encode('gbk');extra=struct.pack('<BI',1,zlib.crc32(raw))+name.encode('utf-8')
         info.extra=struct.pack('<HH',0x7075,len(extra))+extra
         z.writestr(info,p.read_bytes())
-with zipfile.ZipFile(ARCHIVE,metadata_encoding='gbk') as z:
+with open_zip(ARCHIVE, metadata_encoding='gbk') as z:
     assert z.testzip() is None
     assert '文矩/文矩.exe' in z.namelist()
     assert {name.split('/', 1)[0] for name in z.namelist()} == {'打开文矩.exe', '文矩'}
